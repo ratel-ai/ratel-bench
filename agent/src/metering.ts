@@ -8,7 +8,7 @@ import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js"
 
 // Resolve the installed SDK version once. Used as the `ratel_version` row
 // dimension and (downstream) cache-key component, so a campaign run is
-// "ratel v0.1.4 ran on this corpus" rather than "whatever was on the tree".
+// "ratel v0.1.5 ran on this corpus" rather than "whatever was on the tree".
 export const SDK_VERSION: string = (() => {
   const requirePkg = createRequire(import.meta.url);
   const pkg = requirePkg("@ratel-ai/sdk/package.json") as { version: string };

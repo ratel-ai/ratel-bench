@@ -2,7 +2,7 @@
 
 Two-layer benchmark harness for [**Ratel**](https://github.com/ratel-ai/ratel) — measures retrieval quality and agent-loop token savings. Backs every "Ratel does X better" claim. New product features that touch retrieval or context shape are expected to add a corresponding scenario before being declared done.
 
-This repo is intentionally decoupled from the Ratel monorepo: the agent campaign pins `@ratel-ai/sdk@0.1.4` from npm and the retrieval crate pins `ratel-ai-core@0.1.4` from crates.io, so the harness measures the same artifacts users install — not whatever's on the working tree.
+This repo is intentionally decoupled from the Ratel monorepo: the agent campaign pins `@ratel-ai/sdk@0.1.5` from npm and the retrieval crate pins `ratel-ai-core@0.1.5` from crates.io, so the harness measures the same artifacts users install — not whatever's on the working tree.
 
 **Latest results: [`RESULTS.md`](RESULTS.md)** — narrative breakdown across Claude (Sonnet, Opus), `glm-5.1:cloud`, and local `qwen3.5`.
 

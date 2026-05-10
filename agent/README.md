@@ -101,7 +101,7 @@ Resumable — re-runs skip cells already in `agent.jsonl` unless `--force`. Pass
 
 ## Pinned `@ratel-ai/sdk` version
 
-The benchmark consumes `@ratel-ai/sdk` from the npm registry at a version pinned in `agent/package.json` (currently `0.1.4`). The resolved version is stamped on every JSONL row as `ratel_version` and rendered in the report header. To benchmark a new ratel release: bump the pinned version, `pnpm install`, re-run. The previous-version JSONL keeps its rows — they're keyed by version, so they neither collide with nor satisfy the new run.
+The benchmark consumes `@ratel-ai/sdk` from the npm registry at a version pinned in `agent/package.json` (currently `0.1.5`). The resolved version is stamped on every JSONL row as `ratel_version` and rendered in the report header. To benchmark a new ratel release: bump the pinned version, `pnpm install`, re-run. The previous-version JSONL keeps its rows — they're keyed by version, so they neither collide with nor satisfy the new run.
 
 Edits to the upstream SDK in [`ratel-ai/ratel`](https://github.com/ratel-ai/ratel) therefore **don't** flow into the benchmark unless and until they're published. This is deliberate: we want the campaign to measure the same artifact users install, not whatever's on the working tree.
 
@@ -113,7 +113,7 @@ Edits to the upstream SDK in [`ratel-ai/ratel`](https://github.com/ratel-ai/rate
 - **Ephemeral runs** (`--ephemeral`): the canonical `agent.jsonl` is opened read-only at start. For each scheduled cell, if its key is in the cache, the cached row is copied verbatim into the ephemeral output and the live agent loop is skipped. Ratel arms (`ratel-full` / `ratel-pre-discovery` / `ratel-discovery-tool`) still run live every time — that's the point of an ephemeral iteration.
 - **`--force`** disables the cache (and truncates the output file in non-ephemeral mode), so the campaign always re-pays.
 
-A run-start stderr line summarizes the hit count: `cache: 47 control cells reused from <path> (ratel 0.1.4), 153 will run`.
+A run-start stderr line summarizes the hit count: `cache: 47 control cells reused from <path> (ratel 0.1.5), 153 will run`.
 
 The `--output` cell summary at the end now reports `<run> cells run, <cached> cached, <skipped> skipped`.
 

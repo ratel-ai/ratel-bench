@@ -106,7 +106,7 @@ export interface RunnerConfig {
   /**
    * `@ratel-ai/sdk` version this campaign is measuring. Embedded in every
    * row's `ratel_version` field and used as a cache-key dimension so a row
-   * written under v0.1.4 never satisfies a v0.1.5 request. Defaults to the
+   * written under v0.1.5 never satisfies a v0.1.6 request. Defaults to the
    * resolved SDK version at module-load time; tests override.
    */
   ratelVersion?: string;

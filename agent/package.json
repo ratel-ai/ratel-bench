@@ -15,7 +15,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^2.0.0",
     "@ai-sdk/openai": "^3.0.0",
-    "@ratel-ai/sdk": "npm:@ratel-ai/sdk@0.1.4",
+    "@ratel-ai/sdk": "npm:@ratel-ai/sdk@0.1.5",
     "ai": "^6.0.0",
     "dotenv": "^16.4.0",
     "zod": "^3.24.0"
