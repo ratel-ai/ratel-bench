@@ -1,0 +1,43 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# TypeScript
+*.tsbuildinfo
+agent/dist/
+
+# Logs
+*.log
+
+# Local scratch
+plan.md
+progress.md
+CLAUDE.local.md
+
+# Claude Code — personal/runtime; commit .claude/skills and .claude/settings.json
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Benchmark outputs (per ADR-0007: corpus and results are not snapshotted)
+results/
+fixtures/
+test-data/
+agent/results/
