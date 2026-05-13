@@ -64,69 +64,59 @@ The Ratel arm reported in these tables is `ratel-discovery-tool` (gateway only �
 
 #### `claude-sonnet-4-6`
 
-| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | wall time (ctrl → ratel) |
-|---|---|---|---|---|---|
-| 50  | 83.3% | 66.7% | -16.6 pp | 5 562 → 3 602 (-35%)      | 12.3s → 14.9s |
-| 100 | 82.2% | 66.7% | -15.5 pp | 9 920 → 3 580 (**-64%**)  | 12.6s → 14.8s |
-| 180 | 81.1% | 67.8% | -13.3 pp | 17 008 → 3 641 (**-79%**) | 13.0s → 15.0s |
+| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | $ (ctrl → ratel) | wall time (ctrl → ratel) |
+|---|---|---|---|---|---|---|
+| 50  | 83.3% | 66.7% | -16.6 pp | 5 562 → 3 602 (-35%)      | $0.026 → $0.022 (-17%)     | 12.3s → 14.9s |
+| 100 | 82.2% | 66.7% | -15.5 pp | 9 920 → 3 580 (**-64%**)  | $0.039 → $0.022 (**-44%**) | 12.6s → 14.8s |
+| 180 | 81.1% | 67.8% | -13.3 pp | 17 008 → 3 641 (**-79%**) | $0.060 → $0.022 (**-64%**) | 13.0s → 15.0s |
 
 control-oracle (upper bound): **90.0%**.
 
-#### What's behind the Sonnet gap?
-
-The gap is not the agent loop — it's **discovery / retrieval**. In the failure taxonomy, Ratel arms accumulate **"missing gold"** rows: cases where the BM25 retriever didn't surface the right tool in the candidate window. With perfect retrieval (oracle = 90%), the agent itself is fine — the bottleneck is upstream of the model.
-
-This is a tractable problem: the discovery layer is currently BM25-only, and the v1 line is still on the keyword retriever. Hybrid / semantic retrieval is the next milestone, and is expected to recover most of the gap on Claude models while preserving the token savings.
-
-#### Why this is still a strong story for Claude
-
-The trade-off Ratel offers a Claude user **today** is:
-
-> "Pay -13 pp pass rate (Sonnet pool=180) — get **-79% input tokens and pool-size-invariant cost**."
-
-For agent platforms running 100s of MCP tools, the cost difference between feeding 17 000 input tokens per turn vs. 3 600 dominates the economics. And the trade-off goes the other way — Ratel's performance drops as the pool *shrinks*. Below ~30 tools you should not use Ratel: the baseline already fits cleanly in the prompt.
+Sonnet 4.6 is the strongest fat-context selector in the family (highest baseline) and pays the largest Ratel hit. At pool=180 the residual failures break down as **31% missing-gold** (the agent's `search_tools` queries never surfaced the gold tool) plus **9% selection error** (gold *was* in the candidate set, model picked wrong) — so the gap is mostly an upstream-retrieval problem, with a small but real selection tax on top. Hybrid / semantic retrieval is the planned next step against the missing-gold component. The trade-off Sonnet users get today: **-13 pp pass rate at pool=180 in exchange for -79% input tokens and -64% dollars, pool-size-invariant**.
 
 #### `claude-opus-4-6`
 
-| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | wall time (ctrl → ratel) |
-|---|---|---|---|---|---|
-| 50  | 71.7% | 71.7%     | ±0 pp        | 5 202 → 4 223 (-19%)       | 12.3s → 18.8s |
-| 100 | 70.0% | **73.3%** | **+3.3 pp**  | 9 230 → 4 313 (**-53%**)   | 12.5s → 18.6s |
-| 180 | 71.7% | 70.0%     | -1.7 pp      | 16 322 → 4 497 (**-72%**)  | 12.6s → 19.1s |
+| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | $ (ctrl → ratel) | wall time (ctrl → ratel) |
+|---|---|---|---|---|---|---|
+| 50  | 71.7% | 71.7%     | ±0 pp        | 5 202 → 4 223 (-19%)       | $0.038 → $0.040 (+4%)      | 12.3s → 18.8s |
+| 100 | 70.0% | **73.3%** | **+3.3 pp**  | 9 230 → 4 313 (**-53%**)   | $0.058 → $0.040 (**-30%**) | 12.5s → 18.6s |
+| 180 | 71.7% | 70.0%     | -1.7 pp      | 16 322 → 4 497 (**-72%**)  | $0.093 → $0.041 (**-56%**) | 12.6s → 19.1s |
 
 control-oracle (upper bound): **90.0%**.
 
-Opus 4.6 is the clean Ratel case among the Claude family: `ratel-discovery-tool` tracks baseline within ±3 pp at every pool size while cutting input tokens **-19% to -72%**. The oracle sits 18 pp above baseline at pool=180, so the headroom for upstream-retrieval improvements remains the largest in the suite. **Anthropic's [tool-search-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool)** comparison on the same scenarios (n=90 per cell):
+Opus 4.6 is the clean Ratel case among the Claude family: `ratel-discovery-tool` tracks baseline within ±3 pp at every pool size while cutting input tokens **-19% to -72%** and dollars up to **-56% at pool=180**. Critically, at pool=180 **every** ratel-discovery-tool failure on Opus 4.6 was a missing-gold cell — i.e. when `search_tools` *did* return the gold tool, Opus 4.6 picked it correctly every time. So Opus 4.6 is the model where "the bottleneck is upstream of the agent loop" is literally true; the remaining gap is entirely a function of the discovery layer (BM25 + the agent's query choices). At pool=50, Ratel's extra turns push dollar cost slightly above baseline (output tokens dominate at small pools where the baseline catalog is cheap to lay out); the win shows up cleanly from pool=100 onward.
 
-| pool | claude-sdk-tool-search | Δ vs baseline | input tokens (ctrl → sdk-search) |
-|---|---|---|---|
-| 50  | 58.9% | -12.8 pp | 5 202 → 3 366 (-35%) |
-| 100 | 55.6% | -14.4 pp | 9 230 → 3 751 (-59%) |
-| 180 | 52.2% | -19.5 pp | 16 322 → 3 677 (**-77%**) |
+**Anthropic's [tool-search-tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool)** comparison on the same scenarios (n=90 per cell):
 
-Anthropic's tool-search-tool sits 13–20 pp below baseline across the sweep, i.e. **5–10× the accuracy hit** Ratel pays for comparable token savings.
+| pool | claude-sdk-tool-search | Δ vs baseline | input tokens (ctrl → sdk-search) | $ (ctrl → sdk-search) |
+|---|---|---|---|---|
+| 50  | 58.9% | -12.8 pp | 5 202 → 3 366 (-35%)      | $0.038 → $0.034 (-11%) |
+| 100 | 55.6% | -14.4 pp | 9 230 → 3 751 (-59%)      | $0.058 → $0.036 (-37%) |
+| 180 | 52.2% | -19.5 pp | 16 322 → 3 677 (**-77%**) | $0.093 → $0.036 (**-61%**) |
+
+Anthropic's tool-search-tool sits 13–20 pp below baseline across the sweep, i.e. **5–10× the accuracy hit** Ratel pays for comparable token / cost savings.
 
 #### `claude-opus-4-7`
 
-| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | wall time (ctrl → ratel) |
-|---|---|---|---|---|---|
-| 50  | 76.7% | 70.0% | -6.7 pp | 7 184 → 3 514 (**-51%**)   | 11.3s → 13.6s |
-| 100 | 68.3% | 66.7% | -1.6 pp | 12 733 → 3 847 (**-70%**)  | 12.5s → 13.7s |
-| 180 | 71.7% | 66.7% | -5.0 pp | 21 871 → 3 835 (**-82%**)  | 11.5s → 13.6s |
+| pool | control-baseline | ratel-discovery-tool | Δ accuracy | input tokens (ctrl → ratel) | $ (ctrl → ratel) | wall time (ctrl → ratel) |
+|---|---|---|---|---|---|---|
+| 50  | 76.7% | 70.0% | -6.7 pp | 7 184 → 3 514 (**-51%**)   | $0.051 → $0.036 (-30%)     | 11.3s → 13.6s |
+| 100 | 68.3% | 66.7% | -1.6 pp | 12 733 → 3 847 (**-70%**)  | $0.079 → $0.038 (**-51%**) | 12.5s → 13.7s |
+| 180 | 71.7% | 66.7% | -5.0 pp | 21 871 → 3 835 (**-82%**)  | $0.124 → $0.038 (**-69%**) | 11.5s → 13.6s |
 
 control-oracle (upper bound): **83.3%**.
 
-Opus 4.7 lifts the baseline relative to 4.6, softening the selection bottleneck that made 4.6 a clear Ratel win. The story shifts to a competitive frame: `ratel-discovery-tool` lands within **-7 pp** of baseline at every pool size while saving **-51% to -82% input tokens**. **Anthropic's tool-search-tool** on the same scenarios (n=90 per cell):
+Opus 4.7 lifts the baseline relative to 4.6, softening the headline gap (`ratel-discovery-tool` lands within **-7 pp** of baseline at every pool size while saving **-51% to -82% input tokens** and up to **-69% dollars**) — but the failure mix is different. At pool=180, Opus 4.7's residual Ratel failures split **22% missing-gold and 32% selection-error**: in 32% of cells the gold tool *was* in the candidate set and the model still picked wrong. That's the highest selection-error rate in the family (vs ~0% for Opus 4.6, ~9% for Sonnet). So for Opus 4.7 the bottleneck is not just upstream retrieval — the model itself is less reliable at choosing from a small candidate window than at choosing from the full pool. That makes the headroom for Opus 4.7 mostly a model-side problem (selection from candidates) rather than a retrieval-layer problem.
 
-| pool | claude-sdk-tool-search | Δ vs baseline | input tokens (ctrl → sdk-search) |
-|---|---|---|---|
-| 50  | 65.6% | -11.1 pp | 7 184 → 5 286 (-26%) |
-| 100 | 61.1% | -7.2 pp  | 12 733 → 4 882 (-62%) |
-| 180 | 51.1% | -20.6 pp | 21 871 → 5 142 (-76%) |
+**Anthropic's tool-search-tool** on the same scenarios (n=90 per cell):
+
+| pool | claude-sdk-tool-search | Δ vs baseline | input tokens (ctrl → sdk-search) | $ (ctrl → sdk-search) |
+|---|---|---|---|---|
+| 50  | 65.6% | -11.1 pp | 7 184 → 5 286 (-26%)      | $0.051 → $0.046 (-10%) |
+| 100 | 61.1% | -7.2 pp  | 12 733 → 4 882 (-62%)     | $0.079 → $0.044 (-45%) |
+| 180 | 51.1% | -20.6 pp | 21 871 → 5 142 (-76%)     | $0.124 → $0.045 (**-64%**) |
 
 At pool=180 the SDK tool-search arm drops **-20.6 pp** — about **4× the accuracy hit** of `ratel-discovery-tool` (-5.0 pp), and even uses **more input tokens** (5 142 vs 3 835). The gap widens with pool size in both directions.
-
-> **Sample-size caveat.** Opus baseline cells are 20 scenarios × 3 runs (n=60); Sonnet baseline cells are 30 × 3 (n=90). `claude-sdk-tool-search` cells are 30 × 3 (n=90) across all three models. Treat the per-pool deltas as directional, not headline-grade.
 
 ## What's next
 

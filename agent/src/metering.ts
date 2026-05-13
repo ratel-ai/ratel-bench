@@ -68,6 +68,18 @@ export const DEFAULT_PRICING: PricingTable = {
     cachedInputPer1M: 0.3,
     cacheCreationPer1M: 3.75,
   },
+  "claude-opus-4-6": {
+    inputPer1M: 5.0,
+    outputPer1M: 25.0,
+    cachedInputPer1M: 0.5,
+    cacheCreationPer1M: 6.25,
+  },
+  "claude-opus-4-7": {
+    inputPer1M: 5.0,
+    outputPer1M: 25.0,
+    cachedInputPer1M: 0.5,
+    cacheCreationPer1M: 6.25,
+  },
   "claude-haiku-4-5": {
     inputPer1M: 1.0,
     outputPer1M: 5.0,
