@@ -45,11 +45,11 @@ The wall-clock improvement (107.6s → 69.1s) is a side benefit — fewer tokens
 
 #### `glm-5.1:cloud` (open-source, hosted)
 
-| pool | control-baseline | ratel-full | Δ accuracy | input tokens (ctrl → ratel) |
-|---|---|---|---|---|
-| 50  | 83.3% | 83.3% | ±0 pp       | 4 929 → 2 583 (-48%)     |
-| 100 | 80.0% | 83.3% | **+3.3 pp** | 10 222 → 3 187 (**-69%**) |
-| 180 | 75.0% | 76.7% | +1.7 pp     | 19 419 → 2 941 (**-85%**) |
+| pool | control-baseline | ratel-full | Δ accuracy | input tokens (ctrl → ratel) | wall time (ctrl → ratel) |
+|---|---|---|---|---|---|
+| 50  | 83.3% | 83.3% | ±0 pp       | 4 929 → 2 583 (-48%)      | 25.0s → 30.6s (+22.8%) |
+| 100 | 80.0% | 83.3% | **+3.3 pp** | 10 222 → 3 187 (**-69%**) | 23.2s → 31.0s (+33.3%) |
+| 180 | 75.0% | 76.7% | +1.7 pp     | 19 419 → 2 941 (**-85%**) | 27.8s → 28.5s (+2.7%)  |
 
 control-oracle (upper bound): **91.7%**.
 
@@ -57,7 +57,7 @@ For glm-5.1, the picture is a clean token win: **Ratel matches or beats the base
 
 The Ratel arm is also essentially **pool-invariant**: 76.7–83.3% across all pool sizes, vs the baseline drifting 83.3% → 75.0% as the catalog grows. The model isn't seeing the full pool, so it doesn't matter how big it gets.
 
-Wall time is roughly flat to slightly worse for the Ratel arm on this model (+3 to +33%): ratel-full averages ~1 extra turn at the same per-turn cost, so the wall-clock win shows up only at very large pools where baseline turn cost climbs.
+Wall time is flat-to-slightly-worse for the Ratel arm on this model (+3 to +33%): ratel-full averages ~1 extra turn at the same per-turn cost (~10–14 s/turn upstream), so the wall-clock win shows up only at the largest pools where baseline turn cost climbs (pool=180 lands at near-parity).
 
 ### Frontier Claude models — token savings now, accuracy parity in flight
 
