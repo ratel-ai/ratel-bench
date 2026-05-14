@@ -28,7 +28,8 @@ Locked decisions live in:
 
 ```
 retrieval/    Rust crate (ratel-benchmark-retrieval) — ingest + BM25 metrics
-agent/        TypeScript pnpm package (@ratel-ai/benchmark) — agent campaign + report
+agent/        TypeScript pnpm package (@ratel-ai/benchmark) — MetaTool agent campaign + report
+bfcl-loaded/  TypeScript + Python pnpm package (@ratel-ai/bfcl-loaded) — BFCL v4 multi-turn agent campaign
 fixtures/     raw upstream downloads (gitignored)
 test-data/    normalized JSONL produced by `ingest` (gitignored — ADR-0007)
 results/      retrieval / agent JSONL outputs + REPORT.md (gitignored)
@@ -49,6 +50,43 @@ Per [ADR-0006](docs/adr/0006-benchmark-corpus-and-eval-modes.md), three eval mod
 
 - **(c) MetaTool tasks + LLM-as-judge.** Runs control (baseline + oracle) arms alongside three Ratel arms (full / pre-discovery only / discovery-tool only) on MetaTool user-task queries with stubbed tool responses. The full Ratel arm pre-discovers BM25 top-K from the prompt *and* exposes the gateway (`search_tools` / `invoke_tool`) so the model can recover when pre-discovery missed; the two ablations isolate which layer is doing the work. An optional local-only `claude-sdk-tool-search` arm can be wired up alongside as a competitive baseline against Anthropic's native tool-search-tool. Programmatic judge does selection-only intersection (`effective_tool_ids ∩ gold_tools ≠ ∅`); the LLM judge scores final-text coherence against the user prompt as a fallback / tiebreaker. Reports input/output tokens, cache hit rate, $-cost, and wall-clock time at realistic catalog sizes (default pool size 180), averaged per-scenario across runs and then across scenarios.
 
+## Setup
+
+### Prerequisites
+
+- **Node.js 20+** and **pnpm 10+** (the repo pins `pnpm@10.28.2` via `packageManager`). Drives the agent campaign and the report renderer.
+- **Rust stable** (1.85+ — the retrieval crate uses edition 2024). Drives ingest and retrieval-only modes.
+- **API keys** (mode c only — retrieval-only is $0 and key-free):
+  - `OPENAI_API_KEY` — required to score `gpt-5.4-mini`.
+  - `ANTHROPIC_API_KEY` — required to score `claude-sonnet-4-6` / `claude-opus-4-7` **and** to power the default LLM judge.
+
+  Set at least one. The harness skips models with no key rather than failing. Place them in `.env` at the repo root — `dotenv` is loaded automatically.
+
+### Install
+
+```bash
+pnpm install                  # JS deps for agent/ + bfcl-loaded/ + mcpverse/
+cargo build -p ratel-benchmark-retrieval --release   # optional — first `cargo run --release` compiles otherwise
+```
+
+`pnpm install` is the only required step for the agent layer. The retrieval crate's deps are pulled lazily on first `cargo run`, so the explicit `cargo build` above is just a warm-up.
+
+## Ingest datasets
+
+Per [ADR-0007](docs/adr/0007-benchmark-corpus-not-snapshotted.md), the corpora are **not** committed — neither the raw upstream downloads (`fixtures/`) nor the normalized JSONL (`test-data/`). You have to ingest once before any benchmark can run.
+
+```bash
+# MetaTool — feeds retrieval mode (a) and the agent campaign mode (c).
+cargo run -p ratel-benchmark-retrieval --release -- ingest metatool --download
+
+# ToolRet — feeds retrieval mode (b). Skip if you only care about the agent campaign.
+cargo run -p ratel-benchmark-retrieval --release -- ingest toolret --download
+```
+
+`--download` pulls upstream sources (MetaTool: MIT, ToolRet: Apache-2.0) into `fixtures/` via `curl`, then writes normalized JSONL to `test-data/metatool.jsonl` and `test-data/toolret.jsonl`. Re-running without `--download` against the cached fixtures produces a byte-identical JSONL. Full ingest tunables in [`retrieval/README.md`](retrieval/README.md).
+
+Or let `run-all` handle ingest for you — it no-ops when the snapshots already exist.
+
 ## Run the whole benchmark
 
 ```bash
@@ -64,12 +102,38 @@ This single command:
 
 Re-running `run-all` skips ingest when the snapshot already exists; pass `--force` to re-ingest, `--skip-ingest` to fail loudly if missing, `--skip-agent` to opt out of mode (c) even when keys are set, or `--only metatool|toolret` to restrict retrieval to one corpus. For the headline N=5 variance run, invoke `pnpm -F @ratel-ai/benchmark start` directly — see [`agent/README.md`](agent/README.md).
 
-## Or run a single mode
+## Run only the agent benchmark (mode c)
 
-For tighter loops on one suite, use the per-layer commands documented next to the code:
+Use this when you're iterating on agent behavior and don't want to repay retrieval each loop. Prerequisites: `pnpm install` done, MetaTool ingested (`test-data/metatool.jsonl` exists), and at least one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` exported.
 
-- Retrieval (modes a + b) — see [`retrieval/README.md`](retrieval/README.md).
-- Agent campaign (mode c, when shipped) — see [`agent/README.md`](agent/README.md).
+Fast local smoke (~$0.20–$1, ~50 scenarios × 1 run × 3 arms × 1 model):
+
+```bash
+pnpm -F @ratel-ai/benchmark start \
+  --scenarios 50 --runs 1 \
+  --arms control-baseline,control-oracle,ratel-full \
+  --models claude-sonnet-4-6 \
+  --pool-sizes 180 \
+  --dollar-global 5 \
+  --concurrency 10
+```
+
+Output: one JSONL row per `(scenario, arm, model, pool_size, run)` cell in `agent/results/agent.jsonl` (resumable — re-runs skip already-recorded cells unless `--force`). Render a report with `pnpm -F @ratel-ai/benchmark report`.
+
+Full flag reference, the N=5 variance recipe, the local-Ollama path, and the cached-control-runs / `--ephemeral` workflow live in [`agent/README.md`](agent/README.md).
+
+## Run only retrieval (modes a + b)
+
+Fast, deterministic, $0, no API keys. Once the corpora are ingested:
+
+```bash
+cargo run -p ratel-benchmark-retrieval --release -- retrieval \
+  --corpus test-data/metatool.jsonl \
+  --output results/metatool-retrieval.jsonl \
+  --top-k 1,3,5,10 --pool-sizes 30,100,180
+```
+
+ToolRet uses the same runner with a different corpus and pool-size sweep. Full reference in [`retrieval/README.md`](retrieval/README.md).
 
 ## Corpus format
 
