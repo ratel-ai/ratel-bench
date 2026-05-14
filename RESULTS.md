@@ -7,14 +7,14 @@ This document consolidates the agent benchmark across four model families on the
 | your situation | Ratel's value today |
 |---|---|
 | Local model + large catalog | **Critical.** Without Ratel the model can't function. (qwen3.5 pool=100: 8% → 77%) |
-| Open-source cloud model + large catalog | **Strong win.** Beats baseline on accuracy *and* tokens. (glm-5.1: +12pp, -85% tokens) |
+| Open-source cloud model + large catalog | **Strong win.** Matches or beats baseline on accuracy while cutting tokens. (glm-5.1 pool=180: +1.7 pp, -85% tokens) |
 | Frontier model + large catalog | **Cost-driven win.** ~80% input-token savings, modest accuracy cost; closing now. |
 | Any model + tiny catalog (≤30) | Skip Ratel — pool fits in the prompt cleanly. |
 
 ## Headline takeaways
 
 - **Token savings are universal and large.** Across every model tested, Ratel cuts input tokens by **70–85% at realistic pool sizes (100–180 tools)**. This is true whether the underlying model is a tiny local model or frontier Claude.
-- **Open-source / local models: Ratel is what makes them usable.** `glm-5.1:cloud` gains **~10 pp accuracy** versus the baseline at large pool sizes, and **`qwen3.5` running locally on a MacBook Pro M4 24 GB jumps from 8.3% → 76.7%** when the pool grows to 100 tools — the baseline simply collapses, Ratel keeps it working.
+- **Open-source / local models: Ratel is what makes them usable.** `glm-5.1:cloud` matches or modestly beats the baseline at every pool size (within +0 to +3.3 pp) while cutting input tokens **-48% to -85%**, and **`qwen3.5` running locally on a MacBook Pro M4 24 GB jumps from 8.3% → 76.7%** when the pool grows to 100 tools — the baseline simply collapses, Ratel keeps it working.
 - **Frontier Claude models: massive token + cost savings, accuracy not yet at parity.** Sonnet 4.6 keeps solving most tasks even with 180-tool pools, so the headroom Ratel buys is mostly cost / context — not pass-rate. Ratel currently trades ~13 pp on Sonnet 4.6 and stays within ~5 pp on Opus 4.6 / 4.7, all for **50–80% input-token savings**. Closing the Sonnet gap is the active work item.
 
 ## Methodology
@@ -47,14 +47,17 @@ The wall-clock improvement (107.6s → 69.1s) is a side benefit — fewer tokens
 
 | pool | control-baseline | ratel-full | Δ accuracy | input tokens (ctrl → ratel) |
 |---|---|---|---|---|
-| 30 | 85.6% | 86.7% | +1.1 pp | 2 976 → 2 428 (-18%) |
-| 50 | 80.0% | 84.4% | +4.4 pp | 4 897 → 2 579 (-47%) |
-| 100 | 78.9% | 85.6% | **+6.7 pp** | 10 062 → 2 909 (**-71%**) |
-| 180 | 75.6% | 87.8% | **+12.2 pp** | 19 362 → 2 923 (**-85%**) |
+| 50  | 83.3% | 83.3% | ±0 pp       | 4 929 → 2 583 (-48%)     |
+| 100 | 80.0% | 83.3% | **+3.3 pp** | 10 222 → 3 187 (**-69%**) |
+| 180 | 75.0% | 76.7% | +1.7 pp     | 19 419 → 2 941 (**-85%**) |
 
-For glm-5.1, the picture is the cleanest possible win: **Ratel beats the baseline at every pool size**, and the gap **widens as the catalog grows**. At pool=180 it's +12 pp pass-rate while using ~85% fewer input tokens.
+control-oracle (upper bound): **91.7%**.
 
-The Ratel arm is also essentially **pool-invariant**: 85-88% across all pool sizes. The model isn't seeing the full pool, so it doesn't matter how big it gets.
+For glm-5.1, the picture is a clean token win: **Ratel matches or beats the baseline at every pool size**, and the input-token gap **widens as the catalog grows** (-48% → -85% from pool=50 to 180). Accuracy deltas are small (+0 to +3.3 pp) — the baseline already handles these catalog sizes — so the practical value here is sending ~7 tools instead of 180 while keeping pass-rate intact.
+
+The Ratel arm is also essentially **pool-invariant**: 76.7–83.3% across all pool sizes, vs the baseline drifting 83.3% → 75.0% as the catalog grows. The model isn't seeing the full pool, so it doesn't matter how big it gets.
+
+Wall time is roughly flat to slightly worse for the Ratel arm on this model (+3 to +33%): ratel-full averages ~1 extra turn at the same per-turn cost, so the wall-clock win shows up only at very large pools where baseline turn cost climbs.
 
 ### Frontier Claude models — token savings now, accuracy parity in flight
 
