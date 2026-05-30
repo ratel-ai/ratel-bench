@@ -3,7 +3,11 @@
   "files": {
     "includes": [
       "agent/src/**/*.ts",
-      "agent/src/**/*.tsx"
+      "agent/src/**/*.tsx",
+      "bfcl-loaded/src/**/*.ts",
+      "bfcl-loaded/src/**/*.tsx",
+      "mcpverse/src/**/*.ts",
+      "mcpverse/src/**/*.tsx"
     ]
   },
   "formatter": {

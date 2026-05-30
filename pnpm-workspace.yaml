@@ -1,2 +1,4 @@
 packages:
   - 'agent'
+  - 'bfcl-loaded'
+  - 'mcpverse'
