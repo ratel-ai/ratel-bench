@@ -1,0 +1,236 @@
+{
+  "tools": [
+    {
+      "id": "weather.get",
+      "name": "weather_get",
+      "description": "Get the current weather conditions, temperature, humidity, and wind for a given city or geographic location.",
+      "inputSchema": { "type": "object", "properties": { "location": { "type": "string" } }, "required": ["location"] }
+    },
+    {
+      "id": "weather.forecast",
+      "name": "weather_forecast",
+      "description": "Get a multi-day weather forecast for a city, including high/low temperatures and precipitation chance.",
+      "inputSchema": { "type": "object", "properties": { "location": { "type": "string" }, "days": { "type": "number" } }, "required": ["location"] }
+    },
+    {
+      "id": "stocks.quote",
+      "name": "stocks_quote",
+      "description": "Look up the current stock price, day change, and volume for a public company by ticker symbol.",
+      "inputSchema": { "type": "object", "properties": { "ticker": { "type": "string" } }, "required": ["ticker"] }
+    },
+    {
+      "id": "stocks.history",
+      "name": "stocks_history",
+      "description": "Retrieve historical daily stock prices for a ticker across a date range.",
+      "inputSchema": { "type": "object", "properties": { "ticker": { "type": "string" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["ticker", "from", "to"] }
+    },
+    {
+      "id": "news.search",
+      "name": "news_search",
+      "description": "Search recent news articles and headlines matching a query, ranked by recency and relevance.",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+    },
+    {
+      "id": "news.headlines",
+      "name": "news_headlines",
+      "description": "Get top headlines for a given country or category (business, tech, sports, etc).",
+      "inputSchema": { "type": "object", "properties": { "category": { "type": "string" } } }
+    },
+    {
+      "id": "calendar.add_event",
+      "name": "calendar_add_event",
+      "description": "Create a new calendar event with a title, start time, end time, and optional attendees.",
+      "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "start": { "type": "string" }, "end": { "type": "string" } }, "required": ["title", "start"] }
+    },
+    {
+      "id": "calendar.list",
+      "name": "calendar_list",
+      "description": "List upcoming calendar events within a date range.",
+      "inputSchema": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } } }
+    },
+    {
+      "id": "email.send",
+      "name": "email_send",
+      "description": "Send an email message to one or more recipients with a subject and body.",
+      "inputSchema": { "type": "object", "properties": { "to": { "type": "string" }, "subject": { "type": "string" }, "body": { "type": "string" } }, "required": ["to", "subject", "body"] }
+    },
+    {
+      "id": "email.search",
+      "name": "email_search",
+      "description": "Search the user's inbox for messages matching a query (sender, subject, body).",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+    },
+    {
+      "id": "maps.directions",
+      "name": "maps_directions",
+      "description": "Get turn-by-turn driving, walking, or transit directions between two locations.",
+      "inputSchema": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" }, "mode": { "type": "string" } }, "required": ["from", "to"] }
+    },
+    {
+      "id": "maps.search_places",
+      "name": "maps_search_places",
+      "description": "Search nearby places (restaurants, gas stations, hotels) around a location.",
+      "inputSchema": { "type": "object", "properties": { "near": { "type": "string" }, "query": { "type": "string" } }, "required": ["near", "query"] }
+    },
+    {
+      "id": "translate.text",
+      "name": "translate_text",
+      "description": "Translate a piece of text from one language to another.",
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" }, "to": { "type": "string" } }, "required": ["text", "to"] }
+    },
+    {
+      "id": "currency.convert",
+      "name": "currency_convert",
+      "description": "Convert an amount between two currencies at the current exchange rate.",
+      "inputSchema": { "type": "object", "properties": { "amount": { "type": "number" }, "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["amount", "from", "to"] }
+    },
+    {
+      "id": "wiki.search",
+      "name": "wiki_search",
+      "description": "Search Wikipedia and return article summaries for a query.",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+    },
+    {
+      "id": "image.generate",
+      "name": "image_generate",
+      "description": "Generate an image from a text prompt using a diffusion model.",
+      "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" } }, "required": ["prompt"] }
+    },
+    {
+      "id": "code.run_python",
+      "name": "code_run_python",
+      "description": "Execute a Python code snippet in a sandbox and return stdout, stderr, and any return value.",
+      "inputSchema": { "type": "object", "properties": { "code": { "type": "string" } }, "required": ["code"] }
+    },
+    {
+      "id": "code.lint",
+      "name": "code_lint",
+      "description": "Run a static linter against a code snippet and return diagnostics.",
+      "inputSchema": { "type": "object", "properties": { "code": { "type": "string" }, "language": { "type": "string" } }, "required": ["code"] }
+    },
+    {
+      "id": "files.read",
+      "name": "files_read",
+      "description": "Read the contents of a file from local disk.",
+      "inputSchema": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }
+    },
+    {
+      "id": "files.write",
+      "name": "files_write",
+      "description": "Write contents to a file on local disk, creating or overwriting it.",
+      "inputSchema": { "type": "object", "properties": { "path": { "type": "string" }, "contents": { "type": "string" } }, "required": ["path", "contents"] }
+    },
+    {
+      "id": "db.query",
+      "name": "db_query",
+      "description": "Run a read-only SQL query against the production analytics database.",
+      "inputSchema": { "type": "object", "properties": { "sql": { "type": "string" } }, "required": ["sql"] }
+    },
+    {
+      "id": "github.create_issue",
+      "name": "github_create_issue",
+      "description": "Open a new issue on a GitHub repository with a title and body.",
+      "inputSchema": { "type": "object", "properties": { "repo": { "type": "string" }, "title": { "type": "string" }, "body": { "type": "string" } }, "required": ["repo", "title"] }
+    },
+    {
+      "id": "github.list_prs",
+      "name": "github_list_prs",
+      "description": "List open pull requests on a GitHub repository.",
+      "inputSchema": { "type": "object", "properties": { "repo": { "type": "string" } }, "required": ["repo"] }
+    },
+    {
+      "id": "slack.post_message",
+      "name": "slack_post_message",
+      "description": "Post a message to a Slack channel.",
+      "inputSchema": { "type": "object", "properties": { "channel": { "type": "string" }, "text": { "type": "string" } }, "required": ["channel", "text"] }
+    },
+    {
+      "id": "slack.search",
+      "name": "slack_search",
+      "description": "Search the Slack workspace for messages matching a query.",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+    },
+    {
+      "id": "music.play",
+      "name": "music_play",
+      "description": "Play a song, album, or playlist on the connected music service.",
+      "inputSchema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
+    },
+    {
+      "id": "timer.set",
+      "name": "timer_set",
+      "description": "Set a countdown timer for a given duration.",
+      "inputSchema": { "type": "object", "properties": { "seconds": { "type": "number" } }, "required": ["seconds"] }
+    },
+    {
+      "id": "notes.add",
+      "name": "notes_add",
+      "description": "Append a note to the user's note collection.",
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+    },
+    {
+      "id": "task.create",
+      "name": "task_create",
+      "description": "Create a new task or todo item with a description and optional due date.",
+      "inputSchema": { "type": "object", "properties": { "description": { "type": "string" }, "due": { "type": "string" } }, "required": ["description"] }
+    },
+    {
+      "id": "task.complete",
+      "name": "task_complete",
+      "description": "Mark an existing task as completed.",
+      "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "stock-and-news",
+      "turns": [
+        {
+          "input": {
+            "messages": [
+              { "role": "user", "content": "What's Tesla's stock doing today?" }
+            ]
+          },
+          "expectedTool": "stocks.quote",
+          "expectedQuery": "current stock price quote ticker"
+        },
+        {
+          "input": {
+            "messages": [
+              { "role": "user", "content": "What's Tesla's stock doing today?" },
+              { "role": "assistant", "content": "TSLA is at $241, up 1.2% today." },
+              { "role": "user", "content": "And any recent news about them?" }
+            ]
+          },
+          "expectedTool": "news.search",
+          "expectedQuery": "search recent news articles by query"
+        }
+      ]
+    },
+    {
+      "id": "travel-planning",
+      "turns": [
+        {
+          "input": {
+            "messages": [
+              { "role": "user", "content": "I'm driving from San Francisco to Los Angeles tomorrow — what's the route?" }
+            ]
+          },
+          "expectedTool": "maps.directions",
+          "expectedQuery": "turn-by-turn directions between two locations driving"
+        },
+        {
+          "input": {
+            "messages": [
+              { "role": "user", "content": "I'm driving from San Francisco to Los Angeles tomorrow — what's the route?" },
+              { "role": "assistant", "content": "I-5 South, about 6 hours." },
+              { "role": "user", "content": "Will it rain in LA when I get there?" }
+            ]
+          },
+          "expectedTool": "weather.forecast",
+          "expectedQuery": "multi-day weather forecast for a city precipitation"
+        }
+      ]
+    }
+  ]
+}

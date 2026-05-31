@@ -1,7 +1,3 @@
-# Rust
-target/
-**/*.rs.bk
-
 # Environment
 .env
 .env.local
@@ -22,7 +18,6 @@ node_modules/
 
 # TypeScript
 *.tsbuildinfo
-agent/dist/
 
 # Logs
 *.log
@@ -32,13 +27,13 @@ plan.md
 progress.md
 CLAUDE.local.md
 
-# Claude Code — personal/runtime; commit .claude/skills and .claude/settings.json
+# Claude Code
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
-# Benchmark outputs (per ADR-0007: corpus and results are not snapshotted)
+# Benchmark outputs
 results/
-fixtures/
-test-data/
-agent/results/
-.ratel
+
+# Ingested corpora — regenerate via `pnpm ingest:*` (deterministic, pinned upstream URLs)
+datasets/.cache/
+datasets/metatool.json

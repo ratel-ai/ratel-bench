@@ -1,14 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.13/schema.json",
   "files": {
-    "includes": [
-      "agent/src/**/*.ts",
-      "agent/src/**/*.tsx",
-      "bfcl-loaded/src/**/*.ts",
-      "bfcl-loaded/src/**/*.tsx",
-      "mcpverse/src/**/*.ts",
-      "mcpverse/src/**/*.tsx"
-    ]
+    "includes": ["src/**/*.ts", "src/**/*.tsx"]
   },
   "formatter": {
     "enabled": true,
