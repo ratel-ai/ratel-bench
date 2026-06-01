@@ -13,16 +13,50 @@ retrieval (tool-selection) sweep over the full corpus, and an agent campaign on 
 ## TL;DR
 
 - **Retrieval (BM25, full corpus, N=20,614):** MRR@5 = **0.663 → 0.569 → 0.517**
-  at pool 30 / 100 / 180. Reproducible to ±0.0001 at full N.
+  at pool 30 / 100 / 180.
 - **Agents (N=30, claude-sonnet-4-6):** selection pass-rate
-  **oracle 80.0% > baseline 58.9% > ratel-full 47.8%**.
-- **The Ratel trade:** ratel-full holds a **flat ~3.3k-token context at every
-  pool size** while baseline grows to 15.6k — **78% fewer input tokens at pool
-  180** — but costs **~11pp of selection accuracy** on this subset, driven by
-  more wrong-tool picks (25 vs 11).
-- **Ceiling effect:** even oracle (only the gold tool exposed) tops out at 80% —
-  ~20% of MetaTool queries the model just answers in prose without calling any
-  tool. Pure-selection scoring counts that as a miss.
+  **oracle 73.3% > baseline 60.0% > ratel-full 53.3%**.
+- **ratel-full now mirrors real discovery.** The pre-discovered top-K is injected
+  as a synthetic `search_tools` **tool-result message** (not as extra tool
+  definitions), so the model can't tell pre-discovery from self-discovery and
+  must `invoke_tool` a hit to use it.
+- **The Ratel trade:** ratel-full holds **~flat input across pool sizes** (5.0k at
+  pool 180 vs baseline's 16.6k — **70% fewer input tokens**, **74% lower
+  cache-priced cost**), at a cost of **~7pp selection accuracy**, driven by a
+  higher *refusal* rate (the gateway indirection makes the model select-but-not-
+  invoke more often).
+- **Pre-discovery K 5→15 lifted large-pool recall +9pp** (the gold tool reaches
+  the model more often), which tracks the pool-180 pass-rate gain (40%→50% vs the
+  earlier K=5 arm).
+- **Ceiling effect:** even oracle (only the gold tool exposed) tops out at ~73% —
+  ~27% of MetaTool queries the model answers in prose without invoking. Pure-
+  selection scoring counts that as a miss.
+
+---
+
+## What changed since the first cut
+
+The agent campaign was re-run after two changes to `ratel-full` plus a metering
+fix; retrieval (Part A) is unchanged.
+
+1. **Pre-discovery is injected as a tool-result message** (`src/agents/ratel-full.ts`).
+   The arm now exposes only the `search_tools` / `invoke_tool` gateway, runs the
+   real gateway search for the turn's query, and injects its exact `{groups:[…]}`
+   payload as a synthetic *assistant tool-call + tool-result* pair after the user
+   turn. Byte-for-byte what a model-issued `search_tools` call returns — so the
+   model must `invoke_tool` a hit (no first-class shortcut), exactly like real
+   discovery. The tool block is now constant (2 gateway tools) → cacheable.
+2. **All-arms Anthropic prompt caching** (`src/agents/baseline.ts`). A single
+   ephemeral `cacheControl` breakpoint on the last tool of every arm, plus one on
+   ratel-full's injected discovery. Uniform policy; no behavioral change (the
+   marker is stripped before the model sees content).
+3. **Metering fix.** AI SDK v6 reports cache splits under
+   `usage.inputTokenDetails.{cacheReadTokens,cacheWriteTokens}` — there is no
+   `cacheCreationInputTokens`. The old `summarize` read that nonexistent field, so
+   cache *writes* were silently zero; now fresh / cache-read / cache-write are all
+   captured.
+4. **Pre-discovery K 5 → 15** to raise the chance the gold tool is in the injected
+   set (see *Pre-discovery recall*).
 
 ---
 
@@ -35,8 +69,10 @@ retrieval (tool-selection) sweep over the full corpus, and an agent campaign on 
 | Model | `claude-sonnet-4-6` |
 | Pools | 30, 100, 180 (universe = 199 plugins) |
 | Agent subset | 30 scenarios, deterministic seed 0 (`--sample 30`) |
-| Arms | oracle (gold only), baseline (full pool), ratel-full (BM25 pre-discovery + gateway) |
-| Concurrency | 8 (`runConcurrent`) — 210 cells, 0 errors, **438s** wall |
+| Arms | oracle (gold only), baseline (full pool), ratel-full (BM25 pre-discovery via injected `search_tools` result + gateway) |
+| Pre-discovery K | 15 injected candidates |
+| Caching | ephemeral breakpoint on the tool block (all arms) + injected discovery (ratel-full) |
+| Concurrency | 8 — 210 cells, 0 errors, **~450s** wall (≈8× over ~60 min sequential-equivalent) |
 
 **Scoring**
 
@@ -58,13 +94,9 @@ Source: [HowieHwong/MetaTool](https://github.com/HowieHwong/MetaTool) (MIT),
 ingested Lane-B (data-only) by `src/ingest/metatool.ts` →
 `pnpm ingest:metatool`. The single-tool slice maps cleanly: each `Query,Tool`
 row → one scenario with `turns.length === 1`, `expectedTool` = the gold plugin.
-
-- 199 plugins (name + description, **no parameter schemas**).
-- 20,615 query rows → **20,614 scenarios** (1 malformed upstream row skipped as
-  unknown-gold).
-- The multi-tool slice is **not** ingested (a `Turn` carries a single
-  `expectedTool`).
-- Corpus is gitignored — regenerate deterministically from pinned upstream URLs.
+199 plugins (name + description, **no parameter schemas**); 20,615 query rows →
+20,614 scenarios (1 malformed row skipped). Corpus is gitignored — regenerate
+deterministically from pinned upstream URLs.
 
 ---
 
@@ -78,119 +110,170 @@ BM25 over plugin descriptions, full corpus (N = 20,614):
 | 100 | **0.5691** | 0.0001 |
 | 180 | **0.5167** | 0.0001 |
 
-MRR decays as the pool grows (more distractors), as expected. Lexical BM25 puts
-the gold plugin around rank ~1.5 within top-5 at pool 30.
+MRR decays as the pool grows (more distractors), as expected. Unchanged by the
+agent rework. (On the 30-scenario agent subset the same metric reads
+0.567 / 0.511 / 0.473 — small-sample, shown only for context.)
 
 ### ⚠ Non-determinism in `@ratel-ai/sdk` search
 
-The native `ToolRegistry` search **randomizes tied-score results per call** —
-five identical in-process searches return five different orderings:
-
-```
-run0: ["tool_2","tool_9","tool_0","tool_1","tool_4"]
-run1: ["tool_6","tool_5","tool_8","tool_2","tool_1"]   # same query, same catalog
-...
-```
-
-This perturbs MRR whenever the gold tool ties with distractors, and it makes the
-agents' gateway search non-reproducible too. **Impact is bounded:** at full N the
-run-to-run delta is ≤0.0001 (it averages out); on small samples and per-scenario
-it is visible. **Recommendation (Ratel owns the SDK):** add a seedable /
-deterministic ranking mode for benchmarking and reproducible production traces.
+The native `ToolRegistry` search **randomizes tied-score results per call** — five
+identical in-process searches return five different orderings of tied tools. This
+perturbs MRR (and the agents' gateway search) whenever the gold tool ties with
+distractors. **Impact is bounded:** ≤0.0001 at full N (it averages out); visible
+on small samples. **Recommendation (Ratel owns the SDK):** add a seedable /
+deterministic ranking mode for benchmarking and reproducible traces.
 
 ---
 
-## Part B — Agent campaign (N = 30, claude-sonnet-4-6)
+## Part B — Agent campaign (N = 30, claude-sonnet-4-6, K=15)
 
 ### Pass rate, tokens, latency per arm × pool
 
-| arm | pool | pass % | input tok | output tok | wall ms | tool calls |
-|---|---:|---:|---:|---:|---:|---:|
-| oracle | — | **80.0** | 1,166 | 727 | 15,183 | 1.33 |
-| baseline | 30 | 66.7 | 3,687 | 732 | 15,287 | 1.37 |
-| baseline | 100 | 63.3 | 9,461 | 674 | 14,197 | 1.30 |
-| baseline | 180 | 46.7 | 15,639 | 674 | 14,317 | 1.47 |
-| ratel-full | 30 | 53.3 | 3,163 | 847 | 18,296 | 1.73 |
-| ratel-full | 100 | 50.0 | 3,376 | 780 | 16,690 | 1.77 |
-| ratel-full | 180 | 40.0 | 3,368 | 809 | 17,016 | 1.73 |
+Token columns split the input into **fresh** / **cache-read** / **cache-write**
+(`totIn` = their sum). `cost-eq` prices cache traffic the way Anthropic bills it
+(`fresh + 0.1·read + 1.25·write`) — the honest like-for-like number.
 
-**Rollup (all pools):** oracle 80.0% · baseline 58.9% · ratel-full 47.8%.
+| arm | pool | pass % | fresh | cache-read | cache-write | totIn | cost-eq | out | wall s | calls |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| oracle | — | **73.3** | 1,113 | 0 | 0 | 1,113 | 1,113 | 723 | 15.3 | 1.27 |
+| baseline | 30 | 66.7 | 456 | 1,273 | 1,958 | 3,687 | 3,030 | 748 | 15.7 | 1.37 |
+| baseline | 100 | 60.0 | 449 | 3,519 | 5,310 | 9,277 | 7,438 | 645 | 14.0 | 1.33 |
+| baseline | 180 | 53.3 | 469 | 6,855 | 9,251 | 16,575 | 12,718 | 711 | 15.6 | 1.67 |
+| ratel-full | 30 | 56.7 | 308 | 1,927 | 1,668 | 3,902 | 2,585 | 893 | 18.9 | 1.53 |
+| ratel-full | 100 | 53.3 | 351 | 2,607 | 2,167 | 5,125 | 3,321 | 949 | 19.8 | 1.40 |
+| ratel-full | 180 | 50.0 | 304 | 2,479 | 2,242 | 5,025 | 3,354 | 1,006 | 20.4 | 1.67 |
 
-### Input tokens: flat (ratel) vs. scaling (baseline)
+**Rollup (all pools):** oracle 73.3% · baseline 60.0% · ratel-full 53.3%.
 
-| pool | baseline | ratel-full | savings |
-|---:|---:|---:|---:|
-| 30 | 3,687 | 3,163 | 14% |
-| 100 | 9,461 | 3,376 | 64% |
-| 180 | 15,639 | 3,368 | **78%** |
+**ratel-full vs the earlier direct-tool / K=5 arm** (same harness, prior run):
+57/53/50% vs 53/50/**40**% — the gain concentrates at pool 180 (+10pp), matching
+the K=15 recall lift there.
+
+### Input: flat (ratel) vs. scaling (baseline)
+
+| pool | baseline totIn | ratel-full totIn | fewer | baseline cost-eq | ratel-full cost-eq | cheaper |
+|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 3,687 | 3,902 | −6% | 3,030 | 2,585 | 15% |
+| 100 | 9,277 | 5,125 | 45% | 7,438 | 3,321 | 55% |
+| 180 | 16,575 | 5,025 | **70%** | 12,718 | 3,354 | **74%** |
 
 This is the core Ratel result: **context cost is decoupled from catalog size.**
-Baseline pays linearly for a bigger pool; ratel-full stays flat because
-pre-discovery + the gateway feed a fixed, small surface. The savings *grow* with
-the catalog.
+Baseline's input grows linearly with the pool; ratel-full stays ~flat because the
+gateway feeds a fixed, small surface. The savings *grow* with the catalog. (K=15
+costs ratel-full ~1.5k more input than K=5 did — the price of the +9pp large-pool
+recall — so the headline is now "70% fewer" rather than the old "78%.")
 
-### Accuracy: ratel-full trails baseline by ~11pp
+### Accuracy: ratel-full trails baseline by ~7pp
 
 | pool | baseline | ratel-full | Δ |
 |---:|---:|---:|---:|
-| 30 | 66.7% | 53.3% | −13.4 |
-| 100 | 63.3% | 50.0% | −13.3 |
-| 180 | 46.7% | 40.0% | −6.7 |
+| 30 | 66.7% | 56.7% | −10.0 |
+| 100 | 60.0% | 53.3% | −6.7 |
+| 180 | 53.3% | 50.0% | −3.3 |
 
-The gap narrows at pool 180 because baseline degrades fastest there. Consistent
-with the old `RESULTS.md` Claude behavior (ratel arms traded a few pp of accuracy
-for large token savings).
+The gap narrows at pool 180 because baseline degrades fastest there (wrong-tool
+picks spike). The ratel-full cost is mostly *refusals*, not wrong picks (below).
+
+### Pre-discovery recall (why K=15)
+
+The model can only `invoke_tool` the gold tool if it's in the injected set (or it
+re-searches). Recall of the injected set — fraction of scenarios with the gold
+tool in the BM25 top-K, measured directly over n=1,200 (no API):
+
+| pool | recall@5 | recall@15 | lift |
+|---:|---:|---:|---:|
+| 30 | 78.8% | 80.5% | +1.8pp |
+| 100 | 69.8% | 78.8% | **+9.0pp** |
+| 180 | 65.7% | 74.7% | **+9.0pp** |
+
+K=15 raises the achievable ceiling **+9pp at pools 100/180** (where ratel-full was
+weakest) and barely moves pool 30 (already near the BM25 lexical ceiling, yet
+injecting 15 of 30 tools). It only counters the *retrieval-miss* failure — the
+remaining ~20–25% the lexical search can't surface at any K rely on the model
+re-searching.
+
+### Prompt caching
+
+The metering fix makes cache traffic visible. Within a single run the loop's
+later steps re-read the prefix, so **both** arms cache (`cache-read > 0`) — but the
+cost lands very differently:
+
+- **ratel-full** caches a *tiny constant* gateway surface → small cache traffic
+  (~2.5k read + ~2.2k write at pool 180).
+- **baseline** caches a *large, per-scenario-unique* tool block → it pays the 1.25×
+  cache-write premium on 9.3k tokens every call, only partly offset by the within-
+  run read. Net it's still cheaper than uncached, but far above ratel-full.
+- **oracle** shows **0 cache** — its 1-tool block is below Anthropic's ~1024-token
+  minimum cacheable prefix. Same reason the *cross-call* caching of ratel-full's
+  gateway block doesn't fire on this corpus: realized caching here is within-run,
+  not cross-call. The cross-catalog "constant prefix cached across calls" win needs
+  a larger system/tools surface or multi-turn scenarios.
 
 ### Failure breakdown
 
-| arm | fails | no tool call (refusal) | wrong tool | error |
-|---|---:|---:|---:|---:|
-| oracle | 6 | 6 | 0 | 0 |
-| baseline | 37 | 26 | 11 | 0 |
-| ratel-full | 47 | 22 | **25** | 0 |
+`refusal` = no effective tool selected (prose answer, or `search_tools` without a
+follow-up `invoke_tool`); `wrong` = invoked the wrong tool.
 
-Two distinct failure modes:
+| arm | pool | fails | refusal | wrong | error |
+|---|---:|---:|---:|---:|---:|
+| oracle | — | 8 | 8 | 0 | 0 |
+| baseline | 30 | 10 | 7 | 3 | 0 |
+| baseline | 100 | 12 | 9 | 3 | 0 |
+| baseline | 180 | 14 | 7 | 7 | 0 |
+| ratel-full | 30 | 13 | 12 | 1 | 0 |
+| ratel-full | 100 | 14 | 10 | 4 | 0 |
+| ratel-full | 180 | 15 | 9 | 6 | 0 |
 
-1. **No-tool-call refusals** — the model answers in prose instead of selecting a
-   tool. Dominant for oracle/baseline and the reason oracle caps at 80%. A
-   corpus/metric artifact: with pure-selection scoring (no LLM judge), a correct
-   prose answer still counts as a miss.
-2. **Wrong-tool picks** — ratel-full's main extra cost (25 vs baseline's 11): the
-   discovery indirection sometimes surfaces or selects the wrong tool.
+Two failure modes, and the new arm shifts the mix:
 
-### On speed (a correction)
+1. **Refusals dominate ratel-full** (≈10/30). The injected discovery + gateway
+   indirection makes the model more likely to *select but not invoke* — e.g. it
+   reads the discovery, names the right tool ("I'll use **Glowing**…"), then asks
+   the user for a missing argument instead of calling `invoke_tool`. Pure-selection
+   scoring can't see that selection, so it counts as a miss. This is the bulk of
+   the faithfulness cost and the same artifact that caps oracle at 73%.
+2. **Wrong-tool picks grow with the pool** for both arms (baseline 3→7,
+   ratel-full 1→6) — more candidates, more ways to pick wrong. K=15 injecting more
+   candidates contributes to ratel-full's rise here.
 
-ratel-full is **not** faster per cell — it's slightly slower (17.3s vs 14.6s)
-because of the extra gateway round-trips (≈1.75 steps vs ≈1.38). Its win is
-*tokens, not latency*. Separately, within **every** arm, FAIL cells run much
-faster than PASS cells (oracle 3.6s vs 18.1s) because many failures are short
-zero-tool-call refusals — so fast cells skew toward failures, across all arms.
+### On speed
+
+ratel-full is **slower per cell** (18.9–20.4s vs baseline's 14–16s): the gateway
+adds round-trips (the model issues a real `invoke_tool`, sometimes a second
+`search_tools`). Its win is *tokens/cost, not latency*.
 
 ---
 
 ## Key takeaways
 
-1. **Ratel decouples context cost from catalog size** — flat ~3.3k input tokens
-   vs baseline's 15.6k at pool 180 (78% fewer), and the gap widens as the
-   catalog grows.
-2. **It costs ~11pp of selection accuracy here**, mostly via wrong-tool picks
-   from the discovery layer. The token/accuracy trade is the headline.
-3. **Oracle ceiling = 80%** — pure-selection scoring penalizes the ~20% of
-   queries the model answers directly. An LLM-judge or "no-tool-needed" gold
-   label would lift the ceiling and change the comparison.
-4. **Reproducibility gap in the SDK search** (per-call tie randomization) —
-   negligible at full N, real at small N; worth a deterministic mode.
-5. **Parallel runner**: 210 cells in 438s vs 55.5 min sequential-equivalent
-   (7.6× at concurrency 8).
+1. **Ratel decouples context cost from catalog size** — ~flat input vs baseline's
+   linear growth; 70% fewer input tokens / 74% lower cache-priced cost at pool 180,
+   widening with the catalog.
+2. **Faithful discovery costs ~7pp of selection accuracy here**, mostly via a
+   higher *refusal* rate from the gateway indirection (select-but-don't-invoke),
+   not wrong picks. The token/accuracy trade is the headline.
+3. **Pre-discovery K matters at scale** — K 5→15 buys +9pp injected-set recall at
+   pools 100/180 and tracks a 40%→50% pool-180 pass-rate gain; negligible at
+   pool 30.
+4. **Caching is within-run on this corpus** — both arms cache across loop steps;
+   oracle/cross-call don't (below the ~1024-token minimum). The structural win is
+   that ratel-full's tiny surface generates far less cache traffic.
+5. **Oracle ceiling ≈ 73%** — pure-selection scoring penalizes the ~27% of queries
+   the model answers directly. An LLM-judge or "no-tool-needed" gold label would
+   lift the ceiling and change the comparison.
 
 ## Caveats
 
-- **N = 30** subset — pass rates carry ±~9pp sampling noise; directional, not
-  definitive. Re-run with a larger `--sample` for tighter numbers.
-- Single model (`claude-sonnet-4-6`), single seed, one run per cell (no variance
-  bands).
+- **N = 30** subset — pass rates carry ±~9pp sampling/model noise; the recall
+  numbers (n=1,200) are the robust evidence for the K effect. Directional, not
+  definitive.
+- The **before/after for ratel-full** conflates two changes (injection mechanism +
+  K). The recall diagnostic isolates K cleanly; the pass-rate delta does not.
+- Single model (`claude-sonnet-4-6`), single seed, one run per cell.
 - MetaTool is **single-turn** with **no parameter schemas** — it exercises tool
-  *selection*, not argument construction or multi-turn context.
+  *selection*, not argument construction or multi-turn context (which is exactly
+  where cross-call caching and the "ask for a missing arg" refusals would resolve
+  differently).
 - Pure-selection scoring, no LLM judge (by design).
 
 ## Reproduce

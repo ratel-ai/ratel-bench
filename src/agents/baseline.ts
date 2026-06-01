@@ -3,6 +3,7 @@ import {
   type Tool as AISDKTool,
   jsonSchema,
   type LanguageModel,
+  type ModelMessage,
   stepCountIs,
   ToolLoopAgent,
   tool,
@@ -23,12 +24,20 @@ export interface BaseAgentConfig {
   timeoutMs?: number;
 }
 
+/** A base agent exposes the simple per-turn `run` plus a lower-level `generate`
+ *  that takes a fully-assembled message array (used by agents that inject
+ *  synthetic tool-call / tool-result messages, e.g. ratel-full). */
+export interface BaseAgent extends AgentInstance {
+  generate: (messages: ModelMessage[]) => Promise<AgentRunResult>;
+}
+
 /**
  * The core AI-SDK loop. Every other agent (oracle, ratel-full, ...) assembles
  * its own tool surface and then calls `buildBaseAgent` with it — the loop and
  * the metering are identical across arms.
  */
-export function buildBaseAgent(config: BaseAgentConfig): AgentInstance {
+export function buildBaseAgent(config: BaseAgentConfig): BaseAgent {
+  markLastToolCacheBreakpoint(config.tools);
   const agent = new ToolLoopAgent({
     model: config.model,
     tools: config.tools,
@@ -38,22 +47,41 @@ export function buildBaseAgent(config: BaseAgentConfig): AgentInstance {
   });
   const timeoutMs = config.timeoutMs ?? 60_000;
 
+  const generate = async (messages: ModelMessage[]): Promise<AgentRunResult> => {
+    const started = Date.now();
+    let raw: GenerateResult | null = null;
+    let error: string | null = null;
+    try {
+      raw = (await withTimeout(agent.generate({ messages }), timeoutMs)) as GenerateResult;
+    } catch (err) {
+      error = (err as Error).message ?? String(err);
+    }
+    const wallMs = Date.now() - started;
+    return summarize(raw, config.nameToId, wallMs, error);
+  };
+
   return {
-    run: async (input: TurnInput): Promise<AgentRunResult> => {
-      const started = Date.now();
-      let raw: GenerateResult | null = null;
-      let error: string | null = null;
-      try {
-        raw = (await withTimeout(
-          agent.generate({ messages: input.messages }),
-          timeoutMs,
-        )) as GenerateResult;
-      } catch (err) {
-        error = (err as Error).message ?? String(err);
-      }
-      const wallMs = Date.now() - started;
-      return summarize(raw, config.nameToId, wallMs, error);
-    },
+    generate,
+    run: (input: TurnInput) => generate(input.messages as ModelMessage[]),
+  };
+}
+
+/**
+ * Put a single Anthropic ephemeral cache breakpoint on the LAST tool in the
+ * dict, which caches the whole (preceding) tool block — the largest stable
+ * prefix every arm shares. Applied uniformly so arms stay comparable; it never
+ * changes what the model sees (cache_control is stripped before content). The
+ * structural win lands where the block is actually reused: ratel-full's
+ * gateway tools are byte-identical across calls (cross-call reads), whereas
+ * baseline/oracle pools are unique per scenario (single-turn → write-only).
+ */
+function markLastToolCacheBreakpoint(tools: Record<string, AISDKTool>): void {
+  const keys = Object.keys(tools);
+  if (keys.length === 0) return;
+  const last = tools[keys[keys.length - 1]];
+  last.providerOptions = {
+    ...(last.providerOptions ?? {}),
+    anthropic: { cacheControl: { type: "ephemeral" } },
   };
 }
 
@@ -112,12 +140,20 @@ interface GenerateResult {
   finishReason?: string;
   steps: Array<{
     toolCalls?: Array<{ toolName: string; input?: unknown }>;
+    // AI SDK v6 `LanguageModelUsage`: `inputTokens` is the grand total (incl.
+    // cache read + write); cache splits live under `inputTokenDetails`. There is
+    // no `cacheCreationInputTokens` in v6 — reading it would silently drop the
+    // cache-write count.
     usage?: {
       inputTokens?: number;
       outputTokens?: number;
-      cachedInputTokens?: number;
-      cacheCreationInputTokens?: number;
       totalTokens?: number;
+      cachedInputTokens?: number;
+      inputTokenDetails?: {
+        noCacheTokens?: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+      };
     };
   }>;
 }
@@ -148,10 +184,11 @@ function summarize(
   for (const step of raw.steps) {
     const u = step.usage;
     if (u) {
+      // `inputTokens` already includes cache read + write tokens.
       input += u.inputTokens ?? 0;
       output += u.outputTokens ?? 0;
-      cached += u.cachedInputTokens ?? 0;
-      cacheCreation += u.cacheCreationInputTokens ?? 0;
+      cached += u.inputTokenDetails?.cacheReadTokens ?? u.cachedInputTokens ?? 0;
+      cacheCreation += u.inputTokenDetails?.cacheWriteTokens ?? 0;
       total += u.totalTokens ?? 0;
     }
     for (const call of step.toolCalls ?? []) {
@@ -160,7 +197,7 @@ function summarize(
       toolCalls.push({ toolId: canonical, args });
     }
   }
-  if (total === 0) total = input + output + cached;
+  if (total === 0) total = input + output;
   return {
     finalText: raw.text ?? "",
     toolCalls,
