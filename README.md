@@ -1,153 +1,144 @@
 # ratel-bench
 
-Two-layer benchmark harness for [**Ratel**](https://github.com/ratel-ai/ratel) — measures retrieval quality and agent-loop token savings. Backs every "Ratel does X better" claim. New product features that touch retrieval or context shape are expected to add a corresponding scenario before being declared done.
+A minimal TypeScript harness for benchmarking [**Ratel**](https://github.com/ratel-ai/ratel)
+context-engineering against a baseline — measuring **tool-selection retrieval
+quality** and **agent-loop token cost** at varying catalog (pool) sizes.
 
-This repo is intentionally decoupled from the Ratel monorepo: the agent campaign pins `@ratel-ai/sdk@0.1.5` from npm and the retrieval crate pins `ratel-ai-core@0.1.5` from crates.io, so the harness measures the same artifacts users install — not whatever's on the working tree.
+The harness pins `@ratel-ai/sdk` from npm, so it measures the artifact users
+install. Datasets are ingested locally and gitignored — nothing is snapshotted in
+the repo.
 
-**Latest results: [`RESULTS.md`](RESULTS.md)** — narrative breakdown across Claude (Sonnet, Opus), `glm-5.1:cloud`, and local `qwen3.5`.
+**Latest results: [`REPORT.md`](REPORT.md)** — full MetaTool campaign (retrieval
+sweep + 3-arm agent campaign with token/cost split, recall@K, and the
+faithfulness/caching analysis).
 
-## Where Ratel is most valuable today
+## What it does
 
-| your situation | Ratel's value today |
-|---|---|
-| Local model + large catalog | **Critical.** qwen3.5 at pool=100 goes from 8% → 77% (-57% input tokens, -36% wall time). |
-| Open-source cloud + large catalog | **Strong win.** glm-5.1 at pool=180: **+1.7 pp** accuracy and **-85%** input tokens; pool-invariant accuracy as the catalog grows. |
-| Frontier (Sonnet) + large catalog | **Cost-driven win.** Sonnet 4.6 at pool=180: **-82%** input tokens, **-68%** $; -8 pp accuracy. |
-| Frontier (Opus) + large catalog | **Competitive win.** Opus 4.6 pool=180: **+8 pp** accuracy and **-72%** tokens (discovery-tool arm). Opus 4.7 pool=180: ≈parity (-1.7 pp) with **-81%** tokens — Anthropic's own tool-search-tool loses **-8 pp** on the same setup. |
-| Any model + tiny catalog (≤30) | Skip Ratel — pool fits in the prompt cleanly. |
+Two things, from one CLI (`src/cli.ts`):
 
-Full per-pool breakdown and methodology in [`RESULTS.md`](RESULTS.md).
+1. **Tool-selection (retrieval).** BM25 over the catalog at each pool size; scores
+   `MRR@5` (`1/position` if the gold tool is in the top-5). Deterministic, $0, no
+   API key. (`src/tool-selection.ts`)
+2. **Agent campaign.** Runs three arms over the scenarios × pool sizes, scoring
+   `pass = expectedTool ∈ effectiveToolIds` (pure selection, no LLM judge).
+   (`src/runner.ts`, `src/agents/`)
 
-Locked decisions live in:
+### Arms
 
-- [`docs/adr/0005-benchmark-design.md`](docs/adr/0005-benchmark-design.md) — overall harness (arms, models, variance, results storage)
-- [`docs/adr/0006-benchmark-corpus-and-eval-modes.md`](docs/adr/0006-benchmark-corpus-and-eval-modes.md) — corpus pivot + the three eval modes
-- [`docs/adr/0007-benchmark-corpus-not-snapshotted.md`](docs/adr/0007-benchmark-corpus-not-snapshotted.md) — corpus is ingested locally; no committed snapshot, no MetaTool sampling
+All three share one AI-SDK `ToolLoopAgent` loop (`src/agents/baseline.ts`); they
+differ only in the tool surface fed in.
+
+- **oracle** — only the gold tool(s) exposed. Upper bound, pool-agnostic.
+- **baseline** — the full pool registered as direct tools. The fat-context floor.
+- **ratel-full** — gateway-only (`search_tools` / `invoke_tool`) with BM25
+  pre-discovery **injected as a synthetic `search_tools` tool-result message**, so
+  the model can't tell pre-discovery from self-discovery and must `invoke_tool` a
+  hit. (`src/agents/ratel-full.ts`)
+
+A uniform Anthropic ephemeral cache breakpoint is set on every arm's tool block
+(plus ratel-full's injected discovery); token metering splits input into
+fresh / cache-read / cache-write.
 
 ## Layout
 
 ```
-retrieval/    Rust crate (ratel-benchmark-retrieval) — ingest + BM25 metrics
-agent/        TypeScript pnpm package (@ratel-ai/benchmark) — MetaTool agent campaign + report
-bfcl-loaded/  TypeScript + Python pnpm package (@ratel-ai/bfcl-loaded) — BFCL v4 multi-turn agent campaign
-fixtures/     raw upstream downloads (gitignored)
-test-data/    normalized JSONL produced by `ingest` (gitignored — ADR-0007)
-results/      retrieval / agent JSONL outputs + REPORT.md (gitignored)
+src/
+  cli.ts             entrypoint: load → tool-selection + agent campaign → JSONL + summary
+  types.ts           Dataset / Scenario / Turn / ToolSpec / Agent / AgentRunResult
+  dataset.ts         loadDataset()
+  pool.ts            buildScenarioPool() — per-scenario gold-first + deterministic distractors
+  catalog.ts         thin wrapper over @ratel-ai/sdk ToolCatalog
+  tool-selection.ts  retrieval (MRR@5) sweep
+  runner.ts          campaign task list + bounded-concurrency runner + summary
+  agents/            baseline (+ base loop & metering), oracle, ratel-full
+  ingest/metatool.ts MetaTool Lane-B ingest → datasets/metatool.json
+datasets/
+  example-dataset.json   committed toy dataset (30 tools, 2 scenarios)
+  metatool.json          generated, gitignored (199 tools, 20,614 scenarios)
+results/                 JSONL + summary.json outputs (gitignored)
+REPORT.md                latest narrative results
 ```
-
-Both `retrieval/` and `agent/` have their own README with the details of how to run their layer.
-
-## Eval modes
-
-Per [ADR-0006](docs/adr/0006-benchmark-corpus-and-eval-modes.md), three eval modes split across two suites.
-
-**Retrieval-only** — fast, deterministic, $0, no API keys. Backs claims about ranking quality. Lives in [`retrieval/`](retrieval/).
-
-- **(a) MetaTool — pre-fetch retrieval (replace path).** Measures whether BM25 surfaces the right tool given a real user-task query, before the agent's turn. 199 OpenAI plugin descriptions + ~21k user queries (MIT).
-- **(b) ToolRet — IR / autonomous-discovery retrieval (gateway path).** Measures whether the index ranks correctly when the agent emits an IR-shaped query mid-loop (e.g. `searchTools("a tool that converts currency")`). 7,961 retrieval tasks across 35 sub-corpora over a 44,453-tool catalog (Apache-2.0).
-
-**Agentic** — end-to-end agent runs with token cost + correctness signals. Requires API keys. Lives in [`agent/`](agent/).
-
-- **(c) MetaTool tasks + LLM-as-judge.** Runs control (baseline + oracle) arms alongside three Ratel arms (full / pre-discovery only / discovery-tool only) on MetaTool user-task queries with stubbed tool responses. The full Ratel arm pre-discovers BM25 top-K from the prompt *and* exposes the gateway (`search_tools` / `invoke_tool`) so the model can recover when pre-discovery missed; the two ablations isolate which layer is doing the work. An optional local-only `claude-sdk-tool-search` arm can be wired up alongside as a competitive baseline against Anthropic's native tool-search-tool. Programmatic judge does selection-only intersection (`effective_tool_ids ∩ gold_tools ≠ ∅`); the LLM judge scores final-text coherence against the user prompt as a fallback / tiebreaker. Reports input/output tokens, cache hit rate, $-cost, and wall-clock time at realistic catalog sizes (default pool size 180), averaged per-scenario across runs and then across scenarios.
 
 ## Setup
 
-### Prerequisites
-
-- **Node.js 20+** and **pnpm 10+** (the repo pins `pnpm@10.28.2` via `packageManager`). Drives the agent campaign and the report renderer.
-- **Rust stable** (1.85+ — the retrieval crate uses edition 2024). Drives ingest and retrieval-only modes.
-- **API keys** (mode c only — retrieval-only is $0 and key-free):
-  - `OPENAI_API_KEY` — required to score `gpt-5.4-mini`.
-  - `ANTHROPIC_API_KEY` — required to score `claude-sonnet-4-6` / `claude-opus-4-7` **and** to power the default LLM judge.
-
-  Set at least one. The harness skips models with no key rather than failing. Place them in `.env` at the repo root — `dotenv` is loaded automatically.
-
-### Install
+- **Node 20+**, **pnpm 10+** (pinned `pnpm@10.28.2`).
+- **API keys** (agent campaign only — retrieval is $0/key-free): `ANTHROPIC_API_KEY`
+  for `claude-*`, `OPENAI_API_KEY` for `gpt-*`. Put them in `.env` (loaded via
+  `dotenv`). Any other model id (e.g. `retrieval-only`) skips the agent campaign.
 
 ```bash
-pnpm install                  # JS deps for agent/ + bfcl-loaded/ + mcpverse/
-cargo build -p ratel-benchmark-retrieval --release   # optional — first `cargo run --release` compiles otherwise
+pnpm install
 ```
 
-`pnpm install` is the only required step for the agent layer. The retrieval crate's deps are pulled lazily on first `cargo run`, so the explicit `cargo build` above is just a warm-up.
+## Ingest
 
-## Ingest datasets
-
-Per [ADR-0007](docs/adr/0007-benchmark-corpus-not-snapshotted.md), the corpora are **not** committed — neither the raw upstream downloads (`fixtures/`) nor the normalized JSONL (`test-data/`). You have to ingest once before any benchmark can run.
+The corpus is not committed — regenerate it deterministically from pinned upstream
+URLs (cached under `datasets/.cache/`):
 
 ```bash
-# MetaTool — feeds retrieval mode (a) and the agent campaign mode (c).
-cargo run -p ratel-benchmark-retrieval --release -- ingest metatool --download
-
-# ToolRet — feeds retrieval mode (b). Skip if you only care about the agent campaign.
-cargo run -p ratel-benchmark-retrieval --release -- ingest toolret --download
+pnpm ingest:metatool      # → datasets/metatool.json
 ```
 
-`--download` pulls upstream sources (MetaTool: MIT, ToolRet: Apache-2.0) into `fixtures/` via `curl`, then writes normalized JSONL to `test-data/metatool.jsonl` and `test-data/toolret.jsonl`. Re-running without `--download` against the cached fixtures produces a byte-identical JSONL. Full ingest tunables in [`retrieval/README.md`](retrieval/README.md).
-
-Or let `run-all` handle ingest for you — it no-ops when the snapshots already exist.
-
-## Run the whole benchmark
+## Run
 
 ```bash
-pnpm -F @ratel-ai/benchmark run-all
+# Retrieval only, full corpus (no API key):
+pnpm start --dataset datasets/metatool.json --pools 30,100,180 \
+  --model retrieval-only --out results/mt-retrieval
+
+# Agent campaign, 30-scenario subset (needs ANTHROPIC_API_KEY):
+pnpm start --dataset datasets/metatool.json --pools 30,100,180 \
+  --sample 30 --model claude-sonnet-4-6 --agents ratel-full \
+  --concurrency 8 --out results/mt-agents
 ```
 
-This single command:
+**Flags** (env fallbacks in parens): `--dataset` (`DATASET`), `--pools` (`POOLS`,
+default `10,30`), `--model` (`MODEL`, default `claude-sonnet-4-6`), `--agents`
+(`AGENTS`, default `ratel-full`; comma-list of non-control arms, baseline+oracle
+always run), `--sample N` (`SAMPLE`, deterministic subset; 0 = all), `--seed`,
+`--top-k` (retrieval cutoff), `--concurrency` (`CONCURRENCY`, default 8), `--out`.
 
-1. Ingests MetaTool and ToolRet (downloads upstream sources via `curl`) if their normalized JSONL isn't already present under `test-data/`.
-2. Runs BM25 retrieval over each corpus at corpus-appropriate pool sizes (modes a + b).
-3. Runs the mode-(c) MetaTool agent campaign with conservative defaults if `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set; otherwise prints a notice and skips. Defaults: 50 sampled scenarios × 1 run × every committed arm × available models, $5 global cap.
-4. Renders `results/REPORT.md` from the retrieval and (if present) agent JSONL outputs.
-
-Re-running `run-all` skips ingest when the snapshot already exists; pass `--force` to re-ingest, `--skip-ingest` to fail loudly if missing, `--skip-agent` to opt out of mode (c) even when keys are set, or `--only metatool|toolret` to restrict retrieval to one corpus. For the headline N=5 variance run, invoke `pnpm -F @ratel-ai/benchmark start` directly — see [`agent/README.md`](agent/README.md).
-
-## Run only the agent benchmark (mode c)
-
-Use this when you're iterating on agent behavior and don't want to repay retrieval each loop. Prerequisites: `pnpm install` done, MetaTool ingested (`test-data/metatool.jsonl` exists), and at least one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` exported.
-
-Fast local smoke (~$0.20–$1, ~50 scenarios × 1 run × 3 arms × 1 model):
+**Outputs** (gitignored): `results/<run>/tool-selection.jsonl`, `agents.jsonl`,
+`summary.json`. The summary JSON is the machine-readable report; `REPORT.md` is the
+hand-written narrative.
 
 ```bash
-pnpm -F @ratel-ai/benchmark start \
-  --scenarios 50 --runs 1 \
-  --arms control-baseline,control-oracle,ratel-full \
-  --models claude-sonnet-4-6 \
-  --pool-sizes 180 \
-  --dollar-global 5 \
-  --concurrency 10
+pnpm typecheck && pnpm lint
 ```
-
-Output: one JSONL row per `(scenario, arm, model, pool_size, run)` cell in `agent/results/agent.jsonl` (resumable — re-runs skip already-recorded cells unless `--force`). Render a report with `pnpm -F @ratel-ai/benchmark report`.
-
-Full flag reference, the N=5 variance recipe, the local-Ollama path, and the cached-control-runs / `--ephemeral` workflow live in [`agent/README.md`](agent/README.md).
-
-## Run only retrieval (modes a + b)
-
-Fast, deterministic, $0, no API keys. Once the corpora are ingested:
-
-```bash
-cargo run -p ratel-benchmark-retrieval --release -- retrieval \
-  --corpus test-data/metatool.jsonl \
-  --output results/metatool-retrieval.jsonl \
-  --top-k 1,3,5,10 --pool-sizes 30,100,180
-```
-
-ToolRet uses the same runner with a different corpus and pool-size sweep. Full reference in [`retrieval/README.md`](retrieval/README.md).
 
 ## Corpus format
 
-All suites consume the same JSONL — one `Scenario` per line:
+One `Dataset` JSON (`src/types.ts` is canonical):
 
 ```jsonc
 {
-  "id": "fs-001",
-  "prompt": "Show me /etc/hosts.",
-  "candidate_pool": [ /* tools available in this scenario */ ],
-  "gold_tools": ["fs.read_file"],
-  "judge_criteria": "mentions localhost",
-  "category": "filesystem"
+  "tools": [{ "id": "weather.get", "name": "weather.get", "description": "…", "inputSchema": {} }],
+  "scenarios": [{
+    "id": "metatool-st-42",
+    "turns": [{
+      "input": { "messages": [{ "role": "user", "content": "what's the weather in Paris?" }] },
+      "expectedTool": "weather.get",      // gold tool id for this turn
+      "expectedQuery": "weather in Paris" // authored IR query (retrieval scoring)
+    }]
+  }]
 }
 ```
 
-The Rust definition in [`retrieval/src/corpus.rs`](retrieval/src/corpus.rs) is canonical. The TS mirror in [`agent/src/types.ts`](agent/src/types.ts) tracks it.
+MetaTool ingests to this shape (single-turn, no parameter schemas).
+
+## Open questions / next steps
+
+- **Cleaner K attribution.** ratel-full's pass-rate before/after conflates the
+  injection-mechanism change with K 5→15. An A/B varying *only* K on the current
+  injection would isolate it. (The recall@K diagnostic in `REPORT.md` already
+  isolates the retrieval effect — n=1,200, no API.)
+- **Selection-aware scoring.** Pure selection counts "names the right tool but
+  doesn't `invoke_tool`" as a miss — the bulk of the refusals and the ~73% oracle
+  ceiling. An LLM-judge / commit-extraction pass would credit selection across all
+  arms.
+- **SDK determinism.** `@ratel-ai/sdk` search randomizes tied results per call — a
+  seedable mode upstream would make runs bit-reproducible (see `REPORT.md`).
+- **Tighter numbers.** N=30 carries ±~9pp; a larger `--sample` and/or a second
+  model would firm up the agent pass rates.
+- **Reproduce recall@K.** The recall diagnostic was a throwaway script; add a small
+  committed mode if it's worth re-running.
