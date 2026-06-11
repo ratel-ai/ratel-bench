@@ -21,6 +21,13 @@ const AGENT_REGISTRY: Record<string, Agent> = {
   "ratel-full": ratelFullAgent,
 };
 
+/** Local models need no key — the `ollama:` prefix routes through an
+ * OpenAI-compatible endpoint (Ollama's by default; set OLLAMA_BASE_URL for
+ * llama.cpp's llama-server, mlx_lm.server, LM Studio, vLLM, or a remote box).
+ * Example: `--model ollama:qwen3.5`. */
+const OLLAMA_PREFIX = "ollama:";
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
+
 interface CliConfig {
   dataset: string;
   pools: number[];
@@ -91,6 +98,14 @@ function toInt(s: string): number {
 }
 
 function resolveModel(id: string): RunModel | null {
+  if (id.startsWith(OLLAMA_PREFIX)) {
+    // `.chat(...)` forces the legacy `/v1/chat/completions` wire format. The
+    // default factory call uses OpenAI's Responses API (typed items like
+    // `item_reference`), which local OpenAI-compatible servers don't speak.
+    const baseURL = process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL;
+    const provider = createOpenAI({ baseURL, apiKey: "ollama" });
+    return { id, model: provider.chat(id.slice(OLLAMA_PREFIX.length)) as LanguageModel };
+  }
   if (id.startsWith("claude-")) {
     if (!process.env.ANTHROPIC_API_KEY) return null;
     const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -134,7 +149,8 @@ async function main() {
   if (!runModel) {
     console.error(
       `skipping agent campaign: no API key for model "${cfg.modelId}" ` +
-        `(set ANTHROPIC_API_KEY for claude-*, OPENAI_API_KEY for gpt-*)`,
+        `(set ANTHROPIC_API_KEY for claude-*, OPENAI_API_KEY for gpt-*; ` +
+        `ollama:* needs no key)`,
     );
   } else {
     writeFileSync(agentRowsPath, "");

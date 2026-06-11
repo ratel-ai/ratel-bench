@@ -65,6 +65,10 @@ REPORT.md                latest narrative results
 - **API keys** (agent campaign only — retrieval is $0/key-free): `ANTHROPIC_API_KEY`
   for `claude-*`, `OPENAI_API_KEY` for `gpt-*`. Put them in `.env` (loaded via
   `dotenv`). Any other model id (e.g. `retrieval-only`) skips the agent campaign.
+- **Local models** (no key): `--model ollama:<tag>` routes through an
+  OpenAI-compatible endpoint, Ollama's `http://localhost:11434/v1` by default.
+  Set `OLLAMA_BASE_URL` to point the same prefix at llama.cpp's `llama-server`,
+  `mlx_lm.server`, LM Studio, vLLM, or a remote box.
 
 ```bash
 pnpm install
@@ -90,6 +94,11 @@ pnpm start --dataset datasets/metatool.json --pools 30,100,180 \
 pnpm start --dataset datasets/metatool.json --pools 30,100,180 \
   --sample 30 --model claude-sonnet-4-6 --agents ratel-full \
   --concurrency 8 --out results/mt-agents
+
+# Same campaign on a local model via Ollama ($0, no key; serial on consumer hw):
+pnpm start --dataset datasets/metatool.json --pools 30,100,180 \
+  --sample 30 --model ollama:qwen3.5 --agents ratel-full \
+  --concurrency 1 --out results/mt-agents-local
 ```
 
 **Flags** (env fallbacks in parens): `--dataset` (`DATASET`), `--pools` (`POOLS`,
