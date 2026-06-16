@@ -83,9 +83,11 @@ fn ingest_round_trips_through_retrieval_runner() {
     ingest_to_jsonl(&paths, &corpus).unwrap();
 
     let retrieval_out = dir.path().join("retrieval.jsonl");
+    let summary_out = dir.path().join("retrieval-summary.jsonl");
     let summary = run_retrieval(&RunConfig {
         corpus_path: corpus.clone(),
         output_path: retrieval_out.clone(),
+        summary_path: summary_out.clone(),
         scenario_limit: None,
         top_ks: vec![1, 3],
         pool_sizes: vec![3, 6],
@@ -95,6 +97,14 @@ fn ingest_round_trips_through_retrieval_runner() {
     assert_eq!(summary.scenarios, 8);
     // 8 scenarios × 2 pool sizes × 2 K cutoffs = 32 rows.
     assert_eq!(summary.rows_written, 32);
+
+    let summary_body = std::fs::read_to_string(&summary_out).unwrap();
+    let summary_line = summary_body.lines().next().expect("one summary line");
+    let summary_json: serde_json::Value = serde_json::from_str(summary_line).unwrap();
+    assert_eq!(summary_json["scenarios"], 8);
+    assert_eq!(summary_json["pool_sizes"], serde_json::json!([3, 6]));
+    assert_eq!(summary_json["by_pool_size"].as_array().unwrap().len(), 2);
+    assert_eq!(summary_json["overall"]["by_k"].as_array().unwrap().len(), 2);
 
     let body = std::fs::read_to_string(&retrieval_out).unwrap();
     let mut row_count = 0usize;

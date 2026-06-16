@@ -10,7 +10,8 @@ Pairs with the TS agent layer at [`agent/`](../agent). For the modes overview an
 src/
   corpus.rs         scenario JSONL parser + ToolSpec
   retrieval.rs      BM25 ranking + recall/precision/MRR/nDCG
-  runner.rs         scenario × pool_size × k cell driver
+  runner.rs         scenario × pool_size × k cell driver + summary aggregation
+  stats.rs          mean/median/population-stddev helpers
   ingest/
     metatool.rs     MetaTool → normalized JSONL adapter
     toolret.rs      ToolRet → normalized JSONL adapter
@@ -48,10 +49,24 @@ cargo run -p ratel-benchmark-retrieval --release -- retrieval \
 
 Emits one JSONL row per `(scenario, pool_size, k)` cell with recall@K, precision@K, MRR@K, hit@K, and nDCG@K (binary relevance). One BM25 ranking per query is sliced at every K cutoff, so adding more K values is essentially free.
 
+Alongside the detail JSONL, an aggregate **summary** is appended automatically (default
+`results/metatool-retrieval-summary.jsonl`, derived from `--output`). Each run adds one
+compact JSON line — existing lines are kept, so re-running this command (e.g. after a BM25
+tuning change, or on a later date) builds up a comparable history of experiments rather than
+clobbering the previous run; `generated_at` on each line is what distinguishes one run from
+another. Each line has an `overall` block (mean/median precision/recall/nDCG/MRR + hit-rate per
+K, aggregated across every pool size) and a `by_pool_size` breakdown with the same shape per
+pool size. Both blocks also report `bm25_gold_score` — the mean/median/population-stddev of
+the raw BM25 score assigned to the gold tool when it's found in the ranking, plus `coverage`
+(the fraction of scenarios where it was found at all). This is the standalone "average
+retriever performance" artifact; no TS report run required. (Note: unlike the summary, the
+detail JSONL at `--output` is still overwritten on each run.)
+
 Tunables:
 
 - `--corpus PATH` — JSONL corpus to evaluate.
-- `--output PATH` (default `results/retrieval.jsonl`) — where to write the metrics JSONL.
+- `--output PATH` (default `results/retrieval.jsonl`) — where to write the metrics JSONL (overwritten each run).
+- `--summary-output PATH` (default: `--output` with its extension replaced by `-summary.jsonl`) — where to append the aggregate overall-performance summary, one JSON line per run.
 - `--top-k A,B,C` (default `1,3,5,10`) — comma-separated K cutoffs.
 - `--pool-sizes A,B,C` (default `30,150,600`) — catalog scales to evaluate at. MetaTool's gold-tool universe is ≈199 plugins, so `30,100,180` keeps every cell meaningful (the default `30,150,600` would silently clamp).
 - `--scenarios N` — limit to first N rows for a smoke run.

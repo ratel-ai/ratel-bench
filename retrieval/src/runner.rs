@@ -4,8 +4,8 @@
 //! using tools from other scenarios as distractors. Emits one JSONL row per
 //! `(scenario, pool_size)` cell.
 
-use std::collections::HashSet;
-use std::fs::File;
+use std::collections::{HashMap, HashSet};
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
@@ -15,12 +15,19 @@ use serde::Serialize;
 
 use crate::corpus::{Scenario, ToolSpec, load_scenarios};
 use crate::retrieval::{RetrievalMetrics, build_pool, evaluate_at_ks};
+use crate::stats::{self, Stats};
 
 /// Inputs for one retrieval-only run.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub corpus_path: PathBuf,
     pub output_path: PathBuf,
+    /// Where to append the aggregate overall-performance summary. One
+    /// compact JSON object per run is appended as a new line (JSONL), so
+    /// repeated runs accumulate a history you can compare across time —
+    /// distinguished by each line's `generated_at` timestamp. Created if it
+    /// doesn't exist yet.
+    pub summary_path: PathBuf,
     pub scenario_limit: Option<usize>,
     /// K cutoffs to score at, in the order the runner should emit them.
     /// Each `(scenario, pool_size)` cell produces one JSONL row per K.
@@ -57,6 +64,11 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     let global_distractors = collect_global_distractors(&scenarios);
     let mut rows = 0usize;
 
+    let mut overall_score = ScoreAcc::default();
+    let mut overall_k: HashMap<usize, KAcc> = HashMap::new();
+    let mut by_pool_score: HashMap<usize, ScoreAcc> = HashMap::new();
+    let mut by_pool_k: HashMap<(usize, usize), KAcc> = HashMap::new();
+
     for scenario in &scenarios {
         let scenario_ids: HashSet<&String> =
             scenario.candidate_pool.iter().map(|t| &t.id).collect();
@@ -78,6 +90,24 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
                 &scenario.gold_tools,
                 &config.top_ks,
             );
+
+            // `gold_score` is identical across every `k` entry for this
+            // (scenario, pool) cell — pull it once so it isn't double-counted.
+            let gold_score = all_metrics.first().and_then(|m| m.gold_score);
+            overall_score.push(gold_score);
+            by_pool_score
+                .entry(target_size)
+                .or_default()
+                .push(gold_score);
+
+            for metrics in &all_metrics {
+                overall_k.entry(metrics.k).or_default().push(metrics);
+                by_pool_k
+                    .entry((target_size, metrics.k))
+                    .or_default()
+                    .push(metrics);
+            }
+
             for metrics in all_metrics {
                 let row = RetrievalRow {
                     scenario_id: scenario.id.clone(),
@@ -92,9 +122,48 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     }
 
     writer.flush()?;
+
+    if let Some(parent) = config.summary_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("creating summary dir {}: {e}", parent.display()))?;
+    }
+    let summary = OverallSummary {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        corpus: config.corpus_path.display().to_string(),
+        output: config.output_path.display().to_string(),
+        scenarios: scenarios.len(),
+        rows_written: rows,
+        top_k: config.top_ks.clone(),
+        pool_sizes: config.pool_sizes.clone(),
+        seed: config.seed,
+        overall: PoolSizeSummary::build(None, overall_score, &config.top_ks, overall_k),
+        by_pool_size: config
+            .pool_sizes
+            .iter()
+            .map(|&pool_size| {
+                let score = by_pool_score.remove(&pool_size).unwrap_or_default();
+                let ks: HashMap<usize, KAcc> = config
+                    .top_ks
+                    .iter()
+                    .filter_map(|&k| by_pool_k.remove(&(pool_size, k)).map(|acc| (k, acc)))
+                    .collect();
+                PoolSizeSummary::build(Some(pool_size), score, &config.top_ks, ks)
+            })
+            .collect(),
+    };
+    // Append (not overwrite): each run adds one line, so the file accumulates
+    // a comparable history across experiments run at different times.
+    let mut summary_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.summary_path)
+        .map_err(|e| anyhow::anyhow!("opening {}: {e}", config.summary_path.display()))?;
+    writeln!(summary_file, "{}", serde_json::to_string(&summary)?)?;
+
     Ok(RunSummary {
         scenarios: scenarios.len(),
         rows_written: rows,
+        summary_path: config.summary_path.clone(),
     })
 }
 
@@ -102,6 +171,156 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
 pub struct RunSummary {
     pub scenarios: usize,
     pub rows_written: usize,
+    pub summary_path: PathBuf,
+}
+
+/// Accumulates rank-dependent metrics for one `k` cutoff across scenarios.
+#[derive(Debug, Default)]
+struct KAcc {
+    recall: Vec<f64>,
+    precision: Vec<f64>,
+    ndcg: Vec<f64>,
+    mrr: Vec<f64>,
+    hits: usize,
+}
+
+impl KAcc {
+    fn push(&mut self, m: &RetrievalMetrics) {
+        self.recall.push(m.recall_at_k);
+        self.precision.push(m.precision_at_k);
+        self.ndcg.push(m.ndcg_at_k);
+        self.mrr.push(m.reciprocal_rank);
+        if m.hit_at_k {
+            self.hits += 1;
+        }
+    }
+
+    fn summarize(&self, k: usize) -> KSummary {
+        let n = self.recall.len();
+        KSummary {
+            k,
+            n,
+            mean_precision: stats::mean(&self.precision),
+            median_precision: stats::median(&self.precision),
+            mean_recall: stats::mean(&self.recall),
+            median_recall: stats::median(&self.recall),
+            mean_ndcg: stats::mean(&self.ndcg),
+            median_ndcg: stats::median(&self.ndcg),
+            mean_mrr: stats::mean(&self.mrr),
+            median_mrr: stats::median(&self.mrr),
+            hit_rate: if n == 0 {
+                0.0
+            } else {
+                self.hits as f64 / n as f64
+            },
+        }
+    }
+}
+
+/// Accumulates BM25 gold-tool scores across scenarios for one group
+/// (overall, or one pool size). `total` is the number of scenarios
+/// evaluated in the group; `scores` holds only the `Some` values, so
+/// `coverage = scores.len() / total`.
+#[derive(Debug, Default)]
+struct ScoreAcc {
+    total: usize,
+    scores: Vec<f64>,
+}
+
+impl ScoreAcc {
+    fn push(&mut self, gold_score: Option<f64>) {
+        self.total += 1;
+        if let Some(s) = gold_score {
+            self.scores.push(s);
+        }
+    }
+
+    fn summarize(&self) -> GoldScoreSummary {
+        GoldScoreSummary {
+            stats: stats::summarize(&self.scores),
+            n: self.scores.len(),
+            coverage: if self.total == 0 {
+                0.0
+            } else {
+                self.scores.len() as f64 / self.total as f64
+            },
+        }
+    }
+}
+
+/// BM25 score for the gold tool, summarized over scenarios where it was
+/// found (`n` of `total` — see `coverage`).
+#[derive(Debug, Clone, Serialize)]
+pub struct GoldScoreSummary {
+    #[serde(flatten)]
+    pub stats: Stats,
+    pub n: usize,
+    pub coverage: f64,
+}
+
+/// Mean/median rank-quality metrics for one `k` cutoff, aggregated across
+/// every scenario in the group.
+#[derive(Debug, Clone, Serialize)]
+pub struct KSummary {
+    pub k: usize,
+    pub n: usize,
+    pub mean_precision: f64,
+    pub median_precision: f64,
+    pub mean_recall: f64,
+    pub median_recall: f64,
+    pub mean_ndcg: f64,
+    pub median_ndcg: f64,
+    pub mean_mrr: f64,
+    pub median_mrr: f64,
+    pub hit_rate: f64,
+}
+
+/// One aggregation group: either "overall" (`pool_size: None`, spans every
+/// pool size) or one specific pool size.
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolSizeSummary {
+    pub pool_size: Option<usize>,
+    pub n: usize,
+    pub bm25_gold_score: GoldScoreSummary,
+    pub by_k: Vec<KSummary>,
+}
+
+impl PoolSizeSummary {
+    fn build(
+        pool_size: Option<usize>,
+        score: ScoreAcc,
+        top_ks: &[usize],
+        mut k_accs: HashMap<usize, KAcc>,
+    ) -> Self {
+        let n = score.total;
+        let by_k = top_ks
+            .iter()
+            .filter_map(|&k| k_accs.remove(&k).map(|acc| acc.summarize(k)))
+            .collect();
+        PoolSizeSummary {
+            pool_size,
+            n,
+            bm25_gold_score: score.summarize(),
+            by_k,
+        }
+    }
+}
+
+/// Overall-performance summary written alongside the per-row JSONL: one
+/// headline `overall` block spanning every pool size, plus a `by_pool_size`
+/// breakdown matching the existing TS report's pool-size panels.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverallSummary {
+    pub generated_at: String,
+    pub corpus: String,
+    pub output: String,
+    pub scenarios: usize,
+    pub rows_written: usize,
+    pub top_k: Vec<usize>,
+    pub pool_sizes: Vec<usize>,
+    pub seed: u64,
+    pub overall: PoolSizeSummary,
+    pub by_pool_size: Vec<PoolSizeSummary>,
 }
 
 /// Pool every tool from every scenario into a global distractor list. Each
@@ -186,9 +405,11 @@ mod tests {
         ];
         let corpus = write_corpus(&scenarios);
         let out = tempfile::NamedTempFile::new().unwrap();
+        let summary_out = tempfile::NamedTempFile::new().unwrap();
         let cfg = RunConfig {
             corpus_path: corpus.path().to_path_buf(),
             output_path: out.path().to_path_buf(),
+            summary_path: summary_out.path().to_path_buf(),
             scenario_limit: None,
             top_ks: vec![1, 3],
             pool_sizes: vec![1, 2, 5],
@@ -223,9 +444,11 @@ mod tests {
         ];
         let corpus = write_corpus(&scenarios);
         let out = tempfile::NamedTempFile::new().unwrap();
+        let summary_out = tempfile::NamedTempFile::new().unwrap();
         let cfg = RunConfig {
             corpus_path: corpus.path().to_path_buf(),
             output_path: out.path().to_path_buf(),
+            summary_path: summary_out.path().to_path_buf(),
             scenario_limit: Some(2),
             top_ks: vec![3],
             pool_sizes: vec![5],
@@ -242,9 +465,11 @@ mod tests {
         let corpus = write_corpus(&scenarios);
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("nested/sub/output.jsonl");
+        let summary_out = dir.path().join("nested/sub/output-summary.jsonl");
         let cfg = RunConfig {
             corpus_path: corpus.path().to_path_buf(),
             output_path: out.clone(),
+            summary_path: summary_out.clone(),
             scenario_limit: None,
             top_ks: vec![3],
             pool_sizes: vec![1],
@@ -252,6 +477,107 @@ mod tests {
         };
         run_retrieval(&cfg).unwrap();
         assert!(out.exists());
+        assert!(summary_out.exists());
+    }
+
+    #[test]
+    fn summary_line_has_overall_and_per_pool_breakdown() {
+        let scenarios = vec![
+            scenario(
+                "s1",
+                "read a file from disk",
+                vec![t("fs.read", "Read a file from disk.")],
+                &["fs.read"],
+            ),
+            scenario(
+                "s2",
+                "send an email to a recipient",
+                vec![t("mail.send", "Send an email to a recipient.")],
+                &["mail.send"],
+            ),
+        ];
+        let corpus = write_corpus(&scenarios);
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let summary_out = tempfile::NamedTempFile::new().unwrap();
+        let cfg = RunConfig {
+            corpus_path: corpus.path().to_path_buf(),
+            output_path: out.path().to_path_buf(),
+            summary_path: summary_out.path().to_path_buf(),
+            scenario_limit: None,
+            top_ks: vec![1, 3],
+            pool_sizes: vec![1, 5],
+            seed: 42,
+        };
+        let run_summary = run_retrieval(&cfg).unwrap();
+        assert_eq!(run_summary.summary_path, summary_out.path());
+
+        let mut contents = String::new();
+        std::fs::File::open(summary_out.path())
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "one summary line per run");
+        let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+
+        assert_eq!(v["scenarios"], 2);
+        assert_eq!(v["rows_written"], 8); // 2 scenarios × 2 pools × 2 k's
+        assert_eq!(v["pool_sizes"], serde_json::json!([1, 5]));
+
+        assert!(v["overall"]["pool_size"].is_null());
+        assert_eq!(v["overall"]["n"], 4); // 2 scenarios × 2 pools
+        let overall_by_k = v["overall"]["by_k"].as_array().unwrap();
+        assert_eq!(overall_by_k.len(), 2);
+        assert_eq!(overall_by_k[0]["k"], 1);
+        assert_eq!(overall_by_k[1]["k"], 3);
+        assert!(
+            v["overall"]["bm25_gold_score"]["coverage"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+
+        let by_pool = v["by_pool_size"].as_array().unwrap();
+        assert_eq!(by_pool.len(), 2);
+        assert_eq!(by_pool[0]["pool_size"], 1);
+        assert_eq!(by_pool[0]["n"], 2);
+        assert_eq!(by_pool[0]["by_k"].as_array().unwrap().len(), 2);
+        assert_eq!(by_pool[1]["pool_size"], 5);
+    }
+
+    #[test]
+    fn summary_jsonl_accumulates_one_line_per_run() {
+        let scenarios = vec![scenario(
+            "s1",
+            "read a file from disk",
+            vec![t("fs.read", "Read a file from disk.")],
+            &["fs.read"],
+        )];
+        let corpus = write_corpus(&scenarios);
+        let dir = tempfile::tempdir().unwrap();
+        let summary_out = dir.path().join("summary.jsonl");
+
+        for run in 0..3 {
+            let out = dir.path().join(format!("retrieval-{run}.jsonl"));
+            let cfg = RunConfig {
+                corpus_path: corpus.path().to_path_buf(),
+                output_path: out,
+                summary_path: summary_out.clone(),
+                scenario_limit: None,
+                top_ks: vec![1],
+                pool_sizes: vec![1],
+                seed: 42,
+            };
+            run_retrieval(&cfg).unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&summary_out).unwrap();
+        let lines: Vec<&str> = contents.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 3, "each run appends one line, none overwrite");
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["scenarios"], 1);
+        }
     }
 
     #[test]

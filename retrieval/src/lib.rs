@@ -11,3 +11,4 @@ pub mod corpus;
 pub mod ingest;
 pub mod retrieval;
 pub mod runner;
+pub mod stats;

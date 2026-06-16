@@ -829,6 +829,7 @@ name = "ratel-benchmark-retrieval"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "csv",
  "indicatif",
