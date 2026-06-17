@@ -305,12 +305,12 @@ export function subsetOf(goldCount: number): RetrievalSubset {
 }
 
 /**
- * Derive `(subset, mode)` for a row. Prefers the explicit `category` set by the
- * ingest adapters: MetaTool single-tool queries are tool-retrieval
- * (`metatool-single` → single-tool/tool); MetaTool multi-tool queries are
- * evaluated as skills (`metatool-multi` → multi-tool/skill, scored via
- * `SkillRegistry`). Falls back to gold-set size in tool mode for category-less
- * corpora (e.g. ToolRet).
+ * Derive `(subset, mode)` for a row from the explicit `category` set by the
+ * ingest adapters. MetaTool single-tool queries are tool-retrieval
+ * (`metatool-single` → single-tool/tool); each multi-tool query is scored both
+ * ways — `metatool-multi` → multi-tool/tool (all N tools, `ToolRegistry`) and
+ * `metatool-skill` → multi-tool/skill (one bundle, `SkillRegistry`). Falls back
+ * to gold-set size in tool mode for category-less corpora (e.g. ToolRet).
  */
 export function bucketOf(row: RetrievalRow): {
   subset: RetrievalSubset;
@@ -320,6 +320,8 @@ export function bucketOf(row: RetrievalRow): {
     case "metatool-single":
       return { subset: "single-tool", mode: "tool" };
     case "metatool-multi":
+      return { subset: "multi-tool", mode: "tool" };
+    case "metatool-skill":
       return { subset: "multi-tool", mode: "skill" };
     default:
       return { subset: subsetOf(row.gold_count), mode: "tool" };

@@ -58,13 +58,13 @@ fn ingest_writes_jsonl_parsable_by_corpus_loader() {
     assert_eq!(stats.single_tool_in, 6);
     assert_eq!(stats.multi_tool_in, 2);
     assert_eq!(stats.skipped_unknown_gold, 0);
-    // 6 single-tool + 2 multi-tool (skill) = 8.
-    assert_eq!(stats.scenarios_out, 8);
+    // 6 single + 2 multi (tool) + 2 multi (skill) = 10.
+    assert_eq!(stats.scenarios_out, 10);
     assert_eq!(stats.skill_scenarios_out, 2);
 
     let scenarios =
         parse_scenarios(std::io::BufReader::new(std::fs::File::open(&out).unwrap())).unwrap();
-    assert_eq!(scenarios.len(), 8);
+    assert_eq!(scenarios.len(), 10);
     for s in &scenarios {
         assert!(!s.gold_tools.is_empty());
         for tool in &s.candidate_pool {
@@ -98,19 +98,19 @@ fn ingest_round_trips_through_retrieval_runner() {
         seed: 42,
     })
     .unwrap();
-    assert_eq!(summary.scenarios, 8);
-    // 8 scenarios × 2 pool sizes × 2 K cutoffs = 32 rows.
-    assert_eq!(summary.rows_written, 32);
+    assert_eq!(summary.scenarios, 10);
+    // 10 scenarios × 2 pool sizes × 2 K cutoffs = 40 rows.
+    assert_eq!(summary.rows_written, 40);
 
     let summary_body = std::fs::read_to_string(&summary_out).unwrap();
     let summary_line = summary_body.lines().next().expect("one summary line");
     let summary_json: serde_json::Value = serde_json::from_str(summary_line).unwrap();
-    assert_eq!(summary_json["scenarios"], 8);
+    assert_eq!(summary_json["scenarios"], 10);
     assert_eq!(summary_json["pool_sizes"], serde_json::json!([3, 6]));
 
-    // Two buckets: single-tool/tool and multi-tool/skill — same metric shape.
+    // Three buckets: single/tool, multi/tool, multi/skill — same metric shape.
     let by_bucket = summary_json["by_bucket"].as_array().unwrap();
-    assert_eq!(by_bucket.len(), 2);
+    assert_eq!(by_bucket.len(), 3);
     let skill = by_bucket
         .iter()
         .find(|b| b["subset"] == "multi-tool" && b["mode"] == "skill")
@@ -134,7 +134,7 @@ fn ingest_round_trips_through_retrieval_runner() {
         assert!(row["hit_at_k"].is_boolean());
         row_count += 1;
     }
-    assert_eq!(row_count, 32);
+    assert_eq!(row_count, 40);
 }
 
 #[test]

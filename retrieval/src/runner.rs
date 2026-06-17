@@ -69,8 +69,9 @@ impl Bucket {
 }
 
 /// Map a scenario to its `(subset, mode)` bucket. MetaTool single-tool queries
-/// are tool-retrieval; MetaTool multi-tool queries are evaluated as skills
-/// (skill-retrieval via `SkillRegistry`). Category-less corpora (e.g. ToolRet)
+/// are tool-retrieval; each MetaTool multi-tool query is scored both ways — as
+/// individual tools (`metatool-multi`, `ToolRegistry`) and as one skill bundle
+/// (`metatool-skill`, `SkillRegistry`). Category-less corpora (e.g. ToolRet)
 /// fall back to gold-set size in tool mode.
 fn bucket_of(scenario: &Scenario) -> Bucket {
     match scenario.category.as_deref() {
@@ -79,6 +80,10 @@ fn bucket_of(scenario: &Scenario) -> Bucket {
             mode: "tool",
         },
         Some("metatool-multi") => Bucket {
+            subset: "multi-tool",
+            mode: "tool",
+        },
+        Some("metatool-skill") => Bucket {
             subset: "multi-tool",
             mode: "skill",
         },
@@ -784,12 +789,12 @@ mod tests {
             candidate_skills: vec![skill],
             gold_tools: vec![id.into()],
             judge_criteria: None,
-            category: Some("metatool-multi".into()),
+            category: Some("metatool-skill".into()),
         }
     }
 
     #[test]
-    fn summary_splits_into_single_tool_and_multi_skill_buckets() {
+    fn summary_splits_into_single_multi_and_skill_buckets() {
         let scenarios = vec![
             categorized(
                 "metatool-st-2",
@@ -798,11 +803,21 @@ mod tests {
                 &["fs.read"],
                 "metatool-single",
             ),
-            skill_scenario(
+            categorized(
                 "metatool-mt-0",
                 "read and send a file",
+                vec![
+                    t("fs.read", "Read a file from disk."),
+                    t("mail.send", "Send an email to a recipient."),
+                ],
+                &["fs.read", "mail.send"],
+                "metatool-multi",
+            ),
+            skill_scenario(
+                "metatool-skill-0",
+                "read and send a file",
                 skill(
-                    "metatool-mt-0",
+                    "metatool-skill-0",
                     "Read a file from disk. Send an email to a recipient.",
                     &["fs.read", "mail.send"],
                     &["fs.read", "mail.send"],
@@ -826,12 +841,14 @@ mod tests {
         let contents = std::fs::read_to_string(summary_out.path()).unwrap();
         let v: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
         let by_bucket = v["by_bucket"].as_array().unwrap();
-        // Two buckets: single-tool/tool and multi-tool/skill.
-        assert_eq!(by_bucket.len(), 2);
+        // Canonical order: single/tool, multi/tool, multi/skill.
+        assert_eq!(by_bucket.len(), 3);
         assert_eq!(by_bucket[0]["subset"], "single-tool");
         assert_eq!(by_bucket[0]["mode"], "tool");
         assert_eq!(by_bucket[1]["subset"], "multi-tool");
-        assert_eq!(by_bucket[1]["mode"], "skill");
+        assert_eq!(by_bucket[1]["mode"], "tool");
+        assert_eq!(by_bucket[2]["subset"], "multi-tool");
+        assert_eq!(by_bucket[2]["mode"], "skill");
         for b in by_bucket {
             assert_eq!(b["scenarios"], 1);
         }
@@ -841,9 +858,9 @@ mod tests {
         let skill_row = rows
             .lines()
             .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-            .find(|r| r["scenario_id"] == "metatool-mt-0")
+            .find(|r| r["scenario_id"] == "metatool-skill-0")
             .unwrap();
-        assert_eq!(skill_row["category"], "metatool-multi");
+        assert_eq!(skill_row["category"], "metatool-skill");
     }
 
     #[test]
@@ -878,7 +895,7 @@ mod tests {
 
         let rows = std::fs::read_to_string(out.path()).unwrap();
         let r: serde_json::Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
-        assert_eq!(r["category"], "metatool-multi");
+        assert_eq!(r["category"], "metatool-skill");
         // Skill universe has only this one skill → no distractors added.
         assert_eq!(r["actual_pool_size"], 1);
         assert_eq!(r["hit_at_k"], true);
