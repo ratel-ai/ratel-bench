@@ -23,6 +23,10 @@ pub struct RetrievalMetrics {
     pub reciprocal_rank: f64,
     /// True if at least one gold tool is in the top-K.
     pub hit_at_k: bool,
+    /// True if *every* gold tool is in the top-K (recall == 1.0) — the strict
+    /// sibling of `hit_at_k`. For single-gold queries the two are identical;
+    /// for multi-gold tool retrieval this is the "complete set retrieved" flag.
+    pub complete_at_k: bool,
     /// Normalized DCG@K under binary relevance: DCG / IDCG, where IDCG places
     /// every gold tool at the top of the ranking. 0.0 when there are no gold
     /// tools (IDCG would be 0 too). Comparable to ToolRet's leaderboard column.
@@ -147,6 +151,7 @@ fn metrics_at_ks(
                 precision_at_k,
                 reciprocal_rank,
                 hit_at_k: gold_in_topk > 0,
+                complete_at_k: gold_count > 0 && gold_in_topk == gold_count,
                 ndcg_at_k,
                 gold_score,
             }
@@ -233,6 +238,27 @@ mod tests {
         assert_eq!(m.recall_at_k, 1.0);
         assert!(m.hit_at_k);
         assert!(m.reciprocal_rank > 0.0);
+    }
+
+    #[test]
+    fn complete_at_k_true_only_when_all_gold_present() {
+        let pool = read_file_pool();
+        // Single gold present → complete.
+        let m = evaluate(&pool, "read a file from disk", &["fs.read_file".into()], 3);
+        assert!(m.complete_at_k);
+        // Two gold but a tiny K can't fit both → hit but not complete.
+        let m2 = evaluate(
+            &pool,
+            "read a file from disk",
+            &["fs.read_file".into(), "mail.send".into()],
+            1,
+        );
+        assert!(m2.hit_at_k);
+        assert!(!m2.complete_at_k);
+        // No gold at all → neither.
+        let m3 = evaluate(&pool, "astrophysics", &["does.not.exist".into()], 5);
+        assert!(!m3.hit_at_k);
+        assert!(!m3.complete_at_k);
     }
 
     #[test]

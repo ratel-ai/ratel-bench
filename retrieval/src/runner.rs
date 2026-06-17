@@ -311,6 +311,8 @@ struct KAcc {
     ndcg: Vec<f64>,
     mrr: Vec<f64>,
     hits: usize,
+    /// Cells where every gold item is in the top-K (`complete_at_k`).
+    complete: usize,
 }
 
 impl KAcc {
@@ -322,14 +324,13 @@ impl KAcc {
         if m.hit_at_k {
             self.hits += 1;
         }
+        if m.complete_at_k {
+            self.complete += 1;
+        }
     }
 
     fn summarize(&self, k: usize) -> KSummary {
         let n = self.recall.len();
-        // Cells where *every* gold item is in the top-K (recall == 1.0). For
-        // single-gold buckets this equals the hit rate; for multi-gold tool
-        // retrieval it's the stricter "complete set retrieved" rate.
-        let complete = self.recall.iter().filter(|&&r| r >= 1.0 - 1e-9).count();
         KSummary {
             k,
             n,
@@ -337,10 +338,12 @@ impl KAcc {
             median_precision: stats::median(&self.precision),
             mean_recall: stats::mean(&self.recall),
             median_recall: stats::median(&self.recall),
+            // For single-gold buckets this equals hit_rate; for multi-gold tool
+            // retrieval it's the stricter "complete set retrieved" rate.
             complete_set_rate: if n == 0 {
                 0.0
             } else {
-                complete as f64 / n as f64
+                self.complete as f64 / n as f64
             },
             mean_ndcg: stats::mean(&self.ndcg),
             median_ndcg: stats::median(&self.ndcg),

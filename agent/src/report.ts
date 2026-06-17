@@ -24,6 +24,9 @@ export interface RetrievalRow {
   precision_at_k: number;
   reciprocal_rank: number;
   hit_at_k: boolean;
+  /** True if every gold item is in the top-K (recall == 1.0). Strict sibling of
+   *  hit_at_k; absent in older rows (falls back to recall_at_k >= 1). */
+  complete_at_k?: boolean;
   ndcg_at_k: number;
 }
 
@@ -361,8 +364,9 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       n: arr.length,
       mean_recall: mean(recalls),
       median_recall: median(recalls),
-      // recall == 1.0 means every gold landed in top-K (complete set).
-      complete_set_rate: mean(arr.map((r) => (r.recall_at_k >= 1 ? 1 : 0))),
+      // complete = every gold in top-K. Prefer the explicit per-row flag;
+      // fall back to recall == 1.0 for older rows without it.
+      complete_set_rate: mean(arr.map((r) => ((r.complete_at_k ?? r.recall_at_k >= 1) ? 1 : 0))),
       mean_mrr: mean(mrrs),
       median_mrr: median(mrrs),
       mean_ndcg: mean(ndcgs),
