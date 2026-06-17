@@ -274,6 +274,9 @@ export interface RetrievalSummary {
   n: number;
   mean_recall: number;
   median_recall: number;
+  /** Fraction of queries with recall == 1.0 (every gold in top-K). Equals
+   *  hit_rate for single-gold buckets; stricter for multi-gold tool retrieval. */
+  complete_set_rate: number;
   mean_mrr: number;
   median_mrr: number;
   mean_ndcg: number;
@@ -358,6 +361,8 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       n: arr.length,
       mean_recall: mean(recalls),
       median_recall: median(recalls),
+      // recall == 1.0 means every gold landed in top-K (complete set).
+      complete_set_rate: mean(arr.map((r) => (r.recall_at_k >= 1 ? 1 : 0))),
       mean_mrr: mean(mrrs),
       median_mrr: median(mrrs),
       mean_ndcg: mean(ndcgs),
@@ -525,12 +530,12 @@ export function renderReport(args: {
       lines.push(`### ${corpus} / ${subset} / ${mode}-retrieval`);
       lines.push("");
       lines.push(
-        "| K | pool size | n | hit@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",
+        "| K | pool size | n | hit@K | complete set@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",
       );
-      lines.push("|---|---|---|---|---|---|---|---|---|---|");
+      lines.push("|---|---|---|---|---|---|---|---|---|---|---|");
       for (const r of summaries) {
         lines.push(
-          `| ${r.k} | ${r.pool_size} | ${r.n} | ${fmtPct(r.hit_rate * 100)} | ${r.mean_recall.toFixed(3)} | ${r.median_recall.toFixed(3)} | ${r.mean_mrr.toFixed(3)} | ${r.median_mrr.toFixed(3)} | ${r.mean_ndcg.toFixed(3)} | ${r.median_ndcg.toFixed(3)} |`,
+          `| ${r.k} | ${r.pool_size} | ${r.n} | ${fmtPct(r.hit_rate * 100)} | ${fmtPct(r.complete_set_rate * 100)} | ${r.mean_recall.toFixed(3)} | ${r.median_recall.toFixed(3)} | ${r.mean_mrr.toFixed(3)} | ${r.median_mrr.toFixed(3)} | ${r.mean_ndcg.toFixed(3)} | ${r.median_ndcg.toFixed(3)} |`,
         );
       }
       lines.push("");
