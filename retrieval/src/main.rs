@@ -34,6 +34,13 @@ enum Command {
         /// Where to write retrieval.jsonl.
         #[arg(short, long, default_value = "results/retrieval.jsonl")]
         output: PathBuf,
+        /// Where to append the aggregate overall-performance summary. Each
+        /// run adds one JSON line (existing lines are kept), so repeated
+        /// runs accumulate a history of experiments to compare over time.
+        /// Defaults to `--output` with its extension replaced by
+        /// `-summary.jsonl`.
+        #[arg(long)]
+        summary_output: Option<PathBuf>,
         /// Limit to first N scenarios (full corpus if omitted).
         #[arg(long)]
         scenarios: Option<usize>,
@@ -102,6 +109,18 @@ enum IngestSource {
     },
 }
 
+/// Default summary path derived from `--output`: strips a trailing `.jsonl`
+/// extension (or any extension) and appends `-summary.jsonl`.
+fn default_summary_path(output: &Path) -> PathBuf {
+    let stem = match output.extension() {
+        Some(_) => output.with_extension(""),
+        None => output.to_path_buf(),
+    };
+    let mut name = stem.into_os_string();
+    name.push("-summary.jsonl");
+    PathBuf::from(name)
+}
+
 fn fetch_via_curl(url: &str, dest: &Path) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -158,14 +177,17 @@ fn main() -> anyhow::Result<()> {
         Command::Retrieval {
             corpus,
             output,
+            summary_output,
             scenarios,
             top_k,
             pool_sizes,
             seed,
         } => {
+            let summary_path = summary_output.unwrap_or_else(|| default_summary_path(&output));
             let cfg = RunConfig {
                 corpus_path: corpus,
                 output_path: output.clone(),
+                summary_path,
                 scenario_limit: scenarios,
                 top_ks: top_k,
                 pool_sizes,
@@ -173,10 +195,11 @@ fn main() -> anyhow::Result<()> {
             };
             let summary = run_retrieval(&cfg)?;
             println!(
-                "wrote {} rows for {} scenarios → {}",
+                "wrote {} rows for {} scenarios → {}; summary appended → {}",
                 summary.rows_written,
                 summary.scenarios,
-                output.display()
+                output.display(),
+                summary.summary_path.display()
             );
         }
         Command::Ingest { source } => match source {

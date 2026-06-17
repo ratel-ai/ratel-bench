@@ -27,6 +27,11 @@ pub struct RetrievalMetrics {
     /// every gold tool at the top of the ranking. 0.0 when there are no gold
     /// tools (IDCG would be 0 too). Comparable to ToolRet's leaderboard column.
     pub ndcg_at_k: f64,
+    /// Highest raw BM25 score among gold tools anywhere in this (scenario,
+    /// pool)'s ranked results (up to the largest requested K). `None` if no
+    /// gold tool appeared in the ranking at all. Independent of `k` — every
+    /// row for the same (scenario, pool) carries the same value.
+    pub gold_score: Option<f64>,
 }
 
 /// Evaluate retrieval quality at multiple K cutoffs in one BM25 pass.
@@ -49,6 +54,16 @@ pub fn evaluate_at_ks(
         registry.register(spec.into());
     }
     let hits = registry.search(query, max_k);
+
+    // Independent of `k`: the highest score among gold hits in the single
+    // ranking pass, regardless of which cutoff later windows it into.
+    let gold_score = hits
+        .iter()
+        .filter(|h| gold_tool_ids.iter().any(|g| g == &h.tool_id))
+        .map(|h| h.score as f64)
+        .fold(None, |acc: Option<f64>, s| {
+            Some(acc.map_or(s, |a| a.max(s)))
+        });
 
     let gold_count = gold_tool_ids.len();
     ks.iter()
@@ -90,6 +105,7 @@ pub fn evaluate_at_ks(
                 reciprocal_rank,
                 hit_at_k: gold_in_topk > 0,
                 ndcg_at_k,
+                gold_score,
             }
         })
         .collect()
@@ -397,6 +413,39 @@ mod tests {
         assert_eq!(metrics[0].ndcg_at_k, 1.0);
         assert_eq!(metrics[1].ndcg_at_k, 1.0);
         assert_eq!(metrics[2].ndcg_at_k, 1.0);
+    }
+
+    #[test]
+    fn gold_score_is_some_when_gold_tool_is_retrieved() {
+        let pool = read_file_pool();
+        let m = evaluate(&pool, "send an email via SMTP", &["mail.send".into()], 5);
+        assert!(m.gold_score.is_some());
+        assert!(m.gold_score.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn gold_score_is_none_when_gold_tool_not_in_results() {
+        let pool = read_file_pool();
+        let m = evaluate(
+            &pool,
+            "completely unrelated query about astrophysics",
+            &["does.not.exist".into()],
+            3,
+        );
+        assert_eq!(m.gold_score, None);
+    }
+
+    #[test]
+    fn gold_score_is_independent_of_k() {
+        let pool = read_file_pool();
+        let metrics = evaluate_at_ks(
+            &pool,
+            "send an email via SMTP",
+            &["mail.send".into()],
+            &[1, 3, 5],
+        );
+        assert_eq!(metrics[0].gold_score, metrics[1].gold_score);
+        assert_eq!(metrics[1].gold_score, metrics[2].gold_score);
     }
 
     #[test]
