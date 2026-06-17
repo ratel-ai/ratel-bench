@@ -58,7 +58,9 @@ fn ingest_writes_jsonl_parsable_by_corpus_loader() {
     assert_eq!(stats.single_tool_in, 6);
     assert_eq!(stats.multi_tool_in, 2);
     assert_eq!(stats.skipped_unknown_gold, 0);
+    // 6 single-tool + 2 multi-tool (skill) = 8.
     assert_eq!(stats.scenarios_out, 8);
+    assert_eq!(stats.skill_scenarios_out, 2);
 
     let scenarios =
         parse_scenarios(std::io::BufReader::new(std::fs::File::open(&out).unwrap())).unwrap();
@@ -72,6 +74,8 @@ fn ingest_writes_jsonl_parsable_by_corpus_loader() {
         }
         assert!(s.judge_criteria.is_none());
         assert!(s.id.starts_with("metatool-"));
+        // A scenario is either tool-mode or skill-mode, never both.
+        assert!(s.candidate_pool.is_empty() != s.candidate_skills.is_empty());
     }
 }
 
@@ -103,8 +107,17 @@ fn ingest_round_trips_through_retrieval_runner() {
     let summary_json: serde_json::Value = serde_json::from_str(summary_line).unwrap();
     assert_eq!(summary_json["scenarios"], 8);
     assert_eq!(summary_json["pool_sizes"], serde_json::json!([3, 6]));
-    assert_eq!(summary_json["by_pool_size"].as_array().unwrap().len(), 2);
-    assert_eq!(summary_json["overall"]["by_k"].as_array().unwrap().len(), 2);
+
+    // Two buckets: single-tool/tool and multi-tool/skill — same metric shape.
+    let by_bucket = summary_json["by_bucket"].as_array().unwrap();
+    assert_eq!(by_bucket.len(), 2);
+    let skill = by_bucket
+        .iter()
+        .find(|b| b["subset"] == "multi-tool" && b["mode"] == "skill")
+        .expect("skill bucket present");
+    assert_eq!(skill["scenarios"], 2);
+    assert_eq!(skill["by_pool_size"].as_array().unwrap().len(), 2);
+    assert_eq!(skill["overall"]["by_k"].as_array().unwrap().len(), 2);
 
     let body = std::fs::read_to_string(&retrieval_out).unwrap();
     let mut row_count = 0usize;

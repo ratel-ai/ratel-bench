@@ -47,12 +47,66 @@ impl From<&ToolSpec> for ratel_ai_core::Tool {
     }
 }
 
+/// A skill definition — the retrieval analog of a bundle of tools. Mirrors
+/// `ratel_ai_core::Skill`, carrying the indexed fields (`name`, `description`,
+/// `tags`) plus the `tools` dependency edge. The non-indexed `body`/`metadata`
+/// aren't exercised by the benchmark, so they're omitted here and defaulted at
+/// the conversion boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+impl From<&SkillSpec> for ratel_ai_core::Skill {
+    fn from(spec: &SkillSpec) -> Self {
+        ratel_ai_core::Skill {
+            id: spec.id.clone(),
+            name: spec.name.clone(),
+            description: spec.description.clone(),
+            tags: spec.tags.clone(),
+            tools: spec.tools.clone(),
+            metadata: std::collections::HashMap::new(),
+            body: String::new(),
+        }
+    }
+}
+
+/// Anything with a stable id, so pool-building and distractor logic can be
+/// written once and reused for both tools and skills.
+pub trait Identified {
+    fn id(&self) -> &str;
+}
+
+impl Identified for ToolSpec {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for SkillSpec {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 /// A single benchmark scenario.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     pub id: String,
     pub prompt: String,
+    /// Tool candidates (tool-retrieval scenarios). Empty for skill scenarios.
+    #[serde(default)]
     pub candidate_pool: Vec<ToolSpec>,
+    /// Skill candidates (skill-retrieval scenarios). Empty for tool scenarios.
+    /// A scenario is either tool- or skill-mode, never both.
+    #[serde(default)]
+    pub candidate_skills: Vec<SkillSpec>,
     pub gold_tools: Vec<String>,
     #[serde(default)]
     pub judge_criteria: Option<String>,
@@ -114,6 +168,7 @@ mod tests {
             id: "fs-001".into(),
             prompt: "Show me the contents of /etc/hosts".into(),
             candidate_pool: vec![read_file_spec()],
+            candidate_skills: vec![],
             gold_tools: vec!["fs.read_file".into()],
             judge_criteria: Some("Mentions localhost".into()),
             category: Some("filesystem".into()),

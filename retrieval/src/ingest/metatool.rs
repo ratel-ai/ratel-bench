@@ -9,10 +9,15 @@
 //!
 //! Mapping rules (per ADR-0006):
 //! - Tool universe = `plugin_des.json`. `id == name == plugin key`. Schemas empty.
-//! - Single-tool query → one [`Scenario`] with one gold tool; id `metatool-st-<line>`.
-//! - Multi-tool query → one [`Scenario`] with N gold tools; id `metatool-mt-<index>`.
-//! - Per-row `candidate_pool` carries only gold tool(s); the runner pools
-//!   distractors across scenarios at retrieval time.
+//! - Single-tool query → one tool-retrieval [`Scenario`] with one gold tool;
+//!   id `metatool-st-<line>`, category `metatool-single` (scored via `ToolRegistry`).
+//! - Multi-tool query → one **skill-retrieval** [`Scenario`]: the gold tool set
+//!   becomes one named skill bundle (description = the tools' descriptions, tags
+//!   = the tool names), id `metatool-mt-<index>`, category `metatool-multi`,
+//!   single gold = the skill itself (scored via `SkillRegistry`).
+//! - A tool scenario's `candidate_pool` carries only its gold tool(s); a skill
+//!   scenario's `candidate_skills` carries only its gold skill. The runner pools
+//!   distractors per universe (tools vs skills) at retrieval time.
 //! - Queries whose gold tool is not in `plugin_des.json` are skipped (counted).
 
 use std::collections::HashMap;
@@ -24,7 +29,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::corpus::{Scenario, ToolSpec};
+use crate::corpus::{Scenario, SkillSpec, ToolSpec};
 
 /// Canonical raw URLs for the three MetaTool source files (master branch).
 ///
@@ -64,6 +69,9 @@ pub struct IngestStats {
     pub single_tool_in: usize,
     pub multi_tool_in: usize,
     pub scenarios_out: usize,
+    /// Of `scenarios_out`, how many are skill-retrieval scenarios
+    /// (the `metatool-mt-*` multi-tool bundles), one per kept multi-tool query.
+    pub skill_scenarios_out: usize,
     pub skipped_unknown_gold: usize,
 }
 
@@ -190,25 +198,45 @@ fn build_single_scenario(
         id: format!("metatool-st-{}", q.line),
         prompt: q.query.clone(),
         candidate_pool: vec![spec],
+        candidate_skills: vec![],
         gold_tools: vec![q.tool.clone()],
         judge_criteria: None,
         category: Some("metatool-single".into()),
     })
 }
 
+/// Build the **multi-tool** scenario as a single skill bundle (skill-retrieval
+/// mode, scored via the real `SkillRegistry`).
+///
+/// The query's gold tool set becomes one [`SkillSpec`]: its `description` is the
+/// concatenation of the constituent tools' descriptions (the semantic content)
+/// and its `tags` are the tool names (folded into the BM25 text the way Ratel
+/// indexes author tags — identifier-split at index/query time). The query text
+/// is never copied in, so retrieval isn't trivially self-matching. The single
+/// gold is the skill itself: one hit surfaces the whole bundle. Returns `None`
+/// if any gold tool is unknown.
 fn build_multi_scenario(
     q: &RawMultiQuery,
     plugins: &HashMap<String, ToolSpec>,
 ) -> Option<Scenario> {
-    let mut pool = Vec::with_capacity(q.tools.len());
+    let mut descriptions = Vec::with_capacity(q.tools.len());
     for name in &q.tools {
-        pool.push(plugins.get(name)?.clone());
+        descriptions.push(plugins.get(name)?.description.clone());
     }
+    let id = format!("metatool-mt-{}", q.index);
+    let bundle = SkillSpec {
+        id: id.clone(),
+        name: id.clone(),
+        description: descriptions.join(" "),
+        tags: q.tools.clone(),
+        tools: q.tools.clone(),
+    };
     Some(Scenario {
-        id: format!("metatool-mt-{}", q.index),
+        id: id.clone(),
         prompt: q.query.clone(),
-        candidate_pool: pool,
-        gold_tools: q.tools.clone(),
+        candidate_pool: vec![],
+        candidate_skills: vec![bundle],
+        gold_tools: vec![id],
         judge_criteria: None,
         category: Some("metatool-multi".into()),
     })
@@ -232,9 +260,13 @@ fn build_scenarios(
             None => stats.skipped_unknown_gold += 1,
         }
     }
+    // Each multi-tool query becomes one skill-retrieval scenario.
     for q in multi {
         match build_multi_scenario(q, plugins) {
-            Some(s) => out.push(s),
+            Some(s) => {
+                out.push(s);
+                stats.skill_scenarios_out += 1;
+            }
             None => stats.skipped_unknown_gold += 1,
         }
     }
@@ -392,20 +424,38 @@ mod tests {
     }
 
     #[test]
-    fn build_multi_scenario_collects_all_gold_tools() {
+    fn build_multi_scenario_synthesizes_a_skill_bundle() {
         let plugins = fixture_plugins();
         let q = RawMultiQuery {
             index: 0,
-            query: "tesla + news".into(),
+            query: "tesla news + stock".into(),
             tools: vec!["NewsTool".into(), "FinanceTool".into()],
         };
         let s = build_multi_scenario(&q, &plugins).unwrap();
         assert_eq!(s.id, "metatool-mt-0");
+        assert_eq!(s.category.as_deref(), Some("metatool-multi"));
+        // Skill-mode scenario: no tool pool, one skill, gold = the skill itself.
+        assert!(s.candidate_pool.is_empty());
+        assert_eq!(s.gold_tools, vec!["metatool-mt-0".to_string()]);
+        assert_eq!(s.candidate_skills.len(), 1);
+        let sk = &s.candidate_skills[0];
+        assert_eq!(sk.id, "metatool-mt-0");
+        // description = constituent tool descriptions; tags / tools = tool names;
+        // the query text never leaks in.
+        assert!(sk.description.contains("Latest world headlines."));
+        assert!(
+            sk.description
+                .contains("Real-time stock and crypto prices.")
+        );
+        assert!(!sk.description.contains("tesla"));
         assert_eq!(
-            s.gold_tools,
+            sk.tags,
             vec!["NewsTool".to_string(), "FinanceTool".to_string()]
         );
-        assert_eq!(s.candidate_pool.len(), 2);
+        assert_eq!(
+            sk.tools,
+            vec!["NewsTool".to_string(), "FinanceTool".to_string()]
+        );
     }
 
     #[test]
@@ -437,10 +487,33 @@ mod tests {
             })
             .collect();
         let (out, stats) = build_scenarios(&single, &multi, &plugins);
+        // 50 single (tool) + 7 multi (skill) = 57.
         assert_eq!(out.len(), 57);
         assert_eq!(stats.scenarios_out, 57);
+        assert_eq!(stats.skill_scenarios_out, 7);
         assert_eq!(stats.single_tool_in, 50);
         assert_eq!(stats.multi_tool_in, 7);
+    }
+
+    #[test]
+    fn build_scenarios_emits_one_skill_scenario_per_kept_multi_query() {
+        let plugins = fixture_plugins();
+        let multi: Vec<RawMultiQuery> = (0..3)
+            .map(|i| RawMultiQuery {
+                index: i,
+                query: format!("m{i}"),
+                tools: vec!["NewsTool".into(), "FinanceTool".into()],
+            })
+            .collect();
+        let (out, stats) = build_scenarios(&[], &multi, &plugins);
+        assert_eq!(stats.skill_scenarios_out, 3);
+        // Every multi-tool query yields exactly one skill-mode scenario.
+        assert_eq!(out.len(), 3);
+        for s in &out {
+            assert_eq!(s.category.as_deref(), Some("metatool-multi"));
+            assert!(s.candidate_pool.is_empty());
+            assert_eq!(s.candidate_skills.len(), 1);
+        }
     }
 
     #[test]

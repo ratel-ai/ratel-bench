@@ -815,9 +815,9 @@ dependencies = [
 
 [[package]]
 name = "ratel-ai-core"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc3ba1766c58cbee045e208a0e2364560166c5e4d2c54a03a0bf5e67eb1127ce"
+checksum = "3db158308a287834f4e17bc353c761d7ef8b78d8650d0160ad12bff628953be3"
 dependencies = [
  "bm25",
  "serde",

@@ -8,6 +8,13 @@ import type { Arm, CellResult } from "./types.js";
 
 export interface RetrievalRow {
   scenario_id: string;
+  /**
+   * Scenario category from the ingest adapter (`metatool-single` /
+   * `metatool-multi` / `metatool-skill`). Drives the `(subset, mode)` split;
+   * absent for category-less corpora (e.g. ToolRet), which fall back to
+   * gold-set size.
+   */
+  category?: string;
   target_pool_size: number;
   actual_pool_size: number;
   k: number;
@@ -250,10 +257,18 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
 }
 
 export type RetrievalSubset = "single-tool" | "multi-tool";
+/**
+ * Retrieval granularity. `tool` retrieves individual tools (fractional recall
+ * for multi-tool); `skill` retrieves the one skill bundle that carries all the
+ * task's tools (binary recall). `skill` only applies to multi-tool queries — it
+ * is a mode of multi-tool, not a separate subset.
+ */
+export type RetrievalMode = "tool" | "skill";
 
 export interface RetrievalSummary {
   corpus: string;
   subset: RetrievalSubset;
+  mode: RetrievalMode;
   k: number;
   pool_size: number;
   n: number;
@@ -289,19 +304,43 @@ export function subsetOf(goldCount: number): RetrievalSubset {
   return goldCount > 1 ? "multi-tool" : "single-tool";
 }
 
+/**
+ * Derive `(subset, mode)` for a row. Prefers the explicit `category` set by the
+ * ingest adapters: MetaTool single-tool queries are tool-retrieval
+ * (`metatool-single` → single-tool/tool); MetaTool multi-tool queries are
+ * evaluated as skills (`metatool-multi` → multi-tool/skill, scored via
+ * `SkillRegistry`). Falls back to gold-set size in tool mode for category-less
+ * corpora (e.g. ToolRet).
+ */
+export function bucketOf(row: RetrievalRow): {
+  subset: RetrievalSubset;
+  mode: RetrievalMode;
+} {
+  switch (row.category) {
+    case "metatool-single":
+      return { subset: "single-tool", mode: "tool" };
+    case "metatool-multi":
+      return { subset: "multi-tool", mode: "skill" };
+    default:
+      return { subset: subsetOf(row.gold_count), mode: "tool" };
+  }
+}
+
 export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
   const groups = new Map<string, RetrievalRow[]>();
   for (const r of rows) {
-    const key = `${corpusOf(r.scenario_id)}::${subsetOf(r.gold_count)}::${r.k}::${r.target_pool_size}`;
+    const { subset, mode } = bucketOf(r);
+    const key = `${corpusOf(r.scenario_id)}::${subset}::${mode}::${r.k}::${r.target_pool_size}`;
     const arr = groups.get(key) ?? [];
     arr.push(r);
     groups.set(key, arr);
   }
   const out: RetrievalSummary[] = [];
   for (const [key, arr] of groups) {
-    const [corpus, subset, kStr, poolStr] = key.split("::") as [
+    const [corpus, subset, mode, kStr, poolStr] = key.split("::") as [
       string,
       RetrievalSubset,
+      RetrievalMode,
       string,
       string,
     ];
@@ -311,6 +350,7 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
     out.push({
       corpus,
       subset,
+      mode,
       k: Number(kStr),
       pool_size: Number(poolStr),
       n: arr.length,
@@ -323,10 +363,14 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       hit_rate: mean(arr.map((r) => (r.hit_at_k ? 1 : 0))),
     });
   }
+  // tool before skill within a subset, so the multi-tool panels read
+  // "tool retrieval" then "skill retrieval" (the baseline, then the upgrade).
+  const modeRank = (m: RetrievalMode) => (m === "tool" ? 0 : 1);
   return out.sort(
     (a, b) =>
       a.corpus.localeCompare(b.corpus) ||
       a.subset.localeCompare(b.subset) ||
+      modeRank(a.mode) - modeRank(b.mode) ||
       a.k - b.k ||
       a.pool_size - b.pool_size,
   );
@@ -455,9 +499,11 @@ export function renderReport(args: {
   }
   lines.push("");
 
-  // 3. Retrieval quality. One panel per (corpus, gold-set bucket); inside the
+  // 3. Retrieval quality. One panel per (corpus, subset, mode); inside the
   // panel rows are sorted by (k, pool_size). Single-tool and multi-tool live in
-  // different panels because their recall semantics differ (binary vs fractional).
+  // different panels because their recall semantics differ (binary vs
+  // fractional); multi-tool further splits into tool-retrieval and
+  // skill-retrieval panels so the skill advantage reads side by side.
   lines.push("## Retrieval quality (BM25, no LLM)");
   lines.push("");
   if (retrieval.length === 0) {
@@ -467,14 +513,14 @@ export function renderReport(args: {
   } else {
     const panels = new Map<string, RetrievalSummary[]>();
     for (const r of retrieval) {
-      const key = `${r.corpus}::${r.subset}`;
+      const key = `${r.corpus}::${r.subset}::${r.mode}`;
       const arr = panels.get(key) ?? [];
       arr.push(r);
       panels.set(key, arr);
     }
     for (const [key, summaries] of panels) {
-      const [corpus, subset] = key.split("::");
-      lines.push(`### ${corpus} / ${subset}`);
+      const [corpus, subset, mode] = key.split("::");
+      lines.push(`### ${corpus} / ${subset} / ${mode}-retrieval`);
       lines.push("");
       lines.push(
         "| K | pool size | n | hit@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",

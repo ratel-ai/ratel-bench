@@ -233,12 +233,13 @@ fn main() -> anyhow::Result<()> {
                 let stats = ingest_metatool(&paths, &output)?;
                 println!(
                     "metatool: {} plugins, {} single-tool in / {} multi-tool in, \
-                     {} skipped (unknown gold) → {} scenarios at {}",
+                     {} skipped (unknown gold) → {} scenarios ({} skill) at {}",
                     stats.plugins_loaded,
                     stats.single_tool_in,
                     stats.multi_tool_in,
                     stats.skipped_unknown_gold,
                     stats.scenarios_out,
+                    stats.skill_scenarios_out,
                     output.display(),
                 );
             }

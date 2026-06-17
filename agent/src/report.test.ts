@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bucketOf,
   corpusOf,
   failureTaxonomy,
   mean,
@@ -21,9 +22,11 @@ function retrievalRow(over: {
   k?: number;
   gold_count?: number;
   ndcg_at_k?: number;
+  category?: string;
 }) {
   return {
     scenario_id: over.scenario_id,
+    category: over.category,
     target_pool_size: over.target_pool_size,
     actual_pool_size: over.target_pool_size,
     k: over.k ?? 5,
@@ -327,6 +330,36 @@ describe("subsetOf", () => {
   });
 });
 
+describe("bucketOf", () => {
+  const row = (over: { category?: string; gold_count: number }) =>
+    retrievalRow({
+      scenario_id: "x",
+      target_pool_size: 30,
+      recall_at_k: 1,
+      reciprocal_rank: 1,
+      hit_at_k: true,
+      gold_count: over.gold_count,
+      category: over.category,
+    });
+
+  it("maps metatool categories to (subset, mode)", () => {
+    // single-tool → tool retrieval; multi-tool → skill retrieval.
+    expect(bucketOf(row({ category: "metatool-single", gold_count: 1 }))).toEqual({
+      subset: "single-tool",
+      mode: "tool",
+    });
+    expect(bucketOf(row({ category: "metatool-multi", gold_count: 1 }))).toEqual({
+      subset: "multi-tool",
+      mode: "skill",
+    });
+  });
+
+  it("falls back to gold-set size in tool mode when category is absent", () => {
+    expect(bucketOf(row({ gold_count: 1 }))).toEqual({ subset: "single-tool", mode: "tool" });
+    expect(bucketOf(row({ gold_count: 3 }))).toEqual({ subset: "multi-tool", mode: "tool" });
+  });
+});
+
 describe("retrievalByPoolSize", () => {
   it("aggregates by (corpus, subset, k, pool) and reports mean + median + hit rate", () => {
     const rows = [
@@ -423,6 +456,36 @@ describe("retrievalByPoolSize", () => {
     expect(single?.mean_recall).toBe(1);
     expect(multi?.n).toBe(1);
     expect(multi?.mean_recall).toBeCloseTo(0.5);
+  });
+
+  it("routes single-tool to tool mode and multi-tool to skill mode by category", () => {
+    // Same corpus / pool / K — distinguished only by category.
+    const rows = [
+      retrievalRow({
+        scenario_id: "metatool-st-1",
+        target_pool_size: 30,
+        recall_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        gold_count: 1,
+        category: "metatool-single",
+      }),
+      retrievalRow({
+        scenario_id: "metatool-mt-1",
+        target_pool_size: 30,
+        recall_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        gold_count: 1,
+        category: "metatool-multi",
+      }),
+    ];
+    const summaries = retrievalByPoolSize(rows);
+    expect(summaries).toHaveLength(2);
+    const single = summaries.find((s) => s.subset === "single-tool" && s.mode === "tool");
+    const skill = summaries.find((s) => s.subset === "multi-tool" && s.mode === "skill");
+    expect(single?.n).toBe(1);
+    expect(skill?.n).toBe(1);
   });
 
   it("splits rows by K cutoff", () => {
@@ -614,11 +677,37 @@ describe("renderReport", () => {
       }),
     ];
     const md = renderReport({ cells: [], retrieval, generatedAt: new Date("2026-05-01") });
-    expect(md).toContain("### metatool / single-tool");
-    expect(md).toContain("### metatool / multi-tool");
-    expect(md).toContain("### toolret / single-tool");
+    expect(md).toContain("### metatool / single-tool / tool-retrieval");
+    expect(md).toContain("### metatool / multi-tool / tool-retrieval");
+    expect(md).toContain("### toolret / single-tool / tool-retrieval");
     expect(md).toContain("median recall@K");
     expect(md).toContain("median nDCG@K");
     expect(md).toContain("| K |");
+  });
+
+  it("renders single-tool tool and multi-tool skill panels for metatool", () => {
+    const retrieval = [
+      retrievalRow({
+        scenario_id: "metatool-st-1",
+        target_pool_size: 100,
+        recall_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        gold_count: 1,
+        category: "metatool-single",
+      }),
+      retrievalRow({
+        scenario_id: "metatool-mt-1",
+        target_pool_size: 100,
+        recall_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        gold_count: 1,
+        category: "metatool-multi",
+      }),
+    ];
+    const md = renderReport({ cells: [], retrieval, generatedAt: new Date("2026-05-01") });
+    expect(md).toContain("### metatool / single-tool / tool-retrieval");
+    expect(md).toContain("### metatool / multi-tool / skill-retrieval");
   });
 });

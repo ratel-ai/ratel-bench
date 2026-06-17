@@ -516,6 +516,7 @@ fn build_scenarios(
             id,
             prompt,
             candidate_pool: pool,
+            candidate_skills: vec![],
             gold_tools: gold_ids,
             judge_criteria: None,
             category: Some(q.category.clone()),
