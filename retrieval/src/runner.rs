@@ -266,10 +266,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     }
 
     let summary = OverallSummary {
-        // Stamp in UTC+02:00 (fixed offset).
-        generated_at: chrono::Utc::now()
-            .with_timezone(&chrono::FixedOffset::east_opt(2 * 3600).expect("valid UTC+02 offset"))
-            .to_rfc3339(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
         ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.corpus_path.display().to_string(),
         output: config.output_path.display().to_string(),
