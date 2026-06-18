@@ -49,10 +49,9 @@ pub fn evaluate_at_ks(
     gold_tool_ids: &[String],
     ks: &[usize],
 ) -> Vec<RetrievalMetrics> {
-    if ks.is_empty() {
+    let Some(&max_k) = ks.iter().max() else {
         return Vec::new();
-    }
-    let max_k = *ks.iter().max().unwrap();
+    };
     let mut registry = ToolRegistry::new();
     for spec in pool {
         registry.register(spec.into());
@@ -75,10 +74,9 @@ pub fn evaluate_skills_at_ks(
     gold_skill_ids: &[String],
     ks: &[usize],
 ) -> Vec<RetrievalMetrics> {
-    if ks.is_empty() {
+    let Some(&max_k) = ks.iter().max() else {
         return Vec::new();
-    }
-    let max_k = *ks.iter().max().unwrap();
+    };
     let mut registry = SkillRegistry::new();
     for spec in pool {
         registry.register(spec.into());
@@ -100,9 +98,8 @@ fn metrics_at_ks(
     pool_size: usize,
     ks: &[usize],
 ) -> Vec<RetrievalMetrics> {
-    if ks.is_empty() {
-        return Vec::new();
-    }
+    // Empty `ks` naturally yields an empty result below (the `ks.iter().map`
+    // produces nothing); the public wrappers also short-circuit before this.
     // Independent of `k`: the highest score among gold hits in the ranking.
     let gold_score = ranked
         .iter()
