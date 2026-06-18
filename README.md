@@ -23,7 +23,7 @@ Locked decisions live in:
 - [`docs/adr/0005-benchmark-design.md`](docs/adr/0005-benchmark-design.md) — overall harness (arms, models, variance, results storage)
 - [`docs/adr/0006-benchmark-corpus-and-eval-modes.md`](docs/adr/0006-benchmark-corpus-and-eval-modes.md) — corpus pivot + the three eval modes
 - [`docs/adr/0007-benchmark-corpus-not-snapshotted.md`](docs/adr/0007-benchmark-corpus-not-snapshotted.md) — corpus is ingested locally; no committed snapshot, no MetaTool sampling
-- [`docs/adr/0008-skill-retrieval-eval-mode.md`](docs/adr/0008-skill-retrieval-eval-mode.md) — multi-tool queries also scored as skills via `SkillRegistry`; single/multi-tool/skill summary split + `complete@K`
+- [`docs/adr/0008-skill-retrieval-eval-mode.md`](docs/adr/0008-skill-retrieval-eval-mode.md) — skill retrieval evaluated separately on an authored skill corpus (SR-Agents) via `SkillRegistry`; per-dataset + aggregate summary
 
 ## Layout
 
@@ -44,8 +44,9 @@ Per [ADR-0006](docs/adr/0006-benchmark-corpus-and-eval-modes.md), three eval mod
 
 **Retrieval-only** — fast, deterministic, $0, no API keys. Backs claims about ranking quality. Lives in [`retrieval/`](retrieval/).
 
-- **(a) MetaTool — pre-fetch retrieval (replace path).** Measures whether BM25 surfaces the right tool given a real user-task query, before the agent's turn. 199 OpenAI plugin descriptions + ~21k user queries (MIT). Per [ADR-0008](docs/adr/0008-skill-retrieval-eval-mode.md), single-tool queries are scored as **tool retrieval** (`ToolRegistry`), and each multi-tool query is scored **both** as tool retrieval (its N tools) *and* as **skill retrieval** — the gold set synthesized into one skill bundle and ranked by the real `SkillRegistry`. The summary splits into `single-tool · tool`, `multi-tool · tool`, and `multi-tool · skill`. **Caveat:** tool recall is fractional (partial credit for a partial tool set) and skill recall is binary (one bundle), so they are *not* directly comparable — compare on `complete@K` ("were all required tools retrieved", binary for both).
+- **(a) MetaTool — pre-fetch retrieval (replace path).** Measures whether BM25 surfaces the right tool given a real user-task query, before the agent's turn. 199 OpenAI plugin descriptions + ~21k user queries (MIT). Single-tool and multi-tool queries are both scored as **tool retrieval** via the real `ToolRegistry`; the summary splits into `single-tool · tool` and `multi-tool · tool` (single-tool recall is binary, multi-tool recall is fractional, so they get separate panels).
 - **(b) ToolRet — IR / autonomous-discovery retrieval (gateway path).** Measures whether the index ranks correctly when the agent emits an IR-shaped query mid-loop (e.g. `searchTools("a tool that converts currency")`). 7,961 retrieval tasks across 35 sub-corpora over a 44,453-tool catalog (Apache-2.0).
+- **(d) SR-Agents — skill retrieval.** Measures whether BM25 surfaces the right authored **skill** document (not a tool) for a task. ~26k skills (`name` + `description` indexed; markdown `body` carried but not indexed) as the catalog/distractor universe, with ~5.4k instances across six datasets (`bigcodebench`, `champ`, `logicbench`, `medcalcbench`, `theoremqa`, `toolqa`). Scored via the real `SkillRegistry`. Fully separate from tool retrieval — its own corpus, ingester, run path, and output. Multi-mapping datasets (e.g. CHAMP) have several gold skills per instance, so recall@K is fractional and `complete@K` is the all-or-nothing bar. See [ADR-0008](docs/adr/0008-skill-retrieval-eval-mode.md).
 
 **Agentic** — end-to-end agent runs with token cost + correctness signals. Requires API keys. Lives in [`agent/`](agent/).
 
@@ -82,9 +83,12 @@ cargo run -p ratel-benchmark-retrieval --release -- ingest metatool --download
 
 # ToolRet — feeds retrieval mode (b). Skip if you only care about the agent campaign.
 cargo run -p ratel-benchmark-retrieval --release -- ingest toolret --download
+
+# SR-Agents — feeds skill retrieval mode (d). Writes a skill catalog + instances.
+cargo run -p ratel-benchmark-retrieval --release -- ingest sragents --download
 ```
 
-`--download` pulls upstream sources (MetaTool: MIT, ToolRet: Apache-2.0) into `fixtures/` via `curl`, then writes normalized JSONL to `test-data/metatool.jsonl` and `test-data/toolret.jsonl`. Re-running without `--download` against the cached fixtures produces a byte-identical JSONL. Full ingest tunables in [`retrieval/README.md`](retrieval/README.md).
+`--download` pulls upstream sources (MetaTool: MIT, ToolRet: Apache-2.0, SR-Agents) into `fixtures/` via `curl` (and unzips the SR-Agents corpus), then writes normalized JSONL to `test-data/metatool.jsonl`, `test-data/toolret.jsonl`, and `test-data/sragents-skills.jsonl` + `test-data/sragents.jsonl`. Re-running without `--download` against the cached fixtures produces a byte-identical JSONL. Full ingest tunables in [`retrieval/README.md`](retrieval/README.md).
 
 Or let `run-all` handle ingest for you — it no-ops when the snapshots already exist.
 
@@ -96,12 +100,12 @@ pnpm -F @ratel-ai/benchmark run-all
 
 This single command:
 
-1. Ingests MetaTool and ToolRet (downloads upstream sources via `curl`) if their normalized JSONL isn't already present under `test-data/`.
-2. Runs BM25 retrieval over each corpus at corpus-appropriate pool sizes (modes a + b).
+1. Ingests MetaTool, ToolRet, and SR-Agents (downloads upstream sources via `curl`) if their normalized JSONL isn't already present under `test-data/`.
+2. Runs BM25 tool retrieval over each tool corpus (modes a + b) and skill retrieval over SR-Agents (mode d), at corpus-appropriate pool sizes.
 3. Runs the mode-(c) MetaTool agent campaign with conservative defaults if `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set; otherwise prints a notice and skips. Defaults: 50 sampled scenarios × 1 run × every committed arm × available models, $5 global cap.
 4. Renders `results/REPORT.md` from the retrieval and (if present) agent JSONL outputs.
 
-Re-running `run-all` skips ingest when the snapshot already exists; pass `--force` to re-ingest, `--skip-ingest` to fail loudly if missing, `--skip-agent` to opt out of mode (c) even when keys are set, or `--only metatool|toolret` to restrict retrieval to one corpus. For the headline N=5 variance run, invoke `pnpm -F @ratel-ai/benchmark start` directly — see [`agent/README.md`](agent/README.md).
+Re-running `run-all` skips ingest when the snapshot already exists; pass `--force` to re-ingest, `--skip-ingest` to fail loudly if missing, `--skip-agent` to opt out of mode (c) even when keys are set, or `--only metatool|toolret|sragents` to restrict to one corpus. For the headline N=5 variance run, invoke `pnpm -F @ratel-ai/benchmark start` directly — see [`agent/README.md`](agent/README.md).
 
 ## Run only the agent benchmark (mode c)
 
@@ -123,18 +127,26 @@ Output: one JSONL row per `(scenario, arm, model, pool_size, run)` cell in `agen
 
 Full flag reference, the N=5 variance recipe, the local-Ollama path, and the cached-control-runs / `--ephemeral` workflow live in [`agent/README.md`](agent/README.md).
 
-## Run only retrieval (modes a + b)
+## Run only retrieval (modes a + b + d)
 
 Fast, deterministic, $0, no API keys. Once the corpora are ingested:
 
 ```bash
+# Tool retrieval (modes a / b) — one corpus JSONL.
 cargo run -p ratel-benchmark-retrieval --release -- retrieval \
   --corpus test-data/metatool.jsonl \
   --output results/metatool-retrieval.jsonl \
   --top-k 1,3,5,10 --pool-sizes 30,100,180
+
+# Skill retrieval (mode d) — separate subcommand, catalog + instances.
+cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
+  --instances test-data/sragents.jsonl \
+  --skills-catalog test-data/sragents-skills.jsonl \
+  --output results/sragents-skill-retrieval.jsonl \
+  --top-k 1,3,5,10 --pool-sizes 100,1000,26262
 ```
 
-ToolRet uses the same runner with a different corpus and pool-size sweep. Full reference in [`retrieval/README.md`](retrieval/README.md).
+ToolRet uses the same `retrieval` runner with a different corpus and pool-size sweep. Skill retrieval uses the dedicated `skill-retrieval` subcommand (the skill catalog is the BM25 index; instances carry gold skill ids). Full reference in [`retrieval/README.md`](retrieval/README.md).
 
 ## Corpus format
 
