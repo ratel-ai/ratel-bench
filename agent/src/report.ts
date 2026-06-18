@@ -512,9 +512,10 @@ export function renderReport(args: {
 
   // 3. Retrieval quality. One panel per (corpus, subset, mode); inside the
   // panel rows are sorted by (k, pool_size). Single-tool and multi-tool live in
-  // different panels because their recall semantics differ (binary vs
-  // fractional); multi-tool further splits into tool-retrieval and
-  // skill-retrieval panels so the skill advantage reads side by side.
+  // different panels because their recall semantics differ; multi-tool further
+  // splits into tool-retrieval and skill-retrieval panels. Their recall/hit are
+  // NOT directly comparable (fractional vs binary) — the comparable bar is
+  // complete@K; the rendered note below states this (see ADR-0008).
   lines.push("## Retrieval quality (BM25, no LLM)");
   lines.push("");
   if (retrieval.length === 0) {
@@ -522,6 +523,16 @@ export function renderReport(args: {
       "_No retrieval rows; run `cargo run -p ratel-benchmark -- retrieval ...` to populate._",
     );
   } else {
+    // Caveat (ADR-0008): tool vs skill recall are not directly comparable.
+    lines.push(
+      "> **Comparing tool vs skill retrieval:** `multi-tool · tool` recall is *fractional* " +
+        "(partial credit for retrieving some of a task's N tools); `multi-tool · skill` recall is " +
+        "*binary* (one gold bundle). `hit@K` likewise differs in meaning. So a raw recall/hit gap " +
+        "is **not** \"the skill advantage\" — compare on **`complete@K`** (\"were *all* required tools " +
+        "retrieved\", binary for both modes: all-N for tools, the bundle for skills). Skills are also " +
+        "synthetic here (description/tags derived from the tools), so absolute numbers are indicative.",
+    );
+    lines.push("");
     const panels = new Map<string, RetrievalSummary[]>();
     for (const r of retrieval) {
       const key = `${r.corpus}::${r.subset}::${r.mode}`;

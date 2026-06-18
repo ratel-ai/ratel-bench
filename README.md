@@ -23,6 +23,7 @@ Locked decisions live in:
 - [`docs/adr/0005-benchmark-design.md`](docs/adr/0005-benchmark-design.md) — overall harness (arms, models, variance, results storage)
 - [`docs/adr/0006-benchmark-corpus-and-eval-modes.md`](docs/adr/0006-benchmark-corpus-and-eval-modes.md) — corpus pivot + the three eval modes
 - [`docs/adr/0007-benchmark-corpus-not-snapshotted.md`](docs/adr/0007-benchmark-corpus-not-snapshotted.md) — corpus is ingested locally; no committed snapshot, no MetaTool sampling
+- [`docs/adr/0008-skill-retrieval-eval-mode.md`](docs/adr/0008-skill-retrieval-eval-mode.md) — multi-tool queries also scored as skills via `SkillRegistry`; single/multi-tool/skill summary split + `complete@K`
 
 ## Layout
 
@@ -43,7 +44,7 @@ Per [ADR-0006](docs/adr/0006-benchmark-corpus-and-eval-modes.md), three eval mod
 
 **Retrieval-only** — fast, deterministic, $0, no API keys. Backs claims about ranking quality. Lives in [`retrieval/`](retrieval/).
 
-- **(a) MetaTool — pre-fetch retrieval (replace path).** Measures whether BM25 surfaces the right tool given a real user-task query, before the agent's turn. 199 OpenAI plugin descriptions + ~21k user queries (MIT).
+- **(a) MetaTool — pre-fetch retrieval (replace path).** Measures whether BM25 surfaces the right tool given a real user-task query, before the agent's turn. 199 OpenAI plugin descriptions + ~21k user queries (MIT). Per [ADR-0008](docs/adr/0008-skill-retrieval-eval-mode.md), single-tool queries are scored as **tool retrieval** (`ToolRegistry`), and each multi-tool query is scored **both** as tool retrieval (its N tools) *and* as **skill retrieval** — the gold set synthesized into one skill bundle and ranked by the real `SkillRegistry`. The summary splits into `single-tool · tool`, `multi-tool · tool`, and `multi-tool · skill`. **Caveat:** tool recall is fractional (partial credit for a partial tool set) and skill recall is binary (one bundle), so they are *not* directly comparable — compare on `complete@K` ("were all required tools retrieved", binary for both).
 - **(b) ToolRet — IR / autonomous-discovery retrieval (gateway path).** Measures whether the index ranks correctly when the agent emits an IR-shaped query mid-loop (e.g. `searchTools("a tool that converts currency")`). 7,961 retrieval tasks across 35 sub-corpora over a 44,453-tool catalog (Apache-2.0).
 
 **Agentic** — end-to-end agent runs with token cost + correctness signals. Requires API keys. Lives in [`agent/`](agent/).
