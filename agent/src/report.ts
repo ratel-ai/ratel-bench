@@ -259,12 +259,17 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
   return out.sort((a, b) => a.model.localeCompare(b.model) || a.pool_size - b.pool_size);
 }
 
-export type RetrievalSubset = "single-tool" | "multi-tool";
 /**
- * Retrieval granularity. `tool` retrieves individual tools (fractional recall
- * for multi-tool); `skill` retrieves the one skill bundle that carries all the
- * task's tools (binary recall). `skill` only applies to multi-tool queries — it
- * is a mode of multi-tool, not a separate subset.
+ * Retrieval subset. For tool corpora this is `single-tool` | `multi-tool`; for
+ * the skill corpus (SR-Agents) it is the dataset name (e.g. `champ`, `toolqa`)
+ * or `all` for the aggregate. Kept as a string so the skill datasets render as
+ * their own panels.
+ */
+export type RetrievalSubset = string;
+/**
+ * Retrieval granularity. `tool` retrieves individual tools (a tool-corpus
+ * experiment); `skill` retrieves authored skill documents (the SR-Agents
+ * experiment). The two are evaluated separately and never share a panel.
  */
 export type RetrievalMode = "tool" | "skill";
 
@@ -296,6 +301,7 @@ export interface RetrievalSummary {
 export function corpusOf(scenarioId: string): string {
   if (scenarioId.startsWith("metatool-")) return "metatool";
   if (scenarioId.startsWith("toolret-")) return "toolret";
+  if (scenarioId.startsWith("sragents-")) return "sragents";
   return "other";
 }
 
@@ -312,10 +318,9 @@ export function subsetOf(goldCount: number): RetrievalSubset {
 
 /**
  * Derive `(subset, mode)` for a row from the explicit `category` set by the
- * ingest adapters. MetaTool single-tool queries are tool-retrieval
- * (`metatool-single` → single-tool/tool); each multi-tool query is scored both
- * ways — `metatool-multi` → multi-tool/tool (all N tools, `ToolRegistry`) and
- * `metatool-skill` → multi-tool/skill (one bundle, `SkillRegistry`). Falls back
+ * ingest adapters. MetaTool queries are tool-retrieval (`metatool-single` →
+ * single-tool/tool, `metatool-multi` → multi-tool/tool). SR-Agents rows carry
+ * `sragents-<dataset>` and are skill-retrieval, bucketed by dataset. Falls back
  * to gold-set size in tool mode for category-less corpora (e.g. ToolRet).
  */
 export function bucketOf(row: RetrievalRow): {
@@ -327,9 +332,10 @@ export function bucketOf(row: RetrievalRow): {
       return { subset: "single-tool", mode: "tool" };
     case "metatool-multi":
       return { subset: "multi-tool", mode: "tool" };
-    case "metatool-skill":
-      return { subset: "multi-tool", mode: "skill" };
     default:
+      if (row.category?.startsWith("sragents-")) {
+        return { subset: row.category.slice("sragents-".length), mode: "skill" };
+      }
       return { subset: subsetOf(row.gold_count), mode: "tool" };
   }
 }
@@ -337,11 +343,17 @@ export function bucketOf(row: RetrievalRow): {
 export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
   const groups = new Map<string, RetrievalRow[]>();
   for (const r of rows) {
+    const corpus = corpusOf(r.scenario_id);
     const { subset, mode } = bucketOf(r);
-    const key = `${corpusOf(r.scenario_id)}::${subset}::${mode}::${r.k}::${r.target_pool_size}`;
-    const arr = groups.get(key) ?? [];
-    arr.push(r);
-    groups.set(key, arr);
+    const push = (sub: string) => {
+      const key = `${corpus}::${sub}::${mode}::${r.k}::${r.target_pool_size}`;
+      const arr = groups.get(key) ?? [];
+      arr.push(r);
+      groups.set(key, arr);
+    };
+    push(subset);
+    // Skill rows also roll up into an aggregate `all` panel across datasets.
+    if (mode === "skill" && subset !== "all") push("all");
   }
   const out: RetrievalSummary[] = [];
   for (const [key, arr] of groups) {
@@ -511,11 +523,9 @@ export function renderReport(args: {
   lines.push("");
 
   // 3. Retrieval quality. One panel per (corpus, subset, mode); inside the
-  // panel rows are sorted by (k, pool_size). Single-tool and multi-tool live in
-  // different panels because their recall semantics differ; multi-tool further
-  // splits into tool-retrieval and skill-retrieval panels. Their recall/hit are
-  // NOT directly comparable (fractional vs binary) — the comparable bar is
-  // complete@K; the rendered note below states this (see ADR-0008).
+  // panel rows are sorted by (k, pool_size). Tool corpora (MetaTool, ToolRet)
+  // split single-tool vs multi-tool; the skill corpus (SR-Agents) renders one
+  // panel per dataset plus an aggregate `all` panel (see ADR-0008).
   lines.push("## Retrieval quality (BM25, no LLM)");
   lines.push("");
   if (retrieval.length === 0) {
@@ -523,14 +533,14 @@ export function renderReport(args: {
       "_No retrieval rows; run `cargo run -p ratel-benchmark -- retrieval ...` to populate._",
     );
   } else {
-    // Caveat (ADR-0008): tool vs skill recall are not directly comparable.
+    // Note: for multi-mapping skill datasets (e.g. CHAMP) an instance has
+    // several gold skills, so recall@K is fractional; `complete@K` (every gold
+    // skill in the top-K) is the all-or-nothing bar.
     lines.push(
-      "> **Comparing tool vs skill retrieval:** `multi-tool · tool` recall is *fractional* " +
-        "(partial credit for retrieving some of a task's N tools); `multi-tool · skill` recall is " +
-        "*binary* (one gold bundle). `hit@K` likewise differs in meaning. So a raw recall/hit gap " +
-        "is **not** \"the skill advantage\" — compare on **`complete@K`** (\"were *all* required tools " +
-        "retrieved\", binary for both modes: all-N for tools, the bundle for skills). Skills are also " +
-        "synthetic here (description/tags derived from the tools), so absolute numbers are indicative.",
+      "> **Skill retrieval (SR-Agents):** authored skill documents retrieved by BM25 over " +
+        "name + description (body is not indexed). For multi-mapping datasets (e.g. CHAMP) an " +
+        "instance has several gold skills, so recall@K is *fractional*; **`complete@K`** is the " +
+        "all-or-nothing bar (every gold skill in the top-K).",
     );
     lines.push("");
     const panels = new Map<string, RetrievalSummary[]>();

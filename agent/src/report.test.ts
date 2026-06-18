@@ -342,8 +342,7 @@ describe("bucketOf", () => {
       category: over.category,
     });
 
-  it("maps metatool categories to (subset, mode)", () => {
-    // single-tool → tool; multi-tool scored both ways: tool and skill.
+  it("maps metatool categories to (subset, tool mode)", () => {
     expect(bucketOf(row({ category: "metatool-single", gold_count: 1 }))).toEqual({
       subset: "single-tool",
       mode: "tool",
@@ -352,8 +351,15 @@ describe("bucketOf", () => {
       subset: "multi-tool",
       mode: "tool",
     });
-    expect(bucketOf(row({ category: "metatool-skill", gold_count: 1 }))).toEqual({
-      subset: "multi-tool",
+  });
+
+  it("maps sragents categories to (dataset, skill mode)", () => {
+    expect(bucketOf(row({ category: "sragents-champ", gold_count: 1 }))).toEqual({
+      subset: "champ",
+      mode: "skill",
+    });
+    expect(bucketOf(row({ category: "sragents-toolqa", gold_count: 2 }))).toEqual({
+      subset: "toolqa",
       mode: "skill",
     });
   });
@@ -462,34 +468,39 @@ describe("retrievalByPoolSize", () => {
     expect(multi?.mean_recall).toBeCloseTo(0.5);
   });
 
-  it("splits multi-tool tool-retrieval and skill-retrieval into distinct modes", () => {
-    // Same corpus / subset / pool / K — distinguished only by category.
+  it("buckets sragents skill rows per dataset plus an aggregate `all`", () => {
+    // Two datasets, same pool / K — each its own panel, plus the `all` rollup.
     const rows = [
       retrievalRow({
-        scenario_id: "metatool-mt-1",
+        scenario_id: "sragents-champ_0",
         target_pool_size: 30,
         recall_at_k: 0.5,
         reciprocal_rank: 1,
         hit_at_k: true,
         gold_count: 2,
-        category: "metatool-multi",
+        category: "sragents-champ",
       }),
       retrievalRow({
-        scenario_id: "metatool-skill-1",
+        scenario_id: "sragents-toolqa_0",
         target_pool_size: 30,
         recall_at_k: 1,
         reciprocal_rank: 1,
         hit_at_k: true,
         gold_count: 1,
-        category: "metatool-skill",
+        category: "sragents-toolqa",
       }),
     ];
     const summaries = retrievalByPoolSize(rows);
-    expect(summaries).toHaveLength(2);
-    const tool = summaries.find((s) => s.subset === "multi-tool" && s.mode === "tool");
-    const skill = summaries.find((s) => s.subset === "multi-tool" && s.mode === "skill");
-    expect(tool?.mean_recall).toBeCloseTo(0.5);
-    expect(skill?.mean_recall).toBe(1);
+    // champ, toolqa, and the aggregate all — every one in skill mode.
+    expect(summaries).toHaveLength(3);
+    expect(summaries.every((s) => s.mode === "skill")).toBe(true);
+    const champ = summaries.find((s) => s.subset === "champ");
+    const toolqa = summaries.find((s) => s.subset === "toolqa");
+    const all = summaries.find((s) => s.subset === "all");
+    expect(champ?.mean_recall).toBeCloseTo(0.5);
+    expect(toolqa?.mean_recall).toBe(1);
+    expect(all?.n).toBe(2);
+    expect(all?.mean_recall).toBeCloseTo(0.75);
   });
 
   it("splits rows by K cutoff", () => {
@@ -689,29 +700,30 @@ describe("renderReport", () => {
     expect(md).toContain("| K |");
   });
 
-  it("renders multi-tool tool and skill panels side by side for metatool", () => {
+  it("renders a per-dataset and an aggregate skill panel for sragents", () => {
     const retrieval = [
       retrievalRow({
-        scenario_id: "metatool-mt-1",
+        scenario_id: "sragents-champ_0",
         target_pool_size: 100,
         recall_at_k: 0.5,
         reciprocal_rank: 1,
         hit_at_k: true,
         gold_count: 2,
-        category: "metatool-multi",
+        category: "sragents-champ",
       }),
       retrievalRow({
-        scenario_id: "metatool-skill-1",
+        scenario_id: "sragents-toolqa_0",
         target_pool_size: 100,
         recall_at_k: 1,
         reciprocal_rank: 1,
         hit_at_k: true,
         gold_count: 1,
-        category: "metatool-skill",
+        category: "sragents-toolqa",
       }),
     ];
     const md = renderReport({ cells: [], retrieval, generatedAt: new Date("2026-05-01") });
-    expect(md).toContain("### metatool / multi-tool / tool-retrieval");
-    expect(md).toContain("### metatool / multi-tool / skill-retrieval");
+    expect(md).toContain("### sragents / champ / skill-retrieval");
+    expect(md).toContain("### sragents / toolqa / skill-retrieval");
+    expect(md).toContain("### sragents / all / skill-retrieval");
   });
 });

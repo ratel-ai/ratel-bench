@@ -47,11 +47,12 @@ impl From<&ToolSpec> for ratel_ai_core::Tool {
     }
 }
 
-/// A skill definition — the retrieval analog of a bundle of tools. Mirrors
-/// `ratel_ai_core::Skill`, carrying the indexed fields (`name`, `description`,
-/// `tags`) plus the `tools` dependency edge. The non-indexed `body`/`metadata`
-/// aren't exercised by the benchmark, so they're omitted here and defaulted at
-/// the conversion boundary.
+/// A skill definition — an authored knowledge/procedure document. Mirrors
+/// `ratel_ai_core::Skill`: the indexed fields (`name`, `description`, `tags`)
+/// drive BM25 ranking; `body` carries the markdown content (the dispatch
+/// payload — **not** indexed, so it never affects retrieval scoring) and
+/// `tools` is an optional dependency edge (also not indexed). `metadata` isn't
+/// exercised by the benchmark, so it's defaulted at the conversion boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillSpec {
     pub id: String,
@@ -61,6 +62,10 @@ pub struct SkillSpec {
     pub tags: Vec<String>,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Full skill document. Carried for fidelity to production registration;
+    /// not BM25-indexed, so it does not change retrieval-only metrics.
+    #[serde(default)]
+    pub body: String,
 }
 
 impl From<&SkillSpec> for ratel_ai_core::Skill {
@@ -72,7 +77,7 @@ impl From<&SkillSpec> for ratel_ai_core::Skill {
             tags: spec.tags.clone(),
             tools: spec.tools.clone(),
             metadata: std::collections::HashMap::new(),
-            body: String::new(),
+            body: spec.body.clone(),
         }
     }
 }
@@ -100,13 +105,9 @@ impl Identified for SkillSpec {
 pub struct Scenario {
     pub id: String,
     pub prompt: String,
-    /// Tool candidates (tool-retrieval scenarios). Empty for skill scenarios.
+    /// Tool candidates for this tool-retrieval scenario.
     #[serde(default)]
     pub candidate_pool: Vec<ToolSpec>,
-    /// Skill candidates (skill-retrieval scenarios). Empty for tool scenarios.
-    /// A scenario is either tool- or skill-mode, never both.
-    #[serde(default)]
-    pub candidate_skills: Vec<SkillSpec>,
     pub gold_tools: Vec<String>,
     #[serde(default)]
     pub judge_criteria: Option<String>,
@@ -168,7 +169,6 @@ mod tests {
             id: "fs-001".into(),
             prompt: "Show me the contents of /etc/hosts".into(),
             candidate_pool: vec![read_file_spec()],
-            candidate_skills: vec![],
             gold_tools: vec!["fs.read_file".into()],
             judge_criteria: Some("Mentions localhost".into()),
             category: Some("filesystem".into()),
