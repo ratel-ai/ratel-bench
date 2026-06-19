@@ -15,13 +15,14 @@
 //   --force         re-ingest even if the snapshot already exists
 //   --skip-ingest   never call the ingest CLI (fail loudly if missing)
 //   --skip-agent    never run mode (c), even if a provider key is present
-//   --only NAME     restrict to a single corpus: "metatool" | "toolret"
+//   --only NAME     restrict to a single corpus: "metatool" | "toolret" | "sragents"
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { REPO_ROOT, resolveRepoPath } from "./paths.js";
 
 type CorpusName = "metatool" | "toolret";
+type TargetName = CorpusName | "sragents";
 
 interface CorpusSpec {
   name: CorpusName;
@@ -50,6 +51,18 @@ const CORPORA: CorpusSpec[] = [
     topK: "1,3,5,10",
   },
 ];
+
+// SR-Agents skill corpus (separate from the tool corpora above): an authored
+// skill catalog (~26k skills) is the BM25 index, and instances carry gold skill
+// ids. Runs via the dedicated `skill-retrieval` subcommand.
+const SRAGENTS = {
+  catalog: "test-data/sragents-skills.jsonl",
+  instances: "test-data/sragents.jsonl",
+  retrievalOut: "results/sragents-skill-retrieval.jsonl",
+  // Catalog is ~26k skills — small / mid / full.
+  poolSizes: "100,1000,26262",
+  topK: "1,3,5,10",
+} as const;
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(name);
@@ -120,6 +133,50 @@ function retrieval(spec: CorpusSpec): void {
   ]);
 }
 
+function ingestSragents(force: boolean, skipIngest: boolean): void {
+  const haveCatalog = existsSync(resolveRepoPath(SRAGENTS.catalog));
+  const haveInstances = existsSync(resolveRepoPath(SRAGENTS.instances));
+  if (haveCatalog && haveInstances && !force) {
+    console.log(`✓ sragents: catalog + instances present, skipping ingest`);
+    return;
+  }
+  if (skipIngest) {
+    throw new Error(
+      `sragents: ${SRAGENTS.catalog} / ${SRAGENTS.instances} missing and --skip-ingest set. ` +
+        `Run \`cargo run -p ratel-benchmark-retrieval --release -- ingest sragents --download\` first.`,
+    );
+  }
+  const fixturesDir = resolveRepoPath("fixtures/sragents");
+  const args = ["run", "-p", "ratel-benchmark-retrieval", "--release", "--", "ingest", "sragents"];
+  if (force || !isNonEmptyDir(fixturesDir)) {
+    args.push("--download");
+  } else {
+    console.log(`  (fixtures cached at ${fixturesDir} — skipping --download)`);
+  }
+  runStep("ingest sragents", "cargo", args);
+}
+
+function skillRetrieval(): void {
+  runStep("skill-retrieval sragents", "cargo", [
+    "run",
+    "-p",
+    "ratel-benchmark-retrieval",
+    "--release",
+    "--",
+    "skill-retrieval",
+    "--instances",
+    SRAGENTS.instances,
+    "--skills-catalog",
+    SRAGENTS.catalog,
+    "--output",
+    SRAGENTS.retrievalOut,
+    "--top-k",
+    SRAGENTS.topK,
+    "--pool-sizes",
+    SRAGENTS.poolSizes,
+  ]);
+}
+
 /**
  * Mode (c) — agent campaign. Gated on a provider key being available, so a
  * clean clone with no `.env` still runs the free retrieval modes + report.
@@ -186,16 +243,23 @@ function main(): void {
   const force = hasFlag("--force");
   const skipIngest = hasFlag("--skip-ingest");
   const skipAgent = hasFlag("--skip-agent");
-  const only = flagValue("--only") as CorpusName | undefined;
+  const only = flagValue("--only") as TargetName | undefined;
 
-  const targets = only ? CORPORA.filter((c) => c.name === only) : CORPORA;
-  if (only && targets.length === 0) {
-    throw new Error(`unknown --only value: ${only} (expected metatool | toolret)`);
+  const validTargets: TargetName[] = ["metatool", "toolret", "sragents"];
+  if (only && !validTargets.includes(only)) {
+    throw new Error(`unknown --only value: ${only} (expected ${validTargets.join(" | ")})`);
   }
 
-  for (const spec of targets) {
+  const toolTargets = only ? CORPORA.filter((c) => c.name === only) : CORPORA;
+  for (const spec of toolTargets) {
     ingest(spec, force, skipIngest);
     retrieval(spec);
+  }
+
+  // SR-Agents skill retrieval (its own ingest + subcommand shape).
+  if (!only || only === "sragents") {
+    ingestSragents(force, skipIngest);
+    skillRetrieval();
   }
 
   agentCampaign(skipAgent);

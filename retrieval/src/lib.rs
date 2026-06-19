@@ -11,4 +11,5 @@ pub mod corpus;
 pub mod ingest;
 pub mod retrieval;
 pub mod runner;
+pub mod skill_runner;
 pub mod stats;
