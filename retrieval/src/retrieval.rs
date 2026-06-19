@@ -4,10 +4,10 @@
 //! `ratel-ai-core` rank the gold tool(s) at the top?" Outputs feed the report's
 //! retrieval-quality panel.
 
-use ratel_ai_core::ToolRegistry;
+use ratel_ai_core::{SkillRegistry, ToolRegistry};
 use serde::Serialize;
 
-use crate::corpus::ToolSpec;
+use crate::corpus::{Identified, SkillSpec, ToolSpec};
 
 /// Retrieval metrics for one (scenario, pool, K) cell.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -23,8 +23,9 @@ pub struct RetrievalMetrics {
     pub reciprocal_rank: f64,
     /// True if at least one gold tool is in the top-K.
     pub hit_at_k: bool,
-    /// True if *every* gold tool is in the top-K (all-or-nothing). Equals
-    /// `hit_at_k` for single-gold scenarios; stricter when `gold_count > 1`.
+    /// True if *every* gold tool is in the top-K (recall == 1.0) — the strict
+    /// sibling of `hit_at_k`. For single-gold queries the two are identical;
+    /// for multi-gold retrieval this is the "complete set retrieved" flag.
     /// False when there are no gold tools.
     pub complete_at_k: bool,
     /// Normalized DCG@K under binary relevance: DCG / IDCG, where IDCG places
@@ -49,35 +50,75 @@ pub fn evaluate_at_ks(
     gold_tool_ids: &[String],
     ks: &[usize],
 ) -> Vec<RetrievalMetrics> {
-    if ks.is_empty() {
+    let Some(&max_k) = ks.iter().max() else {
         return Vec::new();
-    }
-    let max_k = *ks.iter().max().unwrap();
+    };
     let mut registry = ToolRegistry::new();
     for spec in pool {
         registry.register(spec.into());
     }
-    let hits = registry.search(query, max_k);
+    let ranked: Vec<(String, f64)> = registry
+        .search(query, max_k)
+        .into_iter()
+        .map(|h| (h.tool_id, h.score as f64))
+        .collect();
+    metrics_at_ks(&ranked, gold_tool_ids, pool.len(), ks)
+}
 
-    // Independent of `k`: the highest score among gold hits in the single
-    // ranking pass, regardless of which cutoff later windows it into.
-    let gold_score = hits
+/// Skill-side analog of [`evaluate_at_ks`]: ranks the query against a pool of
+/// skills via ratel's real `SkillRegistry` (name + description + tags), then
+/// scores the gold skill id. Same metric shape as the tool path so both feed
+/// the same aggregation.
+pub fn evaluate_skills_at_ks(
+    pool: &[SkillSpec],
+    query: &str,
+    gold_skill_ids: &[String],
+    ks: &[usize],
+) -> Vec<RetrievalMetrics> {
+    let Some(&max_k) = ks.iter().max() else {
+        return Vec::new();
+    };
+    let mut registry = SkillRegistry::new();
+    for spec in pool {
+        registry.register(spec.into());
+    }
+    let ranked: Vec<(String, f64)> = registry
+        .search(query, max_k)
+        .into_iter()
+        .map(|h| (h.skill_id, h.score as f64))
+        .collect();
+    metrics_at_ks(&ranked, gold_skill_ids, pool.len(), ks)
+}
+
+/// Compute retrieval metrics at each K from one ranked `(id, score)` list
+/// (sorted best-first, already capped at the largest K). Shared by the tool and
+/// skill paths so the math is identical for both.
+fn metrics_at_ks(
+    ranked: &[(String, f64)],
+    gold_ids: &[String],
+    pool_size: usize,
+    ks: &[usize],
+) -> Vec<RetrievalMetrics> {
+    // Empty `ks` naturally yields an empty result below (the `ks.iter().map`
+    // produces nothing); the public wrappers also short-circuit before this.
+    // Independent of `k`: the highest score among gold hits in the ranking.
+    let gold_score = ranked
         .iter()
-        .filter(|h| gold_tool_ids.iter().any(|g| g == &h.tool_id))
-        .map(|h| h.score as f64)
+        .filter(|(id, _)| gold_ids.iter().any(|g| g == id))
+        .map(|(_, s)| *s)
         .fold(None, |acc: Option<f64>, s| {
             Some(acc.map_or(s, |a| a.max(s)))
         });
 
-    let gold_count = gold_tool_ids.len();
+    let gold_count = gold_ids.len();
     ks.iter()
         .map(|&k| {
-            let cutoff = hits.len().min(k);
+            let cutoff = ranked.len().min(k);
             let mut gold_in_topk = 0usize;
             let mut first_gold_rank: Option<usize> = None;
             let mut dcg = 0.0f64;
-            for (rank0, hit) in hits.iter().take(cutoff).enumerate() {
-                if gold_tool_ids.iter().any(|g| g == &hit.tool_id) {
+            for (rank0, (id, _)) in ranked.iter().take(cutoff).enumerate() {
+                if gold_ids.iter().any(|g| g == id) {
                     gold_in_topk += 1;
                     if first_gold_rank.is_none() {
                         first_gold_rank = Some(rank0 + 1);
@@ -96,13 +137,13 @@ pub fn evaluate_at_ks(
                 gold_in_topk as f64 / cutoff as f64
             };
             let reciprocal_rank = first_gold_rank.map(|r| 1.0 / r as f64).unwrap_or(0.0);
-            // Ideal DCG places every gold tool at the top of the ranking, up to K.
+            // Ideal DCG places every gold item at the top of the ranking, up to K.
             let ideal_hits = gold_count.min(k);
             let idcg: f64 = (0..ideal_hits).map(|i| 1.0 / ((i + 2) as f64).log2()).sum();
             let ndcg_at_k = if idcg == 0.0 { 0.0 } else { dcg / idcg };
             RetrievalMetrics {
                 k,
-                pool_size: pool.len(),
+                pool_size,
                 gold_count,
                 recall_at_k,
                 precision_at_k,
@@ -135,20 +176,20 @@ pub fn evaluate(
 /// Scenario tools are always included verbatim (so gold tools are guaranteed
 /// to be present). Distractors are drawn in order — caller controls the seed
 /// by shuffling `distractors` before passing it in.
-pub fn build_pool(
-    scenario_pool: &[ToolSpec],
-    distractors: &[ToolSpec],
+pub fn build_pool<T: Identified + Clone>(
+    scenario_pool: &[T],
+    distractors: &[T],
     target_size: usize,
-) -> Vec<ToolSpec> {
-    let mut out: Vec<ToolSpec> = scenario_pool.to_vec();
-    let scenario_ids: std::collections::HashSet<&String> =
-        scenario_pool.iter().map(|t| &t.id).collect();
+) -> Vec<T> {
+    let mut out: Vec<T> = scenario_pool.to_vec();
+    let scenario_ids: std::collections::HashSet<&str> =
+        scenario_pool.iter().map(|t| t.id()).collect();
     if out.len() >= target_size {
         return out;
     }
     let remaining = target_size - out.len();
     for d in distractors.iter() {
-        if scenario_ids.contains(&d.id) {
+        if scenario_ids.contains(d.id()) {
             continue;
         }
         out.push(d.clone());
@@ -195,6 +236,27 @@ mod tests {
         assert_eq!(m.recall_at_k, 1.0);
         assert!(m.hit_at_k);
         assert!(m.reciprocal_rank > 0.0);
+    }
+
+    #[test]
+    fn complete_at_k_true_only_when_all_gold_present() {
+        let pool = read_file_pool();
+        // Single gold present → complete.
+        let m = evaluate(&pool, "read a file from disk", &["fs.read_file".into()], 3);
+        assert!(m.complete_at_k);
+        // Two gold but a tiny K can't fit both → hit but not complete.
+        let m2 = evaluate(
+            &pool,
+            "read a file from disk",
+            &["fs.read_file".into(), "mail.send".into()],
+            1,
+        );
+        assert!(m2.hit_at_k);
+        assert!(!m2.complete_at_k);
+        // No gold at all → neither.
+        let m3 = evaluate(&pool, "astrophysics", &["does.not.exist".into()], 5);
+        assert!(!m3.hit_at_k);
+        assert!(!m3.complete_at_k);
     }
 
     #[test]

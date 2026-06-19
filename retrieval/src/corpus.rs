@@ -57,11 +57,66 @@ pub struct GoldCall {
     pub args: serde_json::Map<String, Value>,
 }
 
+/// A skill definition — an authored knowledge/procedure document. Mirrors
+/// `ratel_ai_core::Skill`: the indexed fields (`name`, `description`, `tags`)
+/// drive BM25 ranking; `body` carries the markdown content (the dispatch
+/// payload — **not** indexed, so it never affects retrieval scoring) and
+/// `tools` is an optional dependency edge (also not indexed). `metadata` isn't
+/// exercised by the benchmark, so it's defaulted at the conversion boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillSpec {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Full skill document. Carried for fidelity to production registration;
+    /// not BM25-indexed, so it does not change retrieval-only metrics.
+    #[serde(default)]
+    pub body: String,
+}
+
+impl From<&SkillSpec> for ratel_ai_core::Skill {
+    fn from(spec: &SkillSpec) -> Self {
+        ratel_ai_core::Skill {
+            id: spec.id.clone(),
+            name: spec.name.clone(),
+            description: spec.description.clone(),
+            tags: spec.tags.clone(),
+            tools: spec.tools.clone(),
+            metadata: std::collections::HashMap::new(),
+            body: spec.body.clone(),
+        }
+    }
+}
+
+/// Anything with a stable id, so pool-building and distractor logic can be
+/// written once and reused for both tools and skills.
+pub trait Identified {
+    fn id(&self) -> &str;
+}
+
+impl Identified for ToolSpec {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for SkillSpec {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 /// A single benchmark scenario.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     pub id: String,
     pub prompt: String,
+    /// Tool candidates for this tool-retrieval scenario.
+    #[serde(default)]
     pub candidate_pool: Vec<ToolSpec>,
     pub gold_tools: Vec<String>,
     #[serde(default)]

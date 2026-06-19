@@ -8,11 +8,16 @@ use ratel_benchmark_retrieval::ingest::metatool::{
     self as metatool, MetaToolPaths, PLUGIN_DES_URL, SINGLE_TOOL_CSV_URL,
     ingest_to_jsonl as ingest_metatool,
 };
+use ratel_benchmark_retrieval::ingest::sragents::{
+    self as sragents, CORPUS_ZIP_URL as SRAGENTS_CORPUS_ZIP_URL,
+    INSTANCE_URLS as SRAGENTS_INSTANCE_URLS, SrAgentsPaths, ingest_to_jsonl as ingest_sragents,
+};
 use ratel_benchmark_retrieval::ingest::toolret::{
     QUERIES_URLS as TOOLRET_QUERIES_URLS, TOOLS_URLS as TOOLRET_TOOLS_URLS, ToolRetPaths,
     ingest_to_jsonl as ingest_toolret,
 };
 use ratel_benchmark_retrieval::runner::{RunConfig, run_retrieval};
+use ratel_benchmark_retrieval::skill_runner::{SkillRunConfig, run_skill_retrieval};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +55,37 @@ enum Command {
         #[arg(long, value_delimiter = ',', default_values_t = [1usize, 3, 5, 10])]
         top_k: Vec<usize>,
         /// Catalog sizes to evaluate at, comma-separated.
+        #[arg(long, value_delimiter = ',', default_values_t = [30usize, 150, 600])]
+        pool_sizes: Vec<usize>,
+        /// Seed for distractor shuffling.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+    },
+    /// Compute BM25 skill-retrieval metrics over an authored skill corpus
+    /// (SR-Agents). Separate from `retrieval` (tools): the skill catalog is the
+    /// BM25 index / distractor universe; each instance is a question + gold
+    /// skill ids.
+    SkillRetrieval {
+        /// Path to the JSONL instances (one `SkillInstance` per line).
+        #[arg(long, default_value = "test-data/sragents.jsonl")]
+        instances: PathBuf,
+        /// Path to the JSONL skill catalog (one `SkillSpec` per line).
+        #[arg(long, default_value = "test-data/sragents-skills.jsonl")]
+        skills_catalog: PathBuf,
+        /// Where to write the per-row retrieval JSONL.
+        #[arg(short, long, default_value = "results/sragents-skill-retrieval.jsonl")]
+        output: PathBuf,
+        /// Where to append the aggregate summary. Defaults to `--output` with
+        /// its extension replaced by `-summary.jsonl`.
+        #[arg(long)]
+        summary_output: Option<PathBuf>,
+        /// Limit to first N instances (full set if omitted).
+        #[arg(long)]
+        scenarios: Option<usize>,
+        /// Top-K cutoffs, comma-separated.
+        #[arg(long, value_delimiter = ',', default_values_t = [1usize, 3, 5, 10])]
+        top_k: Vec<usize>,
+        /// Catalog sample sizes to evaluate at, comma-separated.
         #[arg(long, value_delimiter = ',', default_values_t = [30usize, 150, 600])]
         pool_sizes: Vec<usize>,
         /// Seed for distractor shuffling.
@@ -128,6 +164,25 @@ enum IngestSource {
         #[arg(long, default_value = "test-data/bfcl-multiple.jsonl")]
         multiple_output: PathBuf,
     },
+    /// SR-Agents (oneal2000/SR-Agents). With `--download` the upstream skill
+    /// corpus zip + six instance files are pulled into `--fixtures-dir` and the
+    /// corpus is unzipped before ingesting. Produces a skill catalog JSONL and
+    /// an instances JSONL for `skill-retrieval`.
+    Sragents {
+        /// Where downloaded source files live, mirroring upstream `data/bench/`.
+        #[arg(long, default_value = "fixtures/sragents")]
+        fixtures_dir: PathBuf,
+        /// Pull upstream sources into `--fixtures-dir` (and unzip the corpus)
+        /// before ingesting (uses the system `curl`). Skip to read existing files.
+        #[arg(long, default_value_t = false)]
+        download: bool,
+        /// Where to write the normalized skill catalog JSONL.
+        #[arg(long, default_value = "test-data/sragents-skills.jsonl")]
+        catalog_output: PathBuf,
+        /// Where to write the normalized instances JSONL.
+        #[arg(long, default_value = "test-data/sragents.jsonl")]
+        instances_output: PathBuf,
+    },
 }
 
 /// Default summary path derived from `--output`: strips a trailing `.jsonl`
@@ -204,6 +259,22 @@ fn download_bfcl_upstream(paths: &BfclPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn download_sragents_upstream(paths: &SrAgentsPaths) -> anyhow::Result<()> {
+    eprintln!(
+        "downloading SR-Agents upstream sources via curl (skill corpus zip + {} instance files)...",
+        SRAGENTS_INSTANCE_URLS.len()
+    );
+    eprintln!("  corpus/corpus.json.zip");
+    fetch_via_curl(SRAGENTS_CORPUS_ZIP_URL, &paths.corpus_zip)?;
+    eprintln!("  unzip → corpus/corpus.json");
+    sragents::unzip_corpus(&paths.corpus_zip, &paths.corpus_json)?;
+    for ((name, url), (_, dest)) in SRAGENTS_INSTANCE_URLS.iter().zip(paths.instances.iter()) {
+        eprintln!("  instances/{name}");
+        fetch_via_curl(url, dest)?;
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -229,6 +300,36 @@ fn main() -> anyhow::Result<()> {
             let summary = run_retrieval(&cfg)?;
             println!(
                 "wrote {} rows for {} scenarios → {}; summary appended → {}",
+                summary.rows_written,
+                summary.scenarios,
+                output.display(),
+                summary.summary_path.display()
+            );
+        }
+        Command::SkillRetrieval {
+            instances,
+            skills_catalog,
+            output,
+            summary_output,
+            scenarios,
+            top_k,
+            pool_sizes,
+            seed,
+        } => {
+            let summary_path = summary_output.unwrap_or_else(|| default_summary_path(&output));
+            let cfg = SkillRunConfig {
+                instances_path: instances,
+                skills_catalog_path: skills_catalog,
+                output_path: output.clone(),
+                summary_path,
+                scenario_limit: scenarios,
+                top_ks: top_k,
+                pool_sizes,
+                seed,
+            };
+            let summary = run_skill_retrieval(&cfg)?;
+            println!(
+                "wrote {} rows for {} skill instances → {}; summary appended → {}",
                 summary.rows_written,
                 summary.scenarios,
                 output.display(),
@@ -320,6 +421,35 @@ fn main() -> anyhow::Result<()> {
                     stats.scenarios_out,
                     simple_output.display(),
                     multiple_output.display(),
+                );
+            }
+            IngestSource::Sragents {
+                fixtures_dir,
+                download,
+                catalog_output,
+                instances_output,
+            } => {
+                let paths = SrAgentsPaths::under_fixtures_dir(&fixtures_dir);
+                if download {
+                    download_sragents_upstream(&paths)?;
+                }
+                let stats = ingest_sragents(&paths, &catalog_output, &instances_output)?;
+                let by_dataset = stats
+                    .by_dataset
+                    .iter()
+                    .map(|(d, n)| format!("{d}={n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "sragents: {} skills → {}; {} instances in, {} skipped (unknown gold) \
+                     → {} instances [{}] at {}",
+                    stats.skills_loaded,
+                    catalog_output.display(),
+                    stats.instances_in,
+                    stats.skipped_unknown_gold,
+                    stats.instances_out,
+                    by_dataset,
+                    instances_output.display(),
                 );
             }
         },

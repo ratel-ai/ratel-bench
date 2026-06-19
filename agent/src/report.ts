@@ -8,6 +8,13 @@ import type { Arm, CellResult } from "./types.js";
 
 export interface RetrievalRow {
   scenario_id: string;
+  /**
+   * Scenario category from the ingest adapter (`metatool-single` /
+   * `metatool-multi` / `metatool-skill`). Drives the `(subset, mode)` split;
+   * absent for category-less corpora (e.g. ToolRet), which fall back to
+   * gold-set size.
+   */
+  category?: string;
   target_pool_size: number;
   actual_pool_size: number;
   /** BM25 engine version (= `ratel-ai-core` crate) this row was scored with. */
@@ -19,7 +26,8 @@ export interface RetrievalRow {
   precision_at_k: number;
   reciprocal_rank: number;
   hit_at_k: boolean;
-  /** True if *every* gold tool is in the top-K (all-or-nothing). */
+  /** True if every gold item is in the top-K (recall == 1.0). Strict sibling of
+   *  hit_at_k; absent in older rows (falls back to recall_at_k >= 1). */
   complete_at_k?: boolean;
   ndcg_at_k: number;
 }
@@ -307,11 +315,24 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
   );
 }
 
-export type RetrievalSubset = "single-tool" | "multi-tool";
+/**
+ * Retrieval subset. For tool corpora this is `single-tool` | `multi-tool`; for
+ * the skill corpus (SR-Agents) it is the dataset name (e.g. `champ`, `toolqa`)
+ * or `all` for the aggregate. Kept as a string so the skill datasets render as
+ * their own panels.
+ */
+export type RetrievalSubset = string;
+/**
+ * Retrieval granularity. `tool` retrieves individual tools (a tool-corpus
+ * experiment); `skill` retrieves authored skill documents (the SR-Agents
+ * experiment). The two are evaluated separately and never share a panel.
+ */
+export type RetrievalMode = "tool" | "skill";
 
 export interface RetrievalSummary {
   corpus: string;
   subset: RetrievalSubset;
+  mode: RetrievalMode;
   k: number;
   pool_size: number;
   n: number;
@@ -319,6 +340,9 @@ export interface RetrievalSummary {
   median_precision: number;
   mean_recall: number;
   median_recall: number;
+  /** Fraction of queries with recall == 1.0 (every gold in top-K). Equals
+   *  hit_rate for single-gold buckets; stricter for multi-gold tool retrieval. */
+  complete_set_rate: number;
   mean_mrr: number;
   median_mrr: number;
   mean_ndcg: number;
@@ -343,6 +367,7 @@ export function corpusOf(scenarioId: string): string {
   if (scenarioId.startsWith("bfcl-multiple-")) return "bfcl-multiple";
   if (scenarioId.startsWith("metatool-")) return "metatool";
   if (scenarioId.startsWith("toolret-")) return "toolret";
+  if (scenarioId.startsWith("sragents-")) return "sragents";
   return "other";
 }
 
@@ -357,19 +382,51 @@ export function subsetOf(goldCount: number): RetrievalSubset {
   return goldCount > 1 ? "multi-tool" : "single-tool";
 }
 
+/**
+ * Derive `(subset, mode)` for a row from the explicit `category` set by the
+ * ingest adapters. MetaTool queries are tool-retrieval (`metatool-single` →
+ * single-tool/tool, `metatool-multi` → multi-tool/tool). SR-Agents rows carry
+ * `sragents-<dataset>` and are skill-retrieval, bucketed by dataset. Falls back
+ * to gold-set size in tool mode for category-less corpora (e.g. ToolRet).
+ */
+export function bucketOf(row: RetrievalRow): {
+  subset: RetrievalSubset;
+  mode: RetrievalMode;
+} {
+  switch (row.category) {
+    case "metatool-single":
+      return { subset: "single-tool", mode: "tool" };
+    case "metatool-multi":
+      return { subset: "multi-tool", mode: "tool" };
+    default:
+      if (row.category?.startsWith("sragents-")) {
+        return { subset: row.category.slice("sragents-".length), mode: "skill" };
+      }
+      return { subset: subsetOf(row.gold_count), mode: "tool" };
+  }
+}
+
 export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
   const groups = new Map<string, RetrievalRow[]>();
   for (const r of rows) {
-    const key = `${corpusOf(r.scenario_id)}::${subsetOf(r.gold_count)}::${r.k}::${r.target_pool_size}`;
-    const arr = groups.get(key) ?? [];
-    arr.push(r);
-    groups.set(key, arr);
+    const corpus = corpusOf(r.scenario_id);
+    const { subset, mode } = bucketOf(r);
+    const push = (sub: string) => {
+      const key = `${corpus}::${sub}::${mode}::${r.k}::${r.target_pool_size}`;
+      const arr = groups.get(key) ?? [];
+      arr.push(r);
+      groups.set(key, arr);
+    };
+    push(subset);
+    // Skill rows also roll up into an aggregate `all` panel across datasets.
+    if (mode === "skill" && subset !== "all") push("all");
   }
   const out: RetrievalSummary[] = [];
   for (const [key, arr] of groups) {
-    const [corpus, subset, kStr, poolStr] = key.split("::") as [
+    const [corpus, subset, mode, kStr, poolStr] = key.split("::") as [
       string,
       RetrievalSubset,
+      RetrievalMode,
       string,
       string,
     ];
@@ -380,6 +437,7 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
     out.push({
       corpus,
       subset,
+      mode,
       k: Number(kStr),
       pool_size: Number(poolStr),
       n: arr.length,
@@ -387,6 +445,9 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       median_precision: median(precisions),
       mean_recall: mean(recalls),
       median_recall: median(recalls),
+      // complete = every gold in top-K. Prefer the explicit per-row flag;
+      // fall back to recall == 1.0 for older rows without it.
+      complete_set_rate: mean(arr.map((r) => ((r.complete_at_k ?? r.recall_at_k >= 1) ? 1 : 0))),
       mean_mrr: mean(mrrs),
       median_mrr: median(mrrs),
       mean_ndcg: mean(ndcgs),
@@ -397,10 +458,14 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       complete_rate: mean(arr.map((r) => ((r.complete_at_k ?? r.hit_at_k) ? 1 : 0))),
     });
   }
+  // tool before skill within a subset, so the multi-tool panels read
+  // "tool retrieval" then "skill retrieval" (the baseline, then the upgrade).
+  const modeRank = (m: RetrievalMode) => (m === "tool" ? 0 : 1);
   return out.sort(
     (a, b) =>
       a.corpus.localeCompare(b.corpus) ||
       a.subset.localeCompare(b.subset) ||
+      modeRank(a.mode) - modeRank(b.mode) ||
       a.k - b.k ||
       a.pool_size - b.pool_size,
   );
@@ -533,9 +598,10 @@ export function renderReport(args: {
   }
   lines.push("");
 
-  // 3. Retrieval quality. One panel per (corpus, gold-set bucket); inside the
-  // panel rows are sorted by (k, pool_size). Single-tool and multi-tool live in
-  // different panels because their recall semantics differ (binary vs fractional).
+  // 3. Retrieval quality. One panel per (corpus, subset, mode); inside the
+  // panel rows are sorted by (k, pool_size). Tool corpora (MetaTool, ToolRet)
+  // split single-tool vs multi-tool; the skill corpus (SR-Agents) renders one
+  // panel per dataset plus an aggregate `all` panel (see ADR-0008).
   lines.push("## Retrieval quality (BM25, no LLM)");
   lines.push("");
   if (retrieval.length === 0) {
@@ -543,16 +609,26 @@ export function renderReport(args: {
       "_No retrieval rows; run `cargo run -p ratel-benchmark -- retrieval ...` to populate._",
     );
   } else {
+    // Note: for multi-mapping skill datasets (e.g. CHAMP) an instance has
+    // several gold skills, so recall@K is fractional; `complete@K` (every gold
+    // skill in the top-K) is the all-or-nothing bar.
+    lines.push(
+      "> **Skill retrieval (SR-Agents):** authored skill documents retrieved by BM25 over " +
+        "name + description (body is not indexed). For multi-mapping datasets (e.g. CHAMP) an " +
+        "instance has several gold skills, so recall@K is *fractional*; **`complete@K`** is the " +
+        "all-or-nothing bar (every gold skill in the top-K).",
+    );
+    lines.push("");
     const panels = new Map<string, RetrievalSummary[]>();
     for (const r of retrieval) {
-      const key = `${r.corpus}::${r.subset}`;
+      const key = `${r.corpus}::${r.subset}::${r.mode}`;
       const arr = panels.get(key) ?? [];
       arr.push(r);
       panels.set(key, arr);
     }
     for (const [key, summaries] of panels) {
-      const [corpus, subset] = key.split("::");
-      lines.push(`### ${corpus} / ${subset}`);
+      const [corpus, subset, mode] = key.split("::");
+      lines.push(`### ${corpus} / ${subset} / ${mode}-retrieval`);
       lines.push("");
       lines.push(
         "| K | pool size | n | accuracy@K (hit@K) | complete@K | mean precision@K | median precision@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",

@@ -8,6 +8,8 @@ Accepted. Supersedes the corpus and primary-oracle decisions in ADR-0005; the re
 
 Partially superseded by ADR-0007: the "snapshot normalized JSONL into the repo" stance and the MetaTool sampling cap are dropped. Two retrieval modes, the gold-only pooling, and the judge stack stand.
 
+Complemented by ADR-0008: **skill retrieval** is evaluated as a separate experiment on an authored skill corpus (SR-Agents) via `ratel-ai-core`'s `SkillRegistry`, with its own ingester, run path, and output. The MetaTool modes here remain tool-only (`single-tool · tool`, `multi-tool · tool`).
+
 ## Context
 
 ADR-0005 locked **ToolBench** as the corpus. Two issues surfaced when we went to ingest it:

@@ -9,11 +9,16 @@
 //!
 //! Mapping rules (per ADR-0006):
 //! - Tool universe = `plugin_des.json`. `id == name == plugin key`. Schemas empty.
-//! - Single-tool query → one [`Scenario`] with one gold tool; id `metatool-st-<line>`.
-//! - Multi-tool query → one [`Scenario`] with N gold tools; id `metatool-mt-<index>`.
-//! - Per-row `candidate_pool` carries only gold tool(s); the runner pools
-//!   distractors across scenarios at retrieval time.
+//! - Single-tool query → one tool-retrieval [`Scenario`] with one gold tool;
+//!   id `metatool-st-<line>`, category `metatool-single` (scored via `ToolRegistry`).
+//! - Multi-tool query → one tool-retrieval [`Scenario`] over its N gold tools,
+//!   id `metatool-mt-<index>`, category `metatool-multi` (`ToolRegistry`).
+//! - A scenario's `candidate_pool` carries only its gold tool(s); the runner
+//!   pools tool distractors across scenarios at retrieval time.
 //! - Queries whose gold tool is not in `plugin_des.json` are skipped (counted).
+//!
+//! MetaTool is a tool corpus only — skill retrieval is evaluated separately on
+//! an authored skill corpus (SR-Agents); see `ingest::sragents` + `skill_runner`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -197,6 +202,9 @@ fn build_single_scenario(
     })
 }
 
+/// Build the **multi-tool · tool-retrieval** scenario: the query's N gold tools,
+/// scored as individual tools via `ToolRegistry` (must surface *all* of them —
+/// fractional recall). id `metatool-mt-<index>`, category `metatool-multi`.
 fn build_multi_scenario(
     q: &RawMultiQuery,
     plugins: &HashMap<String, ToolSpec>,
@@ -403,11 +411,13 @@ mod tests {
         };
         let s = build_multi_scenario(&q, &plugins).unwrap();
         assert_eq!(s.id, "metatool-mt-0");
+        assert_eq!(s.category.as_deref(), Some("metatool-multi"));
+        // The N gold tools are the pool, gold = their names.
+        assert_eq!(s.candidate_pool.len(), 2);
         assert_eq!(
             s.gold_tools,
             vec!["NewsTool".to_string(), "FinanceTool".to_string()]
         );
-        assert_eq!(s.candidate_pool.len(), 2);
     }
 
     #[test]
@@ -439,10 +449,31 @@ mod tests {
             })
             .collect();
         let (out, stats) = build_scenarios(&single, &multi, &plugins);
+        // 50 single + 7 multi (tool) = 57. MetaTool is tool-only now.
         assert_eq!(out.len(), 57);
         assert_eq!(stats.scenarios_out, 57);
         assert_eq!(stats.single_tool_in, 50);
         assert_eq!(stats.multi_tool_in, 7);
+    }
+
+    #[test]
+    fn build_scenarios_emits_one_tool_scenario_per_kept_multi_query() {
+        let plugins = fixture_plugins();
+        let multi: Vec<RawMultiQuery> = (0..3)
+            .map(|i| RawMultiQuery {
+                index: i,
+                query: format!("m{i}"),
+                tools: vec!["NewsTool".into(), "FinanceTool".into()],
+            })
+            .collect();
+        let (out, _stats) = build_scenarios(&[], &multi, &plugins);
+        // Each multi-tool query → exactly one tool-retrieval scenario.
+        assert_eq!(out.len(), 3);
+        let tool = out
+            .iter()
+            .filter(|s| s.category.as_deref() == Some("metatool-multi"))
+            .count();
+        assert_eq!(tool, 3);
     }
 
     #[test]

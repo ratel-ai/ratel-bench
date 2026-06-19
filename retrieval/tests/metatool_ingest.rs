@@ -58,6 +58,7 @@ fn ingest_writes_jsonl_parsable_by_corpus_loader() {
     assert_eq!(stats.single_tool_in, 6);
     assert_eq!(stats.multi_tool_in, 2);
     assert_eq!(stats.skipped_unknown_gold, 0);
+    // 6 single + 2 multi (tool) = 8. MetaTool is tool-only.
     assert_eq!(stats.scenarios_out, 8);
 
     let scenarios =
@@ -65,6 +66,7 @@ fn ingest_writes_jsonl_parsable_by_corpus_loader() {
     assert_eq!(scenarios.len(), 8);
     for s in &scenarios {
         assert!(!s.gold_tools.is_empty());
+        assert!(!s.candidate_pool.is_empty());
         for tool in &s.candidate_pool {
             // MetaTool plugins ship without parameter schemas.
             assert!(tool.input_schema.as_object().is_some_and(|o| o.is_empty()));
@@ -103,8 +105,18 @@ fn ingest_round_trips_through_retrieval_runner() {
     let summary_json: serde_json::Value = serde_json::from_str(summary_line).unwrap();
     assert_eq!(summary_json["scenarios"], 8);
     assert_eq!(summary_json["pool_sizes"], serde_json::json!([3, 6]));
-    assert_eq!(summary_json["by_pool_size"].as_array().unwrap().len(), 2);
-    assert_eq!(summary_json["overall"]["by_k"].as_array().unwrap().len(), 2);
+
+    // Two buckets: single/tool, multi/tool — MetaTool is tool-only.
+    let by_bucket = summary_json["by_bucket"].as_array().unwrap();
+    assert_eq!(by_bucket.len(), 2);
+    assert!(by_bucket.iter().all(|b| b["mode"] == "tool"));
+    let multi = by_bucket
+        .iter()
+        .find(|b| b["subset"] == "multi-tool" && b["mode"] == "tool")
+        .expect("multi-tool bucket present");
+    assert_eq!(multi["scenarios"], 2);
+    assert_eq!(multi["by_pool_size"].as_array().unwrap().len(), 2);
+    assert_eq!(multi["overall"]["by_k"].as_array().unwrap().len(), 2);
 
     let body = std::fs::read_to_string(&retrieval_out).unwrap();
     let mut row_count = 0usize;

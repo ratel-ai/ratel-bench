@@ -13,7 +13,7 @@ use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use serde::Serialize;
 
-use crate::corpus::{Scenario, ToolSpec, load_scenarios};
+use crate::corpus::{Identified, Scenario, ToolSpec, load_scenarios};
 use crate::retrieval::{RetrievalMetrics, build_pool, evaluate_at_ks};
 use crate::stats::{self, Stats};
 
@@ -40,6 +40,12 @@ pub struct RunConfig {
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalRow {
     pub scenario_id: String,
+    /// Scenario category (e.g. `metatool-single` / `metatool-multi`), carried
+    /// through so the report can bucket rows by `(subset, mode)` without
+    /// re-deriving it. `None` for category-less corpora (the report then falls
+    /// back to gold-set size).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     pub target_pool_size: usize,
     pub actual_pool_size: usize,
     /// BM25 engine version (= `ratel-ai-core` crate). Rides every row so the
@@ -48,6 +54,110 @@ pub struct RetrievalRow {
     pub ratel_ai_core_version: String,
     #[serde(flatten)]
     pub metrics: RetrievalMetrics,
+}
+
+/// Aggregation bucket: a `(subset, retrieval mode)` pair. Tool retrieval is the
+/// only mode here — `mode` is always `"tool"`; skill retrieval is a separate
+/// experiment (see `skill_runner`). `subset` is `single-tool` or `multi-tool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Bucket {
+    pub subset: &'static str,
+    pub mode: &'static str,
+}
+
+/// Map a scenario to its `(subset, mode)` bucket. MetaTool single- and
+/// multi-tool queries carry an explicit category; category-less corpora (e.g.
+/// ToolRet) fall back to gold-set size. Always tool-retrieval mode.
+fn bucket_of(scenario: &Scenario) -> Bucket {
+    match scenario.category.as_deref() {
+        Some("metatool-single") => Bucket {
+            subset: "single-tool",
+            mode: "tool",
+        },
+        Some("metatool-multi") => Bucket {
+            subset: "multi-tool",
+            mode: "tool",
+        },
+        _ => {
+            if scenario.gold_tools.len() > 1 {
+                Bucket {
+                    subset: "multi-tool",
+                    mode: "tool",
+                }
+            } else {
+                Bucket {
+                    subset: "single-tool",
+                    mode: "tool",
+                }
+            }
+        }
+    }
+}
+
+/// Fixed output order for the summary's `by_bucket` blocks. Any bucket not
+/// listed here (future categories) is appended after these, sorted, so output
+/// stays deterministic.
+const BUCKET_ORDER: &[(&str, &str)] = &[("single-tool", "tool"), ("multi-tool", "tool")];
+
+/// Per-bucket accumulators. Shared with `skill_runner`, which buckets by
+/// dataset name rather than by `(subset, mode)`.
+#[derive(Debug, Default)]
+pub(crate) struct BucketAcc {
+    pub(crate) scenarios: usize,
+    pub(crate) overall_score: ScoreAcc,
+    pub(crate) overall_k: HashMap<usize, KAcc>,
+    pub(crate) by_pool_score: HashMap<usize, ScoreAcc>,
+    pub(crate) by_pool_k: HashMap<(usize, usize), KAcc>,
+}
+
+impl BucketAcc {
+    /// Fold one `(scenario, pool)` cell's metrics into the accumulator. Shared
+    /// by both the tool and skill run paths.
+    pub(crate) fn record(&mut self, target_size: usize, all_metrics: &[RetrievalMetrics]) {
+        // `gold_score` is identical across every `k` entry for this cell — pull
+        // it once so it isn't double-counted.
+        let gold_score = all_metrics.first().and_then(|m| m.gold_score);
+        self.overall_score.push(gold_score);
+        self.by_pool_score
+            .entry(target_size)
+            .or_default()
+            .push(gold_score);
+        for metrics in all_metrics {
+            self.overall_k.entry(metrics.k).or_default().push(metrics);
+            self.by_pool_k
+                .entry((target_size, metrics.k))
+                .or_default()
+                .push(metrics);
+        }
+    }
+
+    pub(crate) fn into_summary(
+        mut self,
+        subset: &str,
+        mode: &str,
+        top_ks: &[usize],
+        pool_sizes: &[usize],
+    ) -> BucketSummary {
+        let overall = PoolSizeSummary::build(None, self.overall_score, top_ks, self.overall_k);
+        let by_pool_size = pool_sizes
+            .iter()
+            .map(|&pool_size| {
+                let score = self.by_pool_score.remove(&pool_size).unwrap_or_default();
+                let ks: HashMap<usize, KAcc> = top_ks
+                    .iter()
+                    .filter_map(|&k| self.by_pool_k.remove(&(pool_size, k)).map(|acc| (k, acc)))
+                    .collect();
+                PoolSizeSummary::build(Some(pool_size), score, top_ks, ks)
+            })
+            .collect();
+        BucketSummary {
+            subset: subset.to_string(),
+            mode: mode.to_string(),
+            scenarios: self.scenarios,
+            overall,
+            by_pool_size,
+        }
+    }
 }
 
 pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
@@ -65,60 +175,45 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         .map_err(|e| anyhow::anyhow!("creating {}: {e}", config.output_path.display()))?;
     let mut writer = BufWriter::new(file);
 
-    let global_distractors = collect_global_distractors(&scenarios);
+    // Tool scenarios compete against the plugin tool universe (real
+    // `ToolRegistry`), pooled across all scenarios and deduped by id.
+    let tool_distractors = collect_tool_distractors(&scenarios);
     let mut rows = 0usize;
 
-    let mut overall_score = ScoreAcc::default();
-    let mut overall_k: HashMap<usize, KAcc> = HashMap::new();
-    let mut by_pool_score: HashMap<usize, ScoreAcc> = HashMap::new();
-    let mut by_pool_k: HashMap<(usize, usize), KAcc> = HashMap::new();
+    // One accumulator set per `(subset, mode)` bucket.
+    let mut buckets: HashMap<Bucket, BucketAcc> = HashMap::new();
 
     for scenario in &scenarios {
-        let scenario_ids: HashSet<&String> =
-            scenario.candidate_pool.iter().map(|t| &t.id).collect();
-        let mut distractors: Vec<ToolSpec> = global_distractors
-            .iter()
-            .filter(|t| !scenario_ids.contains(&t.id))
-            .cloned()
-            .collect();
+        let bucket = bucket_of(scenario);
 
-        // Per-scenario shuffle for deterministic-but-varied distractor ordering.
-        let mut rng = scenario_rng(&scenario.id, config.seed);
-        distractors.shuffle(&mut rng);
+        let per_pool = evaluate_scenario(
+            &scenario.candidate_pool,
+            &tool_distractors,
+            &scenario.id,
+            &scenario.prompt,
+            &scenario.gold_tools,
+            config.seed,
+            &config.pool_sizes,
+            &config.top_ks,
+            evaluate_at_ks,
+        );
 
-        for &target_size in &config.pool_sizes {
-            let pool = build_pool(&scenario.candidate_pool, &distractors, target_size);
-            let all_metrics = evaluate_at_ks(
-                &pool,
-                &scenario.prompt,
-                &scenario.gold_tools,
-                &config.top_ks,
-            );
+        let acc = buckets.entry(bucket).or_default();
+        acc.scenarios += 1;
 
-            // `gold_score` is identical across every `k` entry for this
-            // (scenario, pool) cell — pull it once so it isn't double-counted.
-            let gold_score = all_metrics.first().and_then(|m| m.gold_score);
-            overall_score.push(gold_score);
-            by_pool_score
-                .entry(target_size)
-                .or_default()
-                .push(gold_score);
-
-            for metrics in &all_metrics {
-                overall_k.entry(metrics.k).or_default().push(metrics);
-                by_pool_k
-                    .entry((target_size, metrics.k))
-                    .or_default()
-                    .push(metrics);
-            }
+        for (&target_size, (actual_pool_size, all_metrics)) in
+            config.pool_sizes.iter().zip(per_pool.iter())
+        {
+            acc.record(target_size, all_metrics);
 
             for metrics in all_metrics {
                 let row = RetrievalRow {
                     scenario_id: scenario.id.clone(),
+                    category: scenario.category.clone(),
                     target_pool_size: target_size,
-                    actual_pool_size: pool.len(),
-                    ratel_ai_core_version: crate::RATEL_AI_CORE_VERSION.to_string(),
-                    metrics,
+                    actual_pool_size: *actual_pool_size,
+                    ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
+                    metrics: metrics.clone(),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&row)?)?;
                 rows += 1;
@@ -132,9 +227,29 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("creating summary dir {}: {e}", parent.display()))?;
     }
+    // Emit buckets in the canonical order, then any extras (sorted) so output
+    // is deterministic regardless of HashMap iteration order.
+    let mut by_bucket: Vec<BucketSummary> = Vec::new();
+    for &(subset, mode) in BUCKET_ORDER {
+        let key = Bucket { subset, mode };
+        if let Some(acc) = buckets.remove(&key) {
+            by_bucket.push(acc.into_summary(
+                key.subset,
+                key.mode,
+                &config.top_ks,
+                &config.pool_sizes,
+            ));
+        }
+    }
+    let mut extras: Vec<(Bucket, BucketAcc)> = buckets.into_iter().collect();
+    extras.sort_by(|a, b| (a.0.subset, a.0.mode).cmp(&(b.0.subset, b.0.mode)));
+    for (key, acc) in extras {
+        by_bucket.push(acc.into_summary(key.subset, key.mode, &config.top_ks, &config.pool_sizes));
+    }
+
     let summary = OverallSummary {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        ratel_ai_core_version: crate::RATEL_AI_CORE_VERSION.to_string(),
+        ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.corpus_path.display().to_string(),
         output: config.output_path.display().to_string(),
         scenarios: scenarios.len(),
@@ -142,20 +257,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         top_k: config.top_ks.clone(),
         pool_sizes: config.pool_sizes.clone(),
         seed: config.seed,
-        overall: PoolSizeSummary::build(None, overall_score, &config.top_ks, overall_k),
-        by_pool_size: config
-            .pool_sizes
-            .iter()
-            .map(|&pool_size| {
-                let score = by_pool_score.remove(&pool_size).unwrap_or_default();
-                let ks: HashMap<usize, KAcc> = config
-                    .top_ks
-                    .iter()
-                    .filter_map(|&k| by_pool_k.remove(&(pool_size, k)).map(|acc| (k, acc)))
-                    .collect();
-                PoolSizeSummary::build(Some(pool_size), score, &config.top_ks, ks)
-            })
-            .collect(),
+        by_bucket,
     };
     // Append (not overwrite): each run adds one line, so the file accumulates
     // a comparable history across experiments run at different times.
@@ -182,12 +284,13 @@ pub struct RunSummary {
 
 /// Accumulates rank-dependent metrics for one `k` cutoff across scenarios.
 #[derive(Debug, Default)]
-struct KAcc {
+pub(crate) struct KAcc {
     recall: Vec<f64>,
     precision: Vec<f64>,
     ndcg: Vec<f64>,
     mrr: Vec<f64>,
     hits: usize,
+    /// Cells where every gold item is in the top-K (`complete_at_k`).
     complete: usize,
 }
 
@@ -214,6 +317,13 @@ impl KAcc {
             median_precision: stats::median(&self.precision),
             mean_recall: stats::mean(&self.recall),
             median_recall: stats::median(&self.recall),
+            // For single-gold buckets this equals hit_rate; for multi-gold tool
+            // retrieval it's the stricter "complete set retrieved" rate.
+            complete_set_rate: if n == 0 {
+                0.0
+            } else {
+                self.complete as f64 / n as f64
+            },
             mean_ndcg: stats::mean(&self.ndcg),
             median_ndcg: stats::median(&self.ndcg),
             mean_mrr: stats::mean(&self.mrr),
@@ -222,11 +332,6 @@ impl KAcc {
                 0.0
             } else {
                 self.hits as f64 / n as f64
-            },
-            complete_rate: if n == 0 {
-                0.0
-            } else {
-                self.complete as f64 / n as f64
             },
         }
     }
@@ -237,7 +342,7 @@ impl KAcc {
 /// evaluated in the group; `scores` holds only the `Some` values, so
 /// `coverage = scores.len() / total`.
 #[derive(Debug, Default)]
-struct ScoreAcc {
+pub(crate) struct ScoreAcc {
     total: usize,
     scores: Vec<f64>,
 }
@@ -283,14 +388,15 @@ pub struct KSummary {
     pub median_precision: f64,
     pub mean_recall: f64,
     pub median_recall: f64,
+    /// Fraction of cells with recall == 1.0 (every gold item in the top-K).
+    /// For single-gold buckets this equals `hit_rate`; for multi-gold tool
+    /// retrieval it's the strict "complete set retrieved" rate.
+    pub complete_set_rate: f64,
     pub mean_ndcg: f64,
     pub median_ndcg: f64,
     pub mean_mrr: f64,
     pub median_mrr: f64,
     pub hit_rate: f64,
-    /// Fraction of scenarios where *every* gold tool landed in the top-K
-    /// (all-or-nothing). Equals `hit_rate` for single-gold corpora.
-    pub complete_rate: f64,
 }
 
 /// One aggregation group: either "overall" (`pool_size: None`, spans every
@@ -324,13 +430,31 @@ impl PoolSizeSummary {
     }
 }
 
-/// Overall-performance summary written alongside the per-row JSONL: one
-/// headline `overall` block spanning every pool size, plus a `by_pool_size`
-/// breakdown matching the existing TS report's pool-size panels.
+/// Per-bucket metrics block: the same `overall` + `by_pool_size` shape,
+/// computed separately for one `(subset, mode)` pair. The tool runner emits
+/// `{single-tool, tool}` and `{multi-tool, tool}`; `skill_runner` reuses this
+/// shape with `mode == "skill"` and a per-dataset `subset`.
+#[derive(Debug, Clone, Serialize)]
+pub struct BucketSummary {
+    /// `single-tool` | `multi-tool` (tool runner), or a dataset name (skills).
+    pub subset: String,
+    /// `tool` | `skill`.
+    pub mode: String,
+    /// Distinct scenarios in this bucket.
+    pub scenarios: usize,
+    pub overall: PoolSizeSummary,
+    pub by_pool_size: Vec<PoolSizeSummary>,
+}
+
+/// Overall-performance summary written alongside the per-row JSONL. Metrics are
+/// split into one `by_bucket` block per `(subset, mode)` so single-tool and
+/// multi-tool tool retrieval are reported separately with the same metric set.
 #[derive(Debug, Clone, Serialize)]
 pub struct OverallSummary {
     pub generated_at: String,
-    /// BM25 engine version (= `ratel-ai-core` crate) for this run.
+    /// Resolved `ratel-ai-core` version that produced these metrics (captured
+    /// from Cargo.lock at build time). Lets the append-only summary track how
+    /// retrieval/skill metrics shift across engine updates.
     pub ratel_ai_core_version: String,
     pub corpus: String,
     pub output: String,
@@ -339,13 +463,12 @@ pub struct OverallSummary {
     pub top_k: Vec<usize>,
     pub pool_sizes: Vec<usize>,
     pub seed: u64,
-    pub overall: PoolSizeSummary,
-    pub by_pool_size: Vec<PoolSizeSummary>,
+    pub by_bucket: Vec<BucketSummary>,
 }
 
-/// Pool every tool from every scenario into a global distractor list. Each
-/// scenario filters out tools that are already in its own candidate pool.
-fn collect_global_distractors(scenarios: &[Scenario]) -> Vec<ToolSpec> {
+/// Pool every scenario's candidate tools into the tool distractor universe
+/// (deduped by id). Each scenario later drops entries already in its own pool.
+fn collect_tool_distractors(scenarios: &[Scenario]) -> Vec<ToolSpec> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<ToolSpec> = Vec::new();
     for s in scenarios {
@@ -358,7 +481,44 @@ fn collect_global_distractors(scenarios: &[Scenario]) -> Vec<ToolSpec> {
     out
 }
 
-fn scenario_rng(scenario_id: &str, seed: u64) -> rand::rngs::StdRng {
+/// Build per-pool-size metrics for one scenario, generic over tools vs skills.
+/// Filters the scenario's own candidates out of `universe`, shuffles
+/// deterministically, then evaluates at each pool size with `evaluate`. Returns
+/// one `(actual_pool_size, metrics)` per requested pool size, in order. Shared
+/// by the tool runner and `skill_runner`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_scenario<T: Identified + Clone>(
+    scenario_pool: &[T],
+    universe: &[T],
+    scenario_id: &str,
+    prompt: &str,
+    gold: &[String],
+    seed: u64,
+    pool_sizes: &[usize],
+    top_ks: &[usize],
+    evaluate: impl Fn(&[T], &str, &[String], &[usize]) -> Vec<RetrievalMetrics>,
+) -> Vec<(usize, Vec<RetrievalMetrics>)> {
+    let own: HashSet<&str> = scenario_pool.iter().map(|t| t.id()).collect();
+    let mut distractors: Vec<T> = universe
+        .iter()
+        .filter(|t| !own.contains(t.id()))
+        .cloned()
+        .collect();
+    // Per-scenario shuffle for deterministic-but-varied distractor ordering.
+    let mut rng = scenario_rng(scenario_id, seed);
+    distractors.shuffle(&mut rng);
+
+    pool_sizes
+        .iter()
+        .map(|&size| {
+            let pool = build_pool(scenario_pool, &distractors, size);
+            let metrics = evaluate(&pool, prompt, gold, top_ks);
+            (pool.len(), metrics)
+        })
+        .collect()
+}
+
+pub(crate) fn scenario_rng(scenario_id: &str, seed: u64) -> rand::rngs::StdRng {
     // Mix the scenario id into the seed so distractor orderings vary per scenario
     // but stay reproducible for the same (id, seed) pair.
     let mut h: u64 = seed;
@@ -545,25 +705,101 @@ mod tests {
         assert_eq!(v["rows_written"], 8); // 2 scenarios × 2 pools × 2 k's
         assert_eq!(v["pool_sizes"], serde_json::json!([1, 5]));
 
-        assert!(v["overall"]["pool_size"].is_null());
-        assert_eq!(v["overall"]["n"], 4); // 2 scenarios × 2 pools
-        let overall_by_k = v["overall"]["by_k"].as_array().unwrap();
+        // Both scenarios have one gold tool and no category → single-tool/tool.
+        let by_bucket = v["by_bucket"].as_array().unwrap();
+        assert_eq!(by_bucket.len(), 1);
+        let b = &by_bucket[0];
+        assert_eq!(b["subset"], "single-tool");
+        assert_eq!(b["mode"], "tool");
+        assert_eq!(b["scenarios"], 2);
+
+        assert!(b["overall"]["pool_size"].is_null());
+        assert_eq!(b["overall"]["n"], 4); // 2 scenarios × 2 pools
+        let overall_by_k = b["overall"]["by_k"].as_array().unwrap();
         assert_eq!(overall_by_k.len(), 2);
         assert_eq!(overall_by_k[0]["k"], 1);
         assert_eq!(overall_by_k[1]["k"], 3);
         assert!(
-            v["overall"]["bm25_gold_score"]["coverage"]
+            b["overall"]["bm25_gold_score"]["coverage"]
                 .as_f64()
                 .unwrap()
                 > 0.0
         );
 
-        let by_pool = v["by_pool_size"].as_array().unwrap();
+        let by_pool = b["by_pool_size"].as_array().unwrap();
         assert_eq!(by_pool.len(), 2);
         assert_eq!(by_pool[0]["pool_size"], 1);
         assert_eq!(by_pool[0]["n"], 2);
         assert_eq!(by_pool[0]["by_k"].as_array().unwrap().len(), 2);
         assert_eq!(by_pool[1]["pool_size"], 5);
+    }
+
+    fn categorized(
+        id: &str,
+        prompt: &str,
+        pool: Vec<ToolSpec>,
+        gold: &[&str],
+        category: &str,
+    ) -> Scenario {
+        Scenario {
+            id: id.into(),
+            prompt: prompt.into(),
+            candidate_pool: pool,
+            gold_tools: gold.iter().map(|s| (*s).to_string()).collect(),
+            judge_criteria: None,
+            category: Some(category.into()),
+            gold_calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn summary_splits_into_single_and_multi_tool_buckets() {
+        let scenarios = vec![
+            categorized(
+                "metatool-st-2",
+                "read a file from disk",
+                vec![t("fs.read", "Read a file from disk.")],
+                &["fs.read"],
+                "metatool-single",
+            ),
+            categorized(
+                "metatool-mt-0",
+                "read and send a file",
+                vec![
+                    t("fs.read", "Read a file from disk."),
+                    t("mail.send", "Send an email to a recipient."),
+                ],
+                &["fs.read", "mail.send"],
+                "metatool-multi",
+            ),
+        ];
+        let corpus = write_corpus(&scenarios);
+        let out = tempfile::NamedTempFile::new().unwrap();
+        let summary_out = tempfile::NamedTempFile::new().unwrap();
+        let cfg = RunConfig {
+            corpus_path: corpus.path().to_path_buf(),
+            output_path: out.path().to_path_buf(),
+            summary_path: summary_out.path().to_path_buf(),
+            scenario_limit: None,
+            top_ks: vec![1, 3],
+            pool_sizes: vec![5],
+            seed: 42,
+        };
+        run_retrieval(&cfg).unwrap();
+
+        let contents = std::fs::read_to_string(summary_out.path()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        let by_bucket = v["by_bucket"].as_array().unwrap();
+        // Canonical order: single/tool, multi/tool. No skill bucket — skill
+        // retrieval is a separate experiment (see `skill_runner`).
+        assert_eq!(by_bucket.len(), 2);
+        assert_eq!(by_bucket[0]["subset"], "single-tool");
+        assert_eq!(by_bucket[0]["mode"], "tool");
+        assert_eq!(by_bucket[1]["subset"], "multi-tool");
+        assert_eq!(by_bucket[1]["mode"], "tool");
+        for b in by_bucket {
+            assert_eq!(b["scenarios"], 1);
+        }
     }
 
     #[test]
