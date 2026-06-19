@@ -14,14 +14,20 @@
 // Flags:
 //   --force         re-ingest even if the snapshot already exists
 //   --skip-ingest   never call the ingest CLI (fail loudly if missing)
-//   --skip-agent    never run mode (c), even if a provider key is present
+//   --skip-agent    never run the agent campaign
 //   --only NAME     restrict to a single corpus: "metatool" | "toolret"
+//   --bfcl          run ONLY the self-contained BFCL pipeline (ingest both
+//                   subsets → BM25 retrieval → qwen3.5 campaign → BFCL.md →
+//                   delete downloaded data). Requires a local Ollama with
+//                   qwen3.5 unless paired with --skip-agent.
+//   --keep-bfcl     with --bfcl, skip the post-run cleanup (keep fixtures +
+//                   normalized corpora for debugging)
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { REPO_ROOT, resolveRepoPath } from "./paths.js";
 
-type CorpusName = "metatool" | "toolret";
+type CorpusName = "metatool" | "toolret" | "bfcl-simple" | "bfcl-multiple";
 
 interface CorpusSpec {
   name: CorpusName;
@@ -50,6 +56,45 @@ const CORPORA: CorpusSpec[] = [
     topK: "1,3,5,10",
   },
 ];
+
+/**
+ * BFCL is a focused, self-contained pipeline (own ingest that emits two files,
+ * a qwen3.5 agent campaign, a dedicated report, and a cleanup of downloaded
+ * data). It is opt-in via `--bfcl` so the default run-all stays $0/key-free and
+ * doesn't require a local Ollama. Retrieval pool sizes go up to each subset's
+ * function-universe ceiling (~400 simple / ~600 multiple).
+ */
+const BFCL_CORPORA: CorpusSpec[] = [
+  {
+    name: "bfcl-simple",
+    corpus: "test-data/bfcl-simple.jsonl",
+    retrievalOut: "results/bfcl-simple-retrieval.jsonl",
+    poolSizes: "30,100,400",
+    topK: "1,3,5,10",
+  },
+  {
+    name: "bfcl-multiple",
+    corpus: "test-data/bfcl-multiple.jsonl",
+    retrievalOut: "results/bfcl-multiple-retrieval.jsonl",
+    poolSizes: "30,100,600",
+    topK: "1,3,5,10",
+  },
+];
+
+/**
+ * Pool size the BFCL **agent** campaign runs at (distinct from the retrieval
+ * sweep above). control-baseline puts the whole pool in context, so this is the
+ * "fat context" the ratel arms are saving against — 100 distractors is enough to
+ * make the savings meaningful while still fitting a local qwen3.5 context and
+ * keeping a full-dataset run tractable.
+ */
+const BFCL_AGENT_POOL_SIZE = "100";
+
+/**
+ * Model the BFCL agent campaign runs on (local Ollama, $0). The `ollama:` prefix
+ * routes through the local server; the tag must exist there (`ollama list`).
+ */
+const BFCL_AGENT_MODEL = "ollama:qwen3.5:4b";
 
 function hasFlag(name: string): boolean {
   return process.argv.includes(name);
@@ -182,15 +227,130 @@ function report(): void {
   runStep("render REPORT.md", "pnpm", ["-F", "@ratel-ai/benchmark", "report"]);
 }
 
+/** One cargo call emits BOTH normalized BFCL corpora (simple + multiple). */
+function ingestBfcl(force: boolean, skipIngest: boolean): void {
+  const simple = resolveRepoPath("test-data/bfcl-simple.jsonl");
+  const multiple = resolveRepoPath("test-data/bfcl-multiple.jsonl");
+  if (existsSync(simple) && existsSync(multiple) && !force) {
+    console.log("✓ bfcl: corpora present, skipping ingest");
+    return;
+  }
+  if (skipIngest) {
+    throw new Error(
+      "bfcl: corpora missing and --skip-ingest set. Run " +
+        "`cargo run -p ratel-benchmark-retrieval --release -- ingest bfcl --download` first.",
+    );
+  }
+  const fixturesDir = resolveRepoPath("fixtures/bfcl");
+  const args = ["run", "-p", "ratel-benchmark-retrieval", "--release", "--", "ingest", "bfcl"];
+  if (force || !isNonEmptyDir(fixturesDir)) {
+    args.push("--download");
+  } else {
+    console.log(`  (fixtures cached at ${fixturesDir} — skipping --download)`);
+  }
+  runStep("ingest bfcl", "cargo", args);
+}
+
+/**
+ * BFCL agent campaign on qwen3.5 (local Ollama, $0). Runs both subsets with
+ * control-baseline (without Ratel), ratel-full (with Ratel), and control-oracle
+ * (upper bound + savings-table oracle column). Selection-only judging, so the
+ * LLM judge is skipped (`--no-judge`) — no provider key needed. Full datasets:
+ * no `--scenarios` cap.
+ */
+function bfclAgentCampaign(skipAgent: boolean): void {
+  if (skipAgent) {
+    console.log("\n→ BFCL agent campaign\n  --skip-agent set, skipping.");
+    return;
+  }
+  for (const spec of BFCL_CORPORA) {
+    runStep(`BFCL agent campaign ${spec.name} (${BFCL_AGENT_MODEL})`, "pnpm", [
+      "-F",
+      "@ratel-ai/benchmark",
+      "start",
+      "--corpus",
+      spec.corpus,
+      "--arms",
+      "control-baseline,control-oracle,ratel-full",
+      "--models",
+      BFCL_AGENT_MODEL,
+      "--pool-sizes",
+      BFCL_AGENT_POOL_SIZE,
+      "--runs",
+      "1",
+      "--no-judge",
+      "--concurrency",
+      "4",
+      "--quiet",
+    ]);
+  }
+}
+
+/** Dedicated BFCL.md with single-tool + multi-tool sections only. */
+function bfclReport(): void {
+  runStep("render BFCL.md", "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "report",
+    "--retrieval",
+    "results/bfcl-simple-retrieval.jsonl",
+    "--retrieval",
+    "results/bfcl-multiple-retrieval.jsonl",
+    "--category-prefix",
+    "bfcl",
+    "--output",
+    "results/BFCL.md",
+  ]);
+}
+
+/**
+ * Delete downloaded/cached BFCL data after the run (per requirement). Results
+ * (`results/bfcl-*-retrieval.jsonl`, `agent/results/agent.jsonl`, `results/BFCL.md`)
+ * are kept — only the fixtures and the regenerable normalized corpora go.
+ */
+function cleanupBfcl(): void {
+  for (const p of [
+    "fixtures/bfcl",
+    "test-data/bfcl-simple.jsonl",
+    "test-data/bfcl-multiple.jsonl",
+  ]) {
+    rmSync(resolveRepoPath(p), { recursive: true, force: true });
+  }
+  console.log("✓ cleaned up BFCL fixtures + normalized corpora (results kept)");
+}
+
+/** Self-contained BFCL pipeline: ingest → retrieval → qwen campaign → report → cleanup. */
+function runBfcl(force: boolean, skipIngest: boolean, skipAgent: boolean, keepData: boolean): void {
+  ingestBfcl(force, skipIngest);
+  for (const spec of BFCL_CORPORA) {
+    retrieval(spec);
+  }
+  bfclAgentCampaign(skipAgent);
+  bfclReport();
+  if (keepData) {
+    console.log("\n(--keep-bfcl set — leaving fixtures/bfcl + test-data/bfcl-*.jsonl in place)");
+  } else {
+    cleanupBfcl();
+  }
+}
+
 function main(): void {
   const force = hasFlag("--force");
   const skipIngest = hasFlag("--skip-ingest");
   const skipAgent = hasFlag("--skip-agent");
-  const only = flagValue("--only") as CorpusName | undefined;
 
+  // BFCL is a focused, self-contained run (own report + cleanup); `--bfcl` runs
+  // just that pipeline and returns.
+  if (hasFlag("--bfcl")) {
+    runBfcl(force, skipIngest, skipAgent, hasFlag("--keep-bfcl"));
+    console.log("\n✓ BFCL run-all complete.");
+    return;
+  }
+
+  const only = flagValue("--only") as CorpusName | undefined;
   const targets = only ? CORPORA.filter((c) => c.name === only) : CORPORA;
   if (only && targets.length === 0) {
-    throw new Error(`unknown --only value: ${only} (expected metatool | toolret)`);
+    throw new Error(`unknown --only value: ${only} (expected metatool | toolret; or use --bfcl)`);
   }
 
   for (const spec of targets) {

@@ -169,6 +169,7 @@ export async function runMeteredLoop(
   const { cell } = await meter(
     {
       scenarioId: input.scenario.id,
+      category: input.scenario.category ?? null,
       arm: armId,
       model: input.model.id,
       runIndex: input.runIndex,

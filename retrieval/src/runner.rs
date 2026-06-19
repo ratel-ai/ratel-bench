@@ -42,6 +42,10 @@ pub struct RetrievalRow {
     pub scenario_id: String,
     pub target_pool_size: usize,
     pub actual_pool_size: usize,
+    /// BM25 engine version (= `ratel-ai-core` crate). Rides every row so the
+    /// markdown report (which reads per-row JSONL, not the summary) can surface
+    /// it. Mirrors the agent layer's per-cell `ratel_version`.
+    pub ratel_ai_core_version: String,
     #[serde(flatten)]
     pub metrics: RetrievalMetrics,
 }
@@ -113,6 +117,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
                     scenario_id: scenario.id.clone(),
                     target_pool_size: target_size,
                     actual_pool_size: pool.len(),
+                    ratel_ai_core_version: crate::RATEL_AI_CORE_VERSION.to_string(),
                     metrics,
                 };
                 writeln!(writer, "{}", serde_json::to_string(&row)?)?;
@@ -129,6 +134,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     }
     let summary = OverallSummary {
         generated_at: chrono::Utc::now().to_rfc3339(),
+        ratel_ai_core_version: crate::RATEL_AI_CORE_VERSION.to_string(),
         corpus: config.corpus_path.display().to_string(),
         output: config.output_path.display().to_string(),
         scenarios: scenarios.len(),
@@ -182,6 +188,7 @@ struct KAcc {
     ndcg: Vec<f64>,
     mrr: Vec<f64>,
     hits: usize,
+    complete: usize,
 }
 
 impl KAcc {
@@ -192,6 +199,9 @@ impl KAcc {
         self.mrr.push(m.reciprocal_rank);
         if m.hit_at_k {
             self.hits += 1;
+        }
+        if m.complete_at_k {
+            self.complete += 1;
         }
     }
 
@@ -212,6 +222,11 @@ impl KAcc {
                 0.0
             } else {
                 self.hits as f64 / n as f64
+            },
+            complete_rate: if n == 0 {
+                0.0
+            } else {
+                self.complete as f64 / n as f64
             },
         }
     }
@@ -273,6 +288,9 @@ pub struct KSummary {
     pub mean_mrr: f64,
     pub median_mrr: f64,
     pub hit_rate: f64,
+    /// Fraction of scenarios where *every* gold tool landed in the top-K
+    /// (all-or-nothing). Equals `hit_rate` for single-gold corpora.
+    pub complete_rate: f64,
 }
 
 /// One aggregation group: either "overall" (`pool_size: None`, spans every
@@ -312,6 +330,8 @@ impl PoolSizeSummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct OverallSummary {
     pub generated_at: String,
+    /// BM25 engine version (= `ratel-ai-core` crate) for this run.
+    pub ratel_ai_core_version: String,
     pub corpus: String,
     pub output: String,
     pub scenarios: usize,

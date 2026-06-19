@@ -23,6 +23,10 @@ pub struct RetrievalMetrics {
     pub reciprocal_rank: f64,
     /// True if at least one gold tool is in the top-K.
     pub hit_at_k: bool,
+    /// True if *every* gold tool is in the top-K (all-or-nothing). Equals
+    /// `hit_at_k` for single-gold scenarios; stricter when `gold_count > 1`.
+    /// False when there are no gold tools.
+    pub complete_at_k: bool,
     /// Normalized DCG@K under binary relevance: DCG / IDCG, where IDCG places
     /// every gold tool at the top of the ranking. 0.0 when there are no gold
     /// tools (IDCG would be 0 too). Comparable to ToolRet's leaderboard column.
@@ -104,6 +108,7 @@ pub fn evaluate_at_ks(
                 precision_at_k,
                 reciprocal_rank,
                 hit_at_k: gold_in_topk > 0,
+                complete_at_k: gold_count > 0 && gold_in_topk == gold_count,
                 ndcg_at_k,
                 gold_score,
             }
@@ -206,6 +211,36 @@ mod tests {
             m.recall_at_k > 0.0,
             "expected at least one gold to be retrieved, got {m:?}"
         );
+    }
+
+    #[test]
+    fn complete_at_k_equals_hit_for_single_gold() {
+        let pool = read_file_pool();
+        let m = evaluate(&pool, "send an email via SMTP", &["mail.send".into()], 5);
+        assert!(m.hit_at_k);
+        assert!(m.complete_at_k);
+    }
+
+    #[test]
+    fn complete_at_k_requires_all_gold_in_topk() {
+        // One gold lands, the other does not → hit but not complete.
+        let pool = read_file_pool();
+        let m = evaluate(
+            &pool,
+            "send an email via SMTP",
+            &["mail.send".into(), "does.not.exist".into()],
+            5,
+        );
+        assert_eq!(m.gold_count, 2);
+        assert!(m.hit_at_k);
+        assert!(!m.complete_at_k);
+    }
+
+    #[test]
+    fn complete_at_k_false_when_no_gold_tools() {
+        let pool = read_file_pool();
+        let m = evaluate(&pool, "anything", &[], 5);
+        assert!(!m.complete_at_k);
     }
 
     #[test]

@@ -36,6 +36,7 @@ function makeFakeRunCell(perCellDollars: number, called: string[]): RunCellFn {
     called.push(key);
     const cell: CellResult = {
       scenario_id: s.id,
+      category: s.category ?? null,
       arm,
       model: model.id,
       run_index: runIndex,
@@ -545,6 +546,7 @@ describe("runner", () => {
     const path = join(tempDir, "appended.jsonl");
     const sample: CellResult = {
       scenario_id: "x",
+      category: null,
       arm: "control-baseline",
       model: "m",
       run_index: 0,
@@ -602,6 +604,7 @@ describe("runner", () => {
       inFlight--;
       const cell: CellResult = {
         scenario_id: args.scenario.id,
+        category: args.scenario.category ?? null,
         arm: args.arm,
         model: args.model.id,
         run_index: args.runIndex,

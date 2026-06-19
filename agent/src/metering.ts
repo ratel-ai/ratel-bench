@@ -114,6 +114,8 @@ export function dollarCost(
 
 export interface MeterContext {
   scenarioId: string;
+  /** Scenario category from the corpus (e.g. `bfcl-simple`); `null`/absent when uncategorized. */
+  category?: string | null;
   arm: Arm;
   model: string;
   runIndex: number;
@@ -170,6 +172,7 @@ export async function meter(
 
   const cell: CellResult = {
     scenario_id: ctx.scenarioId,
+    category: ctx.category ?? null,
     arm: ctx.arm,
     model: ctx.model,
     run_index: ctx.runIndex,

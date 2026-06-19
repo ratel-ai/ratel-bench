@@ -27,6 +27,7 @@ function scenario(over: Partial<Scenario> & { id: string }): Scenario {
 function cell(over: Partial<CellResult> & { scenario_id: string }): CellResult {
   return {
     scenario_id: over.scenario_id,
+    category: over.category ?? null,
     arm: over.arm ?? "control-baseline",
     model: over.model ?? "fake-model",
     run_index: over.run_index ?? 0,

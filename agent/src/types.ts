@@ -94,6 +94,12 @@ export interface AgentDescriptor {
 
 export interface CellResult {
   scenario_id: string;
+  /**
+   * Scenario category from the corpus (e.g. `bfcl-simple`, `bfcl-multiple`,
+   * `metatool-single`). Carried through so the report can keep scenario types
+   * separate. `null` for older rows / uncategorized corpora.
+   */
+  category: string | null;
   arm: Arm;
   model: string;
   run_index: number;
