@@ -17,7 +17,7 @@
 //   --skip-agent    never run the agent campaign
 //   --only NAME     restrict to a single corpus: "metatool" | "toolret"
 //   --bfcl          run ONLY the self-contained BFCL pipeline (ingest both
-//                   subsets → BM25 retrieval → qwen3.5 campaign → BFCL.md →
+//                   subsets → BM25 retrieval → qwen3.5 campaign → BFCL.json →
 //                   delete downloaded data). Requires a local Ollama with
 //                   qwen3.5 unless paired with --skip-agent.
 //   --keep-bfcl     with --bfcl, skip the post-run cleanup (keep fixtures +
@@ -286,26 +286,26 @@ function bfclAgentCampaign(skipAgent: boolean): void {
   }
 }
 
-/** Dedicated BFCL.md with single-tool + multi-tool sections only. */
+/**
+ * One consolidated `results/BFCL.json`: retrieval evaluation (split single/multi),
+ * task-completion evaluation (combined, with vs without Ratel), timestamp, and
+ * the ratel-ai-core / SDK versions. Replaces the per-scenario markdown.
+ */
 function bfclReport(): void {
-  runStep("render BFCL.md", "pnpm", [
+  runStep("export BFCL.json", "pnpm", [
     "-F",
     "@ratel-ai/benchmark",
-    "report",
-    "--retrieval",
-    "results/bfcl-simple-retrieval.jsonl",
-    "--retrieval",
-    "results/bfcl-multiple-retrieval.jsonl",
-    "--category-prefix",
-    "bfcl",
-    "--output",
-    "results/BFCL.md",
+    "exec",
+    "tsx",
+    "src/bfcl-export.ts",
+    "--out",
+    "results/BFCL.json",
   ]);
 }
 
 /**
  * Delete downloaded/cached BFCL data after the run (per requirement). Results
- * (`results/bfcl-*-retrieval.jsonl`, `agent/results/agent.jsonl`, `results/BFCL.md`)
+ * (`results/bfcl-*-retrieval.jsonl`, `agent/results/agent.jsonl`, `results/BFCL.json`)
  * are kept — only the fixtures and the regenerable normalized corpora go.
  */
 function cleanupBfcl(): void {
