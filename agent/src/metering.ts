@@ -192,6 +192,7 @@ export async function meter(
     turns: summary.turns,
     effective_tool_ids: summary.effectiveToolIds,
     programmatic_verdict: "n/a" as ProgrammaticVerdict,
+    ast_verdict: "n/a" as ProgrammaticVerdict,
     judge_verdict: "n/a",
     final_text: raw?.text ?? "",
     finish_reason: raw?.finishReason ?? (error ? "error" : "unknown"),
@@ -234,6 +235,41 @@ export function effectiveToolIds(calls: ToolCall[]): string[] {
       continue;
     }
     out.push(call.toolId);
+  }
+  return out;
+}
+
+/** A tool call after gateway unwrapping: the canonical tool id + the args. */
+export interface EffectiveCall {
+  toolId: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Like {@link effectiveToolIds} but preserves each call's arguments — the
+ * argument-level (AST) judge needs them. `search_tools` is dropped; an
+ * `invoke_tool` call is unwrapped to its inner tool id and inner args (the SDK
+ * may nest the inner args under `args` or spread them alongside `toolId`, so we
+ * handle both). Direct tool calls pass through unchanged.
+ */
+export function effectiveCalls(calls: ToolCall[]): EffectiveCall[] {
+  const out: EffectiveCall[] = [];
+  for (const call of calls) {
+    if (call.toolId === SEARCH_TOOLS_ID) continue;
+    if (call.toolId === INVOKE_TOOL_ID) {
+      const inner = call.args?.toolId;
+      if (typeof inner !== "string") continue;
+      const nested = call.args?.args;
+      const args =
+        nested && typeof nested === "object" && !Array.isArray(nested)
+          ? (nested as Record<string, unknown>)
+          : Object.fromEntries(
+              Object.entries(call.args ?? {}).filter(([k]) => k !== "toolId" && k !== "args"),
+            );
+      out.push({ toolId: inner, args });
+      continue;
+    }
+    out.push({ toolId: call.toolId, args: call.args ?? {} });
   }
   return out;
 }

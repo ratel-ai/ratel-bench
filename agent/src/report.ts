@@ -41,6 +41,17 @@ export function categoryOf(c: Pick<CellResult, "category">): string {
   return c.category ?? "(uncategorized)";
 }
 
+/**
+ * Coarsen a category for AGENT aggregation: BFCL's `bfcl-simple` /
+ * `bfcl-multiple` collapse to a single `bfcl` group so task-completion and
+ * token/cost savings are reported combined (not per scenario type). Retrieval
+ * panels stay split — they key off `corpusOf(scenario_id)`, not this. Other
+ * corpora's categories pass through unchanged.
+ */
+export function coarseCategory(category: string): string {
+  return category === "bfcl-simple" || category === "bfcl-multiple" ? "bfcl" : category;
+}
+
 export interface ArmModelStats {
   arm: Arm;
   model: string;
@@ -60,8 +71,14 @@ export interface ArmModelStats {
   scenarios: number;
   /** Total cells (= scenarios × runs_per_scenario_for_this_group). */
   n: number;
-  /** Mean across per-scenario success rates (passes / runs, averaged across scenarios). */
+  /** Mean across per-scenario *selection* success rates (programmatic|judge pass / runs). */
   success_rate: number;
+  /**
+   * Mean across per-scenario *task-completion* rates (AST: right function AND
+   * arguments). `null` when no scenario in the group has argument ground truth
+   * (non-BFCL corpora) — render as "—".
+   */
+  task_completion_rate: number | null;
   /**
    * Mean catalog (= tools the agent actually saw) size across cells. Counts
    * direct tools AND gateway tools (`search_tools` / `invoke_tool`) — the
@@ -83,8 +100,10 @@ interface ScenarioStats {
   category: string;
   pool_size: number | null;
   scenario_id: string;
-  /** Passes / runs for this scenario in this (arm, model, pool_size). */
+  /** Selection passes / runs for this scenario in this (arm, model, pool_size). */
   success_rate: number;
+  /** AST passes / ast-applicable runs; `null` when the scenario has no arg ground truth. */
+  task_rate: number | null;
   mean_catalog: number;
   mean_input: number;
   mean_total: number;
@@ -115,7 +134,8 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
   // Stage 1: per (scenario, arm, model, pool_size) → per-scenario means.
   const byScenario = new Map<string, CellResult[]>();
   for (const c of cells) {
-    const key = `${c.scenario_id}::${c.arm}::${c.model}::${categoryOf(c)}::${c.pool_size}`;
+    // Coarse category: BFCL single+multi pool into one `bfcl` agent group.
+    const key = `${c.scenario_id}::${c.arm}::${c.model}::${coarseCategory(categoryOf(c))}::${c.pool_size}`;
     const arr = byScenario.get(key) ?? [];
     arr.push(c);
     byScenario.set(key, arr);
@@ -126,13 +146,20 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
     const passes = arr.filter(
       (c) => c.programmatic_verdict === "pass" || c.judge_verdict === "pass",
     ).length;
+    // Task-completion: only over runs that carry an AST verdict (BFCL); null otherwise.
+    const astCells = arr.filter((c) => c.ast_verdict !== "n/a");
+    const task_rate =
+      astCells.length > 0
+        ? astCells.filter((c) => c.ast_verdict === "pass").length / astCells.length
+        : null;
     perScenario.push({
       arm: head.arm,
       model: head.model,
-      category: categoryOf(head),
+      category: coarseCategory(categoryOf(head)),
       pool_size: head.pool_size,
       scenario_id: head.scenario_id,
       success_rate: passes / arr.length,
+      task_rate,
       mean_catalog: mean(arr.map((c) => c.catalog_size)),
       mean_input: mean(arr.map((c) => c.input_tokens)),
       mean_total: mean(arr.map((c) => c.total_tokens)),
@@ -162,6 +189,10 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
       scenarios: ps.length,
       n: ps.reduce((acc, p) => acc + p.runs, 0),
       success_rate: mean(ps.map((p) => p.success_rate)),
+      task_completion_rate: (() => {
+        const rates = ps.map((p) => p.task_rate).filter((r): r is number => r !== null);
+        return rates.length > 0 ? mean(rates) : null;
+      })(),
       mean_catalog_size: mean(ps.map((p) => p.mean_catalog)),
       mean_input_tokens: mean(ps.map((p) => p.mean_input)),
       mean_total_tokens: mean(ps.map((p) => p.mean_total)),
@@ -390,7 +421,7 @@ export interface FailureCounts {
 export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
   const groups = new Map<string, CellResult[]>();
   for (const c of cells) {
-    const key = `${c.arm}::${c.model}::${categoryOf(c)}::${c.pool_size}`;
+    const key = `${c.arm}::${c.model}::${coarseCategory(categoryOf(c))}::${c.pool_size}`;
     const arr = groups.get(key) ?? [];
     arr.push(c);
     groups.set(key, arr);
@@ -401,7 +432,7 @@ export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
     out.push({
       arm: head.arm,
       model: head.model,
-      category: categoryOf(head),
+      category: coarseCategory(categoryOf(head)),
       pool_size: head.pool_size,
       pass: arr.filter((c) => c.programmatic_verdict === "pass").length,
       fail: arr.filter((c) => c.programmatic_verdict === "fail").length,
@@ -472,12 +503,13 @@ export function renderReport(args: {
   lines.push("## Headline");
   lines.push("");
   lines.push(
-    "| arm | model | category | pool | catalog | scenarios | n | success | mean input | mean total | mean turns | mean $ | mean wall |",
+    "| arm | model | category | pool | catalog | scenarios | n | selection | task-completion | mean input | mean total | mean turns | mean $ | mean wall |",
   );
-  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const s of stats) {
+    const task = s.task_completion_rate === null ? "—" : fmtPct(s.task_completion_rate * 100);
     lines.push(
-      `| ${s.arm} | ${s.model} | ${s.category} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} |`,
+      `| ${s.arm} | ${s.model} | ${s.category} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${task} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} |`,
     );
   }
   lines.push("");

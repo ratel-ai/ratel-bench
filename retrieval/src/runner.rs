@@ -404,6 +404,7 @@ mod tests {
             gold_tools: gold.iter().map(|s| (*s).to_string()).collect(),
             judge_criteria: None,
             category: None,
+            gold_calls: Vec::new(),
         }
     }
 

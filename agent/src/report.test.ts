@@ -62,6 +62,7 @@ function cell(over: Partial<CellResult>): CellResult {
     non_gateway_calls: 1,
     turns: 1,
     programmatic_verdict: "pass",
+    ast_verdict: "n/a",
     judge_verdict: "n/a",
     final_text: "ok",
     finish_reason: "stop",
@@ -116,15 +117,27 @@ describe("statsByArmModel", () => {
     expect(ratel?.success_rate).toBe(1);
   });
 
-  it("keeps distinct categories on separate rows (BFCL simple vs multiple)", () => {
+  it("combines BFCL simple + multiple into one `bfcl` agent row (coarse category)", () => {
     const cells = [
       cell({ scenario_id: "bfcl-simple-0", category: "bfcl-simple", arm: "ratel-full" }),
       cell({ scenario_id: "bfcl-multiple-0", category: "bfcl-multiple", arm: "ratel-full" }),
     ];
     const stats = statsByArmModel(cells);
-    expect(stats).toHaveLength(2);
-    const cats = stats.map((s) => s.category).sort();
-    expect(cats).toEqual(["bfcl-multiple", "bfcl-simple"]);
+    // Agent metrics pool single+multi into a single `bfcl` group (retrieval stays split).
+    expect(stats).toHaveLength(1);
+    expect(stats[0].category).toBe("bfcl");
+    expect(stats[0].scenarios).toBe(2);
+  });
+
+  it("computes task_completion_rate from ast_verdict (null when no AST verdicts)", () => {
+    const stats = statsByArmModel([
+      cell({ scenario_id: "a", category: "bfcl-simple", arm: "ratel-full", ast_verdict: "pass" }),
+      cell({ scenario_id: "b", category: "bfcl-simple", arm: "ratel-full", ast_verdict: "fail" }),
+    ]);
+    expect(stats[0].task_completion_rate).toBe(0.5);
+    // A group with only n/a AST verdicts → null (rendered as "—").
+    const naStats = statsByArmModel([cell({ arm: "control-baseline", ast_verdict: "n/a" })]);
+    expect(naStats[0].task_completion_rate).toBeNull();
   });
 
   it("normalizes a missing category to (uncategorized)", () => {

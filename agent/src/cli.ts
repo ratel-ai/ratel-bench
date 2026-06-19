@@ -126,6 +126,8 @@ interface ParsedArgs {
   dollarGlobal: number;
   force: boolean;
   noJudge: boolean;
+  /** Skip the (LLM-free) argument-level task-completion verdict. Defaults to off. */
+  noAst: boolean;
   /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
   judgeModelId?: string;
   ollamaBaseURL: string;
@@ -151,6 +153,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     dollarGlobal: 25,
     force: false,
     noJudge: false,
+    noAst: false,
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
     seed: 42,
     concurrency: 10,
@@ -209,6 +212,9 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
         break;
       case "--no-judge":
         args.noJudge = true;
+        break;
+      case "--no-ast":
+        args.noAst = true;
         break;
       case "--judge-model":
         args.judgeModelId = next();
@@ -326,6 +332,8 @@ interface RejudgeParsedArgs {
   promptVariant: JudgePromptVariant;
   out?: string;
   ollamaBaseURL: string;
+  /** Skip the LLM judge — only recompute the (LLM-free) AST task-completion verdict. */
+  noJudge: boolean;
 }
 
 function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
@@ -334,6 +342,7 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
     corpus: "test-data/metatool.jsonl",
     promptVariant: "strict",
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    noJudge: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -359,6 +368,9 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
       }
       case "--out":
         args.out = next();
+        break;
+      case "--no-judge":
+        args.noJudge = true;
         break;
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
@@ -391,8 +403,11 @@ function defaultRejudgeOutput(input: string, variant: JudgePromptVariant): strin
 
 async function rejudgeMain(argv: string[]): Promise<void> {
   const parsed = parseRejudgeArgs(argv);
-  const judgeModelId = parsed.judgeModelId ?? "claude-sonnet-4-6";
-  const judgeModel = resolveModel(judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model;
+  // `--no-judge`: AST-only re-score — no LLM model resolved or called.
+  const judgeModelId = parsed.noJudge ? undefined : (parsed.judgeModelId ?? "claude-sonnet-4-6");
+  const judgeModel = judgeModelId
+    ? resolveModel(judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model
+    : undefined;
 
   const inputPath = resolveRepoPath(parsed.input);
   const outputPath = resolveRepoPath(
@@ -401,7 +416,9 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   const corpusPath = resolveRepoPath(parsed.corpus);
 
   console.log(
-    `rejudging ${inputPath} with ${judgeModelId} (${parsed.promptVariant}) → ${outputPath}`,
+    judgeModelId
+      ? `rejudging ${inputPath} with ${judgeModelId} (${parsed.promptVariant}) + AST → ${outputPath}`
+      : `re-scoring AST only (no LLM judge): ${inputPath} → ${outputPath}`,
   );
   const summary = await rejudge({
     inputPath,
@@ -411,7 +428,7 @@ async function rejudgeMain(argv: string[]): Promise<void> {
     promptVariant: parsed.promptVariant,
   });
   console.log(
-    `done: ${summary.total} rows (${summary.rejudged} rejudged, ` +
+    `done: ${summary.total} rows (${summary.ast_scored} AST-scored, ${summary.rejudged} LLM-rejudged, ` +
       `${summary.skipped_pass} kept as programmatic-pass).`,
   );
 }
@@ -453,6 +470,7 @@ async function runMain(): Promise<void> {
     dollarGlobalCap: parsed.dollarGlobal,
     force: parsed.force,
     judgeModel,
+    noAst: parsed.noAst,
     seed: parsed.seed,
     concurrency: parsed.concurrency,
     logLevel: parsed.logLevel,

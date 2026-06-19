@@ -12,6 +12,17 @@ export interface ToolSpec {
   output_schema?: Record<string, unknown>;
 }
 
+/**
+ * One gold function call: the expected tool plus, per argument, the list of
+ * acceptable values (BFCL `possible_answer` shape). Consumed by the
+ * argument-level (AST) task-completion judge. Absent for corpora that ship no
+ * argument ground truth (MetaTool, ToolRet) → AST verdict is `n/a` there.
+ */
+export interface GoldCall {
+  tool: string;
+  args: Record<string, unknown[]>;
+}
+
 export interface Scenario {
   id: string;
   prompt: string;
@@ -19,6 +30,7 @@ export interface Scenario {
   gold_tools: string[];
   judge_criteria?: string;
   category?: string;
+  gold_calls?: GoldCall[];
 }
 
 /**
@@ -130,6 +142,12 @@ export interface CellResult {
   effective_tool_ids: string[];
   // Outcome
   programmatic_verdict: ProgrammaticVerdict;
+  /**
+   * Argument-level task-completion verdict (right function AND right arguments,
+   * BFCL AST-style). `n/a` for corpora without argument ground truth
+   * (MetaTool/ToolRet) or older rows that predate the AST judge.
+   */
+  ast_verdict: ProgrammaticVerdict;
   judge_verdict: JudgeVerdict;
   /**
    * Free-form rationale from the LLM judge for the most recent verdict, kept

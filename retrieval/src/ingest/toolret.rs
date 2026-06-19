@@ -519,6 +519,7 @@ fn build_scenarios(
             gold_tools: gold_ids,
             judge_criteria: None,
             category: Some(q.category.clone()),
+            gold_calls: Vec::new(),
         });
     }
 

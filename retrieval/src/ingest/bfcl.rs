@@ -35,7 +35,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::corpus::{Scenario, ToolSpec};
+use crate::corpus::{GoldCall, Scenario, ToolSpec};
 
 /// Canonical `resolve/main` URLs for the four BFCL source files.
 pub const SIMPLE_DATA_URL: &str = "https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard/resolve/main/BFCL_v3_simple.json";
@@ -211,9 +211,11 @@ fn parse_data<R: BufRead>(reader: R) -> anyhow::Result<Vec<RawBfclRow>> {
     Ok(out)
 }
 
-/// Parse the ground-truth JSONL into `id → gold fn name(s)` (the keys of each
-/// `ground_truth` element).
-fn parse_answers<R: BufRead>(reader: R) -> anyhow::Result<HashMap<String, Vec<String>>> {
+/// Parse the ground-truth JSONL into `id → gold call(s)`. Each `ground_truth`
+/// element is a one-key map `{ fn: { arg: [acceptable...] } }`; we keep the fn
+/// name AND the per-argument acceptable-value map (for the AST/task-completion
+/// judge). The selection layer just reads `GoldCall::tool`.
+fn parse_answers<R: BufRead>(reader: R) -> anyhow::Result<HashMap<String, Vec<GoldCall>>> {
     let mut out = HashMap::new();
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
@@ -223,19 +225,24 @@ fn parse_answers<R: BufRead>(reader: R) -> anyhow::Result<HashMap<String, Vec<St
         }
         let row: RawAnswerRow = serde_json::from_str(trimmed)
             .map_err(|e| anyhow::anyhow!("answer row at line {}: {e}", idx + 1))?;
-        let gold: Vec<String> = row
+        let calls: Vec<GoldCall> = row
             .ground_truth
             .iter()
-            .flat_map(|m| m.keys().cloned())
+            .flat_map(|m| {
+                m.iter().map(|(tool, params)| GoldCall {
+                    tool: tool.clone(),
+                    args: params.as_object().cloned().unwrap_or_default(),
+                })
+            })
             .collect();
-        out.insert(row.id, gold);
+        out.insert(row.id, calls);
     }
     Ok(out)
 }
 
 fn build_scenario(
     row: &RawBfclRow,
-    gold: &[String],
+    gold: &[GoldCall],
     id_prefix: &str,
     category: &str,
 ) -> Option<Scenario> {
@@ -244,7 +251,7 @@ fn build_scenario(
     }
     let fn_names: HashSet<&str> = row.function.iter().map(|f| f.name.as_str()).collect();
     // Drop the whole row if any gold fn isn't actually offered (mirrors MetaTool).
-    if !gold.iter().all(|g| fn_names.contains(g.as_str())) {
+    if !gold.iter().all(|g| fn_names.contains(g.tool.as_str())) {
         return None;
     }
     let candidate_pool: Vec<ToolSpec> = row
@@ -262,9 +269,12 @@ fn build_scenario(
         id: format!("{id_prefix}-{}", row.id),
         prompt: flatten_prompt(&row.question),
         candidate_pool,
-        gold_tools: gold.to_vec(),
+        // Selection ground truth = the gold fn names; argument ground truth =
+        // the full gold calls (consumed by the task-completion judge).
+        gold_tools: gold.iter().map(|g| g.tool.clone()).collect(),
         judge_criteria: None,
         category: Some(category.to_string()),
+        gold_calls: gold.to_vec(),
     })
 }
 
@@ -359,8 +369,8 @@ fn sanitize_tool_name(id: &str) -> String {
 /// full-universe pool). Distinct ids are processed in sorted order; the first to
 /// claim a token keeps its raw id, later colliders get a deterministic `_N`
 /// suffix on their `id` (the descriptive `name` is left untouched). Every
-/// `candidate_pool` id and `gold_tools` entry is remapped. Returns the number of
-/// ids renamed.
+/// `candidate_pool` id, `gold_tools` entry, and `gold_calls[].tool` is remapped.
+/// Returns the number of ids renamed.
 fn disambiguate_ids(scenarios: &mut [Scenario]) -> usize {
     let mut distinct: BTreeSet<String> = BTreeSet::new();
     for s in scenarios.iter() {
@@ -399,6 +409,11 @@ fn disambiguate_ids(scenarios: &mut [Scenario]) -> usize {
         for g in s.gold_tools.iter_mut() {
             if let Some(new_id) = remap.get(g) {
                 *g = new_id.clone();
+            }
+        }
+        for gc in s.gold_calls.iter_mut() {
+            if let Some(new_id) = remap.get(&gc.tool) {
+                gc.tool = new_id.clone();
             }
         }
     }
@@ -480,18 +495,29 @@ mod tests {
         parse_data(s.as_bytes()).unwrap()
     }
 
-    fn parse_answers_str(s: &str) -> HashMap<String, Vec<String>> {
+    fn parse_answers_str(s: &str) -> HashMap<String, Vec<GoldCall>> {
         parse_answers(s.as_bytes()).unwrap()
     }
 
+    /// A gold call with no argument spec — for tests that only care about the tool name.
+    fn gc(tool: &str) -> GoldCall {
+        GoldCall {
+            tool: tool.into(),
+            args: serde_json::Map::new(),
+        }
+    }
+
     #[test]
-    fn parse_answers_extracts_gold_fn_names() {
+    fn parse_answers_extracts_gold_fn_names_and_args() {
         let answers = parse_answers_str(
-            r#"{"id": "simple_0", "ground_truth": [{"calculate_triangle_area": {"base": [10]}}]}
+            r#"{"id": "simple_0", "ground_truth": [{"calculate_triangle_area": {"base": [10], "unit": ["units", ""]}}]}
 {"id": "simple_1", "ground_truth": [{"math.factorial": {"number": [5]}}]}"#,
         );
-        assert_eq!(answers["simple_0"], vec!["calculate_triangle_area"]);
-        assert_eq!(answers["simple_1"], vec!["math.factorial"]);
+        assert_eq!(answers["simple_0"][0].tool, "calculate_triangle_area");
+        // Argument acceptable-value lists are preserved (for the AST judge).
+        assert_eq!(answers["simple_0"][0].args["base"], json!([10]));
+        assert_eq!(answers["simple_0"][0].args["unit"], json!(["units", ""]));
+        assert_eq!(answers["simple_1"][0].tool, "math.factorial");
     }
 
     #[test]
@@ -499,11 +525,13 @@ mod tests {
         let rows = parse_data_str(
             r#"{"id": "simple_0", "question": [[{"role": "user", "content": "area?"}]], "function": [{"name": "calc_area", "description": " desc ", "parameters": {"type": "dict", "properties": {"base": {"type": "integer"}}}}]}"#,
         );
-        let gold = vec!["calc_area".to_string()];
+        let gold = vec![gc("calc_area")];
         let s = build_scenario(&rows[0], &gold, "bfcl-simple", "bfcl-simple").unwrap();
         assert_eq!(s.id, "bfcl-simple-simple_0");
         assert_eq!(s.prompt, "area?");
         assert_eq!(s.gold_tools, vec!["calc_area".to_string()]);
+        assert_eq!(s.gold_calls.len(), 1);
+        assert_eq!(s.gold_calls[0].tool, "calc_area");
         assert_eq!(s.candidate_pool.len(), 1);
         assert_eq!(s.candidate_pool[0].id, "calc_area");
         assert_eq!(s.candidate_pool[0].description, "desc");
@@ -518,7 +546,7 @@ mod tests {
             r#"{"id": "x", "question": [[{"role": "user", "content": "q"}]], "function": [{"name": "a", "description": "d", "parameters": {}}]}"#,
         );
         // Gold references a function not offered in the row.
-        assert!(build_scenario(&rows[0], &["b".into()], "bfcl-simple", "bfcl-simple").is_none());
+        assert!(build_scenario(&rows[0], &[gc("b")], "bfcl-simple", "bfcl-simple").is_none());
     }
 
     #[test]
@@ -526,7 +554,7 @@ mod tests {
         let rows = parse_data_str(
             r#"{"id": "multiple_0", "question": [[{"role": "user", "content": "q"}]], "function": [{"name": "a", "description": "da", "parameters": {}}, {"name": "b", "description": "db", "parameters": {}}, {"name": "c", "description": "dc", "parameters": {}}]}"#,
         );
-        let s = build_scenario(&rows[0], &["b".into()], "bfcl-multiple", "bfcl-multiple").unwrap();
+        let s = build_scenario(&rows[0], &[gc("b")], "bfcl-multiple", "bfcl-multiple").unwrap();
         assert_eq!(s.candidate_pool.len(), 3);
         assert_eq!(s.gold_tools, vec!["b".to_string()]);
     }
@@ -545,6 +573,7 @@ mod tests {
             gold_tools: vec![gold.into()],
             judge_criteria: None,
             category: Some("bfcl-simple".into()),
+            gold_calls: vec![gc(gold)],
         }
     }
 
@@ -559,10 +588,11 @@ mod tests {
         assert_eq!(renamed, 1);
         // First in sorted order ("math.factorial") keeps its raw id.
         assert_eq!(scenarios[0].candidate_pool[0].id, "math.factorial");
-        // The collider was renamed in BOTH its candidate_pool id and gold_tools.
-        let renamed_id = &scenarios[1].candidate_pool[0].id;
+        // The collider was renamed in its candidate_pool id, gold_tools, AND gold_calls.
+        let renamed_id = scenarios[1].candidate_pool[0].id.clone();
         assert_ne!(renamed_id, "math_factorial");
-        assert_eq!(&scenarios[1].gold_tools[0], renamed_id);
+        assert_eq!(scenarios[1].gold_tools[0], renamed_id);
+        assert_eq!(scenarios[1].gold_calls[0].tool, renamed_id);
         // The descriptive name is left untouched.
         assert_eq!(scenarios[1].candidate_pool[0].name, "math_factorial");
         // Final ids sanitize to distinct tokens.

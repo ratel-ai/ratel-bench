@@ -21,6 +21,7 @@ function scenario(over: Partial<Scenario> & { id: string }): Scenario {
     gold_tools: over.gold_tools ?? ["TheTool"],
     judge_criteria: over.judge_criteria,
     category: over.category,
+    gold_calls: over.gold_calls,
   };
 }
 
@@ -47,6 +48,7 @@ function cell(over: Partial<CellResult> & { scenario_id: string }): CellResult {
     turns: 1,
     effective_tool_ids: over.effective_tool_ids ?? [],
     programmatic_verdict: over.programmatic_verdict ?? "fail",
+    ast_verdict: over.ast_verdict ?? "n/a",
     judge_verdict: over.judge_verdict ?? "n/a",
     judge_explanation: over.judge_explanation,
     final_text: over.final_text ?? "",
@@ -54,7 +56,7 @@ function cell(over: Partial<CellResult> & { scenario_id: string }): CellResult {
     error: null,
     wall_ms: 0,
     dollar_cost: 0,
-    tool_calls: [],
+    tool_calls: over.tool_calls ?? [],
   };
 }
 
@@ -87,7 +89,7 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 1, rejudged: 1, skipped_pass: 0, written: 1 });
+    expect(summary).toEqual({ total: 1, rejudged: 1, ast_scored: 0, skipped_pass: 0, written: 1 });
     expect(judge).toHaveBeenCalledTimes(1);
     expect(judge.mock.calls[0][0]).toMatchObject({
       prompt: "list X",
@@ -126,7 +128,7 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 1, rejudged: 0, skipped_pass: 1, written: 1 });
+    expect(summary).toEqual({ total: 1, rejudged: 0, ast_scored: 0, skipped_pass: 1, written: 1 });
     expect(judge).not.toHaveBeenCalled();
     const out = JSON.parse(readFileSync(outputPath, "utf-8").trim()) as CellResult;
     expect(out).toEqual(original);
@@ -257,8 +259,45 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 3, rejudged: 2, skipped_pass: 1, written: 3 });
+    expect(summary).toEqual({ total: 3, rejudged: 2, ast_scored: 0, skipped_pass: 1, written: 3 });
     const lines = readFileSync(outputPath, "utf-8").trim().split("\n");
     expect(lines).toHaveLength(3);
+  });
+
+  it("recomputes ast_verdict from gold_calls with no LLM judge (judgeModel omitted)", async () => {
+    const inputPath = join(tempDir, "in.jsonl");
+    const outputPath = join(tempDir, "out.jsonl");
+    const corpusPath = join(tempDir, "corpus.jsonl");
+    // Gold requires base=10; one cell passes args, the other gets it wrong.
+    writeJsonl(corpusPath, [
+      scenario({ id: "s1", gold_calls: [{ tool: "area", args: { base: [10] } }] }),
+      scenario({ id: "s2", gold_calls: [{ tool: "area", args: { base: [10] } }] }),
+    ]);
+    writeJsonl(inputPath, [
+      cell({
+        scenario_id: "s1",
+        programmatic_verdict: "pass",
+        tool_calls: [{ toolId: "area", args: { base: 10 } }],
+      }),
+      cell({
+        scenario_id: "s2",
+        programmatic_verdict: "pass",
+        tool_calls: [{ toolId: "area", args: { base: 7 } }],
+      }),
+    ]);
+
+    const judge = vi.fn();
+    const summary = await rejudge({ inputPath, outputPath, corpusPath, judge });
+
+    // AST scored both rows; no LLM judge ran (judgeModel omitted).
+    expect(summary.ast_scored).toBe(2);
+    expect(summary.rejudged).toBe(0);
+    expect(judge).not.toHaveBeenCalled();
+    const out = readFileSync(outputPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as CellResult);
+    expect(out.find((c) => c.scenario_id === "s1")?.ast_verdict).toBe("pass");
+    expect(out.find((c) => c.scenario_id === "s2")?.ast_verdict).toBe("fail");
   });
 });
