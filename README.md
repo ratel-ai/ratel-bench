@@ -148,6 +148,179 @@ cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
 
 ToolRet uses the same `retrieval` runner with a different corpus and pool-size sweep. Skill retrieval uses the dedicated `skill-retrieval` subcommand (the skill catalog is the BM25 index; instances carry gold skill ids). Full reference in [`retrieval/README.md`](retrieval/README.md).
 
+## BFCL (Berkeley Function-Calling Leaderboard)
+
+[BFCL](https://gorilla.cs.berkeley.edu/leaderboard.html) (v3) measures whether a model calls the **right function with the right arguments** for a user request. ratel-bench runs it through the same two layers as the other suites:
+
+- **Retrieval** (Rust, deterministic, $0, no keys) — can BM25 surface the gold function from a catalog of distractors, before the agent's turn?
+- **Task completion** (agent campaign, needs an API key) — does the LLM actually emit the correct call? Scored against BFCL's `possible_answer` ground truth by the AST judge (right function **and** arguments). Tools are **stubbed**, so this verifies the *call*, not real execution/outcome.
+
+Two categories are ingested: `bfcl-simple` (one gold call) and `bfcl-multiple` (pick the right function among several).
+
+### Data type
+
+Each line is a `Scenario` — the same schema every suite uses ([`retrieval/src/corpus.rs`](retrieval/src/corpus.rs)). BFCL rows additionally carry `gold_calls`: per-argument **lists of acceptable values** (BFCL's `possible_answer`). An empty string `""` in a list marks the argument optional.
+
+```jsonc
+{
+  "id": "bfcl-simple-simple_0",
+  "prompt": "Find the area of a triangle with a base of 10 units and height of 5 units.",
+  "candidate_pool": [
+    { "id": "calculate_triangle_area", "name": "calculate_triangle_area",
+      "description": "Calculate the area of a triangle ...",
+      "input_schema": { "type": "object", "properties": { /* base, height, unit */ },
+                        "required": ["base", "height"] }, "output_schema": {} }
+  ],
+  "gold_tools": ["calculate_triangle_area"],   // drives the RETRIEVAL gold
+  "category": "bfcl-simple",
+  "gold_calls": [                              // drives the TASK-COMPLETION (AST) judge
+    { "tool": "calculate_triangle_area",
+      "args": { "base": [10], "height": [5], "unit": ["units", ""] } }   // "" ⇒ optional arg
+  ]
+}
+```
+
+Ingest the two corpora (writes `test-data/bfcl-simple.jsonl` + `test-data/bfcl-multiple.jsonl`):
+
+```bash
+cargo run -p ratel-benchmark-retrieval --release -- ingest bfcl --download
+```
+
+`--corpus` takes a single path. To run **simple + multiple together**, concatenate them — ids are prefixed (`bfcl-simple-*` / `bfcl-multiple-*`) so they don't collide:
+
+```bash
+cat test-data/bfcl-simple.jsonl test-data/bfcl-multiple.jsonl > test-data/bfcl-all.jsonl
+```
+
+### 1. Retrieval test
+
+```bash
+cargo run -p ratel-benchmark-retrieval --release -- retrieval \
+  --corpus test-data/bfcl-all.jsonl \
+  --output results/bfcl-retrieval.jsonl \
+  --top-k 1,3,5,10 --pool-sizes 30,100,180
+```
+
+Writes two files: a per-`(scenario, pool_size, k)` **detail JSONL** at `--output` (overwritten each run) and an aggregate **summary JSONL** at `…-summary.jsonl` (appended — one line per run, a history). The summary auto-splits into `single-tool` and `multi-tool` buckets.
+
+### 2. Task-completion task
+
+Needs an API key (`OPENAI_API_KEY` for `gpt-*`, `ANTHROPIC_API_KEY` for `claude-*`). `--models` accepts a comma-separated list:
+
+```bash
+pnpm -F @ratel-ai/benchmark start \
+  --corpus test-data/bfcl-all.jsonl \
+  --models gpt-5.4-mini,claude-sonnet-4-6 \
+  --ephemeral
+```
+
+Writes one row per `(scenario, arm, model, pool_size, run)` cell. `--ephemeral` lands in a fresh `agent/results/ephemeral/agent-<timestamp>.jsonl` (drop it + add `--output` to persist to the canonical `agent/results/agent.jsonl`, which is appended/resumable).
+
+### 3. Consolidated report (optional)
+
+Merge both layers into one file (`results/BFCL.json`, overwritten each run):
+
+```bash
+pnpm -F @ratel-ai/benchmark exec tsx src/bfcl-export.ts
+```
+
+### Export structures
+
+Both run types carry **`run_type`**, **`run_id`**, and **`generated_at`**, and share `scenario_id` — so retrieval and task-completion rows are joinable.
+
+**Retrieval detail row** (one per scenario × pool_size × k):
+
+```jsonc
+{
+  "run_type": "retrieval",
+  "run_id": "ret-1782146740544786",
+  "generated_at": "2026-06-22T16:45:40.544786+00:00",
+  "scenario_id": "bfcl-simple-simple_0",
+  "query": "Find the area of a triangle with a base of 10 units and height of 5 units.",
+  "golden_answer": ["calculate_triangle_area"],     // gold tool id(s)
+  "category": "bfcl-simple",
+  "target_pool_size": 30, "actual_pool_size": 30,
+  "ratel_ai_core_version": "0.2.0",
+  "k": 3, "pool_size": 30, "gold_count": 1,
+  "recall_at_k": 1.0, "precision_at_k": 0.33, "reciprocal_rank": 1.0,
+  "hit_at_k": true, "complete_at_k": true, "ndcg_at_k": 1.0,
+  "gold_score": 4.06,
+  "retrieved": [                                     // what BM25 returned, best-first
+    { "id": "calculate_triangle_area", "score": 4.06 },
+    { "id": "calculate_area", "score": 3.74 }
+  ]
+}
+```
+
+**Retrieval summary line** (one per run, appended):
+
+```jsonc
+{
+  "run_id": "ret-1782146740544786",
+  "generated_at": "2026-06-22T16:45:40.544786+00:00",
+  "ratel_ai_core_version": "0.2.0",
+  "corpus": "test-data/bfcl-all.jsonl", "output": "results/bfcl-retrieval.jsonl",
+  "scenarios": 400, "rows_written": 4800,
+  "top_k": [1, 3, 5, 10], "pool_sizes": [30, 100, 180], "seed": 42,
+  "by_bucket": [
+    { "subset": "single-tool", "mode": "tool", "scenarios": 200,
+      "overall": { "bm25_gold_score": { "mean": 4.15, "coverage": 1.0, "...": "..." },
+                   "by_k": [ { "k": 1, "mean_recall": 1.0, "hit_rate": 1.0, "mean_ndcg": 1.0, "mean_mrr": 1.0, "...": "..." } ] },
+      "by_pool_size": [ { "pool_size": 30, "by_k": [ /* same shape, per pool */ ] } ] },
+    { "subset": "multi-tool", "mode": "tool", "...": "..." }
+  ]
+}
+```
+
+**Task-completion row** (`agent.jsonl`; abbreviated — full schema in [`agent/src/types.ts`](agent/src/types.ts)):
+
+```jsonc
+{
+  "run_type": "task_completion",
+  "run_id": "5f3c…-uuid",
+  "generated_at": "2026-06-22T16:45:40.000Z",
+  "scenario_id": "bfcl-simple-simple_0",
+  "category": "bfcl-simple",
+  "arm": "ratel-full", "model": "gpt-5.4-mini", "run_index": 0,
+  "ratel_version": "0.2.0",            // @ratel-ai/sdk version (NOT ratel-ai-core)
+  "catalog_size": 5, "pool_size": 180, "seed": 42,
+  "input_tokens": 1234, "output_tokens": 56, "total_tokens": 1290,
+  "tool_calls_total": 1, "turns": 1,
+  "effective_tool_ids": ["calculate_triangle_area"],
+  "programmatic_verdict": "pass",      // right function (name only)
+  "ast_verdict": "pass",               // right function AND arguments (BFCL AST)
+  "judge_verdict": "n/a",
+  "wall_ms": 980, "dollar_cost": 0.0006,
+  "tool_calls": [ { "toolId": "calculate_triangle_area", "args": { "base": 10, "height": 5 } } ]
+}
+```
+
+**Consolidated `results/BFCL.json`** (pretty-printed; pools single+multi for task completion):
+
+```jsonc
+{
+  "benchmark": "BFCL",
+  "generated_at": "2026-06-22T16:45:40.000Z",
+  "ratel_ai_core_version": "0.2.0",    // from retrieval rows
+  "ratel_sdk_version": "0.2.0",        // from agent cells
+  "counts": { "agent_cells": 1200, "retrieval_rows": 4800 },
+  "retrieval_evaluation": {
+    "bfcl-simple": [ { "k": 5, "pool_size": 180, "n": 200,
+      "accuracy_at_k": 0.98, "complete_at_k": 0.98,
+      "mean_recall": 0.98, "mean_ndcg": 0.96, "mean_mrr": 0.95, "...": "..." } ],
+    "bfcl-multiple": [ /* same shape */ ]
+  },
+  "task_completion_evaluation": {
+    "note": "selection_accuracy = right function called; task_completion_accuracy = right function AND arguments (BFCL AST). single+multi pooled.",
+    "by_arm": [ { "arm": "ratel-full", "model": "gpt-5.4-mini", "category": "bfcl", "pool_size": 180,
+      "scenarios": 400, "runs": 1, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84,
+      "mean_input_tokens": 1234, "mean_dollar_cost": 0.0006, "mean_wall_ms": 980, "...": "..." } ],
+    "savings_ratel_vs_control": [ { "model": "gpt-5.4-mini", "pool_size": 180,
+      "input_tokens": { "control": 9000, "ratel": 1234, "savings_pct": 86.3 }, "...": "..." } ]
+  }
+}
+```
+
 ## Corpus format
 
 All suites consume the same JSONL — one `Scenario` per line:
