@@ -138,12 +138,18 @@ interface ScenarioStats {
  * of how many other scenarios ran 1× or 10×. This is the natural reading
  * of "what fraction of scenarios succeed" when runs-per-scenario varies.
  */
-export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
+/**
+ * @param coarsen When `true` (default), BFCL `bfcl-simple` + `bfcl-multiple`
+ * pool into one `bfcl` agent group (the `REPORT.md` behavior). Pass `false` to
+ * keep them split per subset — used by the BFCL website report.
+ */
+export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelStats[] {
+  const cat = (c: Pick<CellResult, "category">): string =>
+    coarsen ? coarseCategory(categoryOf(c)) : categoryOf(c);
   // Stage 1: per (scenario, arm, model, pool_size) → per-scenario means.
   const byScenario = new Map<string, CellResult[]>();
   for (const c of cells) {
-    // Coarse category: BFCL single+multi pool into one `bfcl` agent group.
-    const key = `${c.scenario_id}::${c.arm}::${c.model}::${coarseCategory(categoryOf(c))}::${c.pool_size}`;
+    const key = `${c.scenario_id}::${c.arm}::${c.model}::${cat(c)}::${c.pool_size}`;
     const arr = byScenario.get(key) ?? [];
     arr.push(c);
     byScenario.set(key, arr);
@@ -163,7 +169,7 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
     perScenario.push({
       arm: head.arm,
       model: head.model,
-      category: coarseCategory(categoryOf(head)),
+      category: cat(head),
       pool_size: head.pool_size,
       scenario_id: head.scenario_id,
       success_rate: passes / arr.length,
@@ -261,8 +267,8 @@ function pctSavings(control: number, ratel: number): number {
  * so its tokens/turns are joined per-model and shown identically across all
  * pool rows for that model.
  */
-export function savingsByModel(cells: CellResult[]): SavingsRow[] {
-  const stats = statsByArmModel(cells);
+export function savingsByModel(cells: CellResult[], coarsen = true): SavingsRow[] {
+  const stats = statsByArmModel(cells, coarsen);
   // Oracle is pool-size-agnostic but still per-category, so key it by both.
   const oracleByModel = new Map<string, ArmModelStats>();
   for (const s of stats) {

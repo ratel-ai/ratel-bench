@@ -35,6 +35,9 @@ describe("BFCL corpus is registry/provider-safe", () => {
       // Throws on a post-sanitization name collision; reaching the assertion
       // means the ingest disambiguated every id correctly.
       const bundle = buildToolBundle(universe);
+      // Within a single subset the ingest already de-collides ids, so every tool
+      // registers 1:1. (Cross-subset clashes on `bfcl-all` are handled by
+      // registerDirect's disambiguation — see _shared.test.ts.)
       expect(bundle.activeToolIds.length).toBe(universe.length);
     });
 

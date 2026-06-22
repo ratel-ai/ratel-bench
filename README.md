@@ -157,6 +157,19 @@ ToolRet uses the same `retrieval` runner with a different corpus and pool-size s
 
 Two categories are ingested: `bfcl-simple` (one gold call) and `bfcl-multiple` (pick the right function among several).
 
+**Three-stage contract.** Each eval produces a **per-row metrics** JSONL (overwritten each run) and appends to an **experiment-summary** JSONL (an append-only history). A separate **report producer** rebuilds one report from the summaries, keyed by **ratel-ai-core version**. We always run on **`bfcl-all`** (the two subsets concatenated); everything splits back into `simple` / `multiple` by the scenario-id prefix.
+
+| File (`results/raw/bfcl/`) | Producer | Mode |
+|---|---|---|
+| `retrieval-rows.jsonl` | Rust `retrieval` | overwrite |
+| `retrieval-summary.jsonl` | `bfcl-summarize` | **append** |
+| `agent.jsonl` (intermediate cells) | agent `start` | append/resumable |
+| `task-completion-rows.jsonl` | `bfcl-summarize` | overwrite |
+| `task-completion-summary.jsonl` | `bfcl-summarize` | **append** |
+| `results/reports/bfcl/report.json` | `bfcl-report` | overwrite (rebuilt) |
+
+Both summary files share a flat contract `{ timestamp, ratel_ai_core_version, source, type, …metrics }` (`source` is `retriever_evaluation`/`task_completion`, `type` is `simple`/`multiple`). Task-completion rows add `model` (the LLM name) and `arm` (`control-baseline`/`control-oracle`/`ratel-full`); retrieval has a single retriever (ratel-ai-core BM25), so it carries neither. `ratel_ai_core_version` on both sides is resolved from `Cargo.lock` (Rust via `build.rs`; the agent via `agent/src/versions.ts`).
+
 ### Data type
 
 Each line is a `Scenario` — the same schema every suite uses ([`retrieval/src/corpus.rs`](retrieval/src/corpus.rs)). BFCL rows additionally carry `gold_calls`: per-argument **lists of acceptable values** (BFCL's `possible_answer`). An empty string `""` in a list marks the argument optional.
@@ -192,134 +205,143 @@ cargo run -p ratel-benchmark-retrieval --release -- ingest bfcl --download
 cat test-data/bfcl-simple.jsonl test-data/bfcl-multiple.jsonl > test-data/bfcl-all.jsonl
 ```
 
-### 1. Retrieval test
+### 1. Retrieval eval → per-row
 
 ```bash
 cargo run -p ratel-benchmark-retrieval --release -- retrieval \
   --corpus test-data/bfcl-all.jsonl \
-  --output results/bfcl-retrieval.jsonl \
-  --top-k 1,3,5,10 --pool-sizes 30,100,180
+  --output results/raw/bfcl/retrieval-rows.jsonl \
+  --top-k 1,3,5,10 --pool-sizes 30,100,600
 ```
 
-Writes two files: a per-`(scenario, pool_size, k)` **detail JSONL** at `--output` (overwritten each run) and an aggregate **summary JSONL** at `…-summary.jsonl` (appended — one line per run, a history). The summary auto-splits into `single-tool` and `multi-tool` buckets.
+Writes `retrieval-rows.jsonl` (overwrite) — one row per `(scenario, pool_size, k)` with `ratel_ai_core_version`, `generated_at`, `category`, `query`, `golden_answer` (true answers = gold tool ids), `retrieved` (id+BM25-score), all metrics, and `gold_score` (per-row gold BM25 similarity).
 
-### 2. Task-completion task
+### 2. Task-completion eval → cells
 
-Needs an API key (`OPENAI_API_KEY` for `gpt-*`, `ANTHROPIC_API_KEY` for `claude-*`). `--models` accepts a comma-separated list:
+Needs an API key (`OPENAI_API_KEY` for `gpt-*`, `ANTHROPIC_API_KEY` for `claude-*`); `ollama:<tag>` needs none.
 
 ```bash
 pnpm -F @ratel-ai/benchmark start \
   --corpus test-data/bfcl-all.jsonl \
-  --models gpt-5.4-mini,claude-sonnet-4-6 \
-  --ephemeral
+  --models claude-haiku-4-5 \
+  --arms ratel-full \
+  --output results/raw/bfcl/agent.jsonl
 ```
 
-Writes one row per `(scenario, arm, model, pool_size, run)` cell. `--ephemeral` lands in a fresh `agent/results/ephemeral/agent-<timestamp>.jsonl` (drop it + add `--output` to persist to the canonical `agent/results/agent.jsonl`, which is appended/resumable).
+Writes agent cells (intermediate); each carries `ratel_ai_core_version` (the `Cargo.lock` value) and `generated_at`.
 
-### 3. Consolidated report (optional)
+### 3. Summarize → per-row + summaries
 
-Merge both layers into one file (`results/BFCL.json`, overwritten each run):
+Pure transform (no recompute, no API): writes `task-completion-rows.jsonl` (overwrite) and **appends** `retrieval-summary.jsonl` + `task-completion-summary.jsonl`.
 
 ```bash
-pnpm -F @ratel-ai/benchmark exec tsx src/bfcl-export.ts
+pnpm -F @ratel-ai/benchmark bfcl-summarize
 ```
+
+Reads `retrieval-rows.jsonl` + `agent.jsonl` + `test-data/bfcl-all.jsonl` (override via `--retrieval-rows` / `--agent` / `--corpus`). **All arms** present in `agent.jsonl` are summarized per arm by default; pass `--arm ratel-full` to restrict to one.
+
+### 4. Build the report
+
+Rebuilds `results/reports/bfcl/report.json` from the append-only summaries — one entry per ratel-ai-core version, latest timestamp per (source, model, type):
+
+```bash
+pnpm -F @ratel-ai/benchmark bfcl-report
+```
+
+### End-to-end (local Ollama, $0)
+
+`pnpm -F @ratel-ai/benchmark run-all --bfcl` runs it all: ingest → concat `bfcl-all` → retrieval → qwen3.5 campaign → `bfcl-summarize` → `bfcl-report` → cleanup (raw results + report kept). `--skip-agent` does retrieval + summarize + report only; `--keep-bfcl` keeps the ingested corpora.
 
 ### Export structures
 
-Both run types carry **`run_type`**, **`run_id`**, and **`generated_at`**, and share `scenario_id` — so retrieval and task-completion rows are joinable.
-
-**Retrieval detail row** (one per scenario × pool_size × k):
+**Retrieval per-row** (`retrieval-rows.jsonl`, overwrite):
 
 ```jsonc
 {
-  "run_type": "retrieval",
-  "run_id": "ret-1782146740544786",
-  "generated_at": "2026-06-22T16:45:40.544786+00:00",
-  "scenario_id": "bfcl-simple-simple_0",
-  "query": "Find the area of a triangle with a base of 10 units and height of 5 units.",
-  "golden_answer": ["calculate_triangle_area"],     // gold tool id(s)
-  "category": "bfcl-simple",
-  "target_pool_size": 30, "actual_pool_size": 30,
+  "generated_at": "2026-06-22T16:45:40+00:00",
   "ratel_ai_core_version": "0.2.0",
+  "scenario_id": "bfcl-simple-simple_0",
+  "category": "bfcl-simple",
+  "query": "Find the area of a triangle ...",
+  "golden_answer": ["calculate_triangle_area"],     // true answer = gold tool id(s)
   "k": 3, "pool_size": 30, "gold_count": 1,
   "recall_at_k": 1.0, "precision_at_k": 0.33, "reciprocal_rank": 1.0,
   "hit_at_k": true, "complete_at_k": true, "ndcg_at_k": 1.0,
-  "gold_score": 4.06,
-  "retrieved": [                                     // what BM25 returned, best-first
-    { "id": "calculate_triangle_area", "score": 4.06 },
-    { "id": "calculate_area", "score": 3.74 }
-  ]
+  "gold_score": 4.06,                                // per-row gold BM25 similarity
+  "retrieved": [ { "id": "calculate_triangle_area", "score": 4.06 }, { "id": "calculate_area", "score": 3.74 } ]
 }
 ```
 
-**Retrieval summary line** (one per run, appended):
+**Retrieval summary** (`retrieval-summary.jsonl`, append — one row per type × pool_size × k):
 
 ```jsonc
 {
-  "run_id": "ret-1782146740544786",
-  "generated_at": "2026-06-22T16:45:40.544786+00:00",
-  "ratel_ai_core_version": "0.2.0",
-  "corpus": "test-data/bfcl-all.jsonl", "output": "results/bfcl-retrieval.jsonl",
-  "scenarios": 400, "rows_written": 4800,
-  "top_k": [1, 3, 5, 10], "pool_sizes": [30, 100, 180], "seed": 42,
-  "by_bucket": [
-    { "subset": "single-tool", "mode": "tool", "scenarios": 200,
-      "overall": { "bm25_gold_score": { "mean": 4.15, "coverage": 1.0, "...": "..." },
-                   "by_k": [ { "k": 1, "mean_recall": 1.0, "hit_rate": 1.0, "mean_ndcg": 1.0, "mean_mrr": 1.0, "...": "..." } ] },
-      "by_pool_size": [ { "pool_size": 30, "by_k": [ /* same shape, per pool */ ] } ] },
-    { "subset": "multi-tool", "mode": "tool", "...": "..." }
-  ]
+  "timestamp": "2026-06-22T16:45:40+00:00", "ratel_ai_core_version": "0.2.0",
+  "source": "retriever_evaluation", "type": "simple",
+  "pool_size": 30, "k": 1, "n": 399,
+  "mean_precision": 0.9, "median_precision": 1.0, "mean_recall": 0.9, "median_recall": 1.0,
+  "mean_mrr": 0.92, "median_mrr": 1.0, "mean_ndcg": 0.91, "median_ndcg": 1.0,
+  "accuracy": 0.9, "complete_rate": 0.9,
+  "gold_similarity": { "mean": 19.9, "median": 19.2, "stddev": 10.7, "coverage": 1.0 }
 }
 ```
 
-**Task-completion row** (`agent.jsonl`; abbreviated — full schema in [`agent/src/types.ts`](agent/src/types.ts)):
+**Task-completion per-row** (`task-completion-rows.jsonl`, overwrite — one per scenario × arm):
 
 ```jsonc
 {
-  "run_type": "task_completion",
-  "run_id": "5f3c…-uuid",
-  "generated_at": "2026-06-22T16:45:40.000Z",
+  "ratel_ai_core_version": "0.2.0", "generated_at": "2026-06-22T10:00:00.000Z",
+  "type": "simple", "model": "claude-haiku-4-5", "arm": "ratel-full",
   "scenario_id": "bfcl-simple-simple_0",
-  "category": "bfcl-simple",
-  "arm": "ratel-full", "model": "gpt-5.4-mini", "run_index": 0,
-  "ratel_version": "0.2.0",            // @ratel-ai/sdk version (NOT ratel-ai-core)
-  "catalog_size": 5, "pool_size": 180, "seed": 42,
+  "query": "Find the area of a triangle ...",
+  "true_answers": { "gold_tools": ["calculate_triangle_area"],
+                    "gold_calls": [ { "tool": "calculate_triangle_area", "args": { "base": [10], "height": [5] } } ] },
+  "llm_answer": [ { "toolId": "calculate_triangle_area", "args": { "base": 10, "height": 5 } } ],
+  "selection_pass": true, "task_completion_pass": true,
   "input_tokens": 1234, "output_tokens": 56, "total_tokens": 1290,
-  "tool_calls_total": 1, "turns": 1,
-  "effective_tool_ids": ["calculate_triangle_area"],
-  "programmatic_verdict": "pass",      // right function (name only)
-  "ast_verdict": "pass",               // right function AND arguments (BFCL AST)
-  "judge_verdict": "n/a",
-  "wall_ms": 980, "dollar_cost": 0.0006,
-  "tool_calls": [ { "toolId": "calculate_triangle_area", "args": { "base": 10, "height": 5 } } ]
+  "dollar_cost": 0.0006, "wall_ms": 980, "turns": 1
 }
 ```
 
-**Consolidated `results/BFCL.json`** (pretty-printed; pools single+multi for task completion):
+**Task-completion summary** (`task-completion-summary.jsonl`, append — one row per type × LLM × arm):
 
 ```jsonc
 {
-  "benchmark": "BFCL",
+  "timestamp": "2026-06-22T10:00:00.000Z", "ratel_ai_core_version": "0.2.0",
+  "source": "task_completion", "model": "claude-haiku-4-5", "arm": "ratel-full", "type": "simple",
+  "scenarios": 399, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84,
+  "mean_input_tokens": 1234, "mean_total_tokens": 1290, "mean_dollar_cost": 0.0006,
+  "mean_wall_ms": 980, "mean_turns": 1
+}
+```
+
+**Report** (`results/reports/bfcl/report.json`, rebuilt each run — latest timestamp per group):
+
+```jsonc
+{
   "generated_at": "2026-06-22T16:45:40.000Z",
-  "ratel_ai_core_version": "0.2.0",    // from retrieval rows
-  "ratel_sdk_version": "0.2.0",        // from agent cells
-  "counts": { "agent_cells": 1200, "retrieval_rows": 4800 },
-  "retrieval_evaluation": {
-    "bfcl-simple": [ { "k": 5, "pool_size": 180, "n": 200,
-      "accuracy_at_k": 0.98, "complete_at_k": 0.98,
-      "mean_recall": 0.98, "mean_ndcg": 0.96, "mean_mrr": 0.95, "...": "..." } ],
-    "bfcl-multiple": [ /* same shape */ ]
-  },
-  "task_completion_evaluation": {
-    "note": "selection_accuracy = right function called; task_completion_accuracy = right function AND arguments (BFCL AST). single+multi pooled.",
-    "by_arm": [ { "arm": "ratel-full", "model": "gpt-5.4-mini", "category": "bfcl", "pool_size": 180,
-      "scenarios": 400, "runs": 1, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84,
-      "mean_input_tokens": 1234, "mean_dollar_cost": 0.0006, "mean_wall_ms": 980, "...": "..." } ],
-    "savings_ratel_vs_control": [ { "model": "gpt-5.4-mini", "pool_size": 180,
-      "input_tokens": { "control": 9000, "ratel": 1234, "savings_pct": 86.3 }, "...": "..." } ]
+  "ratel_versions": {
+    "0.2.0": {
+      "retriever_evaluation": {
+        "simple":   { "timestamp": "...", "metrics": [ { "pool_size": 30, "k": 1, "accuracy": 0.9, "gold_similarity": { "...": "..." } } ] },
+        "multiple": { "timestamp": "...", "metrics": [ /* per pool_size × k */ ] }
+      },
+      "task_completion": {
+        "claude-haiku-4-5": {
+          "ratel-full":       { "simple": { "timestamp": "...", "metrics": { "scenarios": 399, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84, "mean_input_tokens": 3471, "mean_dollar_cost": 0.0049, "...": "..." } },
+                                "multiple": { "timestamp": "...", "metrics": { "...": "..." } } },
+          "control-baseline": { "simple": { "metrics": { "task_completion_accuracy": 0.82, "mean_input_tokens": 30160, "...": "..." } }, "multiple": { "...": "..." } },
+          "control-oracle":   { "simple": { "metrics": { "...": "..." } }, "multiple": { "...": "..." } }
+        }
+      }
+    }
   }
 }
 ```
+
+Structure: `retriever_evaluation` is keyed by `type` directly (single retriever); `task_completion` is keyed by **LLM → arm → type**, so each arm (`control-baseline` / `control-oracle` / `ratel-full`) shows its own accuracy/tokens/cost — compare them directly per LLM and subset.
+
+**Add/update + reproducibility.** Re-running an eval appends a new summary line (with the eval's `generated_at` timestamp); `bfcl-report` rebuilds deterministically, taking the **latest timestamp per group** (retrieval: version × type; task: version × LLM × arm × type) — so a new LLM/arm/version is **added** and an existing entry is **updated** to its latest run, with others untouched. Because the report is rebuilt from the append-only summaries (not edited in place), it's fully reproducible; the per-row files keep the latest run's detail for audit.
 
 ## Corpus format
 

@@ -127,6 +127,12 @@ export interface CellResult {
   run_index: number;
   /** `@ratel-ai/sdk` version this row was produced against. Cache key dimension. */
   ratel_version: string;
+  /**
+   * `ratel-ai-core` version resolved from the repo-root `Cargo.lock` — the same
+   * authoritative value the retrieval layer stamps. The cross-layer alignment key
+   * `create-report` verifies. Optional: older rows predate it.
+   */
+  ratel_ai_core_version?: string;
   /** Tools the model directly sees this run (= what its context pays for). */
   catalog_size: number;
   /**

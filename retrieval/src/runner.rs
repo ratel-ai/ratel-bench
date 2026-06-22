@@ -431,7 +431,7 @@ pub struct KSummary {
 pub struct PoolSizeSummary {
     pub pool_size: Option<usize>,
     pub n: usize,
-    pub bm25_gold_score: GoldScoreSummary,
+    pub similarity_score: GoldScoreSummary,
     pub by_k: Vec<KSummary>,
 }
 
@@ -450,7 +450,7 @@ impl PoolSizeSummary {
         PoolSizeSummary {
             pool_size,
             n,
-            bm25_gold_score: score.summarize(),
+            similarity_score: score.summarize(),
             by_k,
         }
     }
@@ -749,7 +749,7 @@ mod tests {
         assert_eq!(overall_by_k[0]["k"], 1);
         assert_eq!(overall_by_k[1]["k"], 3);
         assert!(
-            b["overall"]["bm25_gold_score"]["coverage"]
+            b["overall"]["similarity_score"]["coverage"]
                 .as_f64()
                 .unwrap()
                 > 0.0

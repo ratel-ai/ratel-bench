@@ -76,15 +76,25 @@ export interface ToolBundle {
   nameToId: Map<string, string>;
 }
 
-/** Register one ToolSpec into the bundle, sanitizing its id and detecting collisions. */
+/**
+ * Register one ToolSpec into the bundle, sanitizing its id to a provider-safe
+ * tool name. Two distinct canonical ids can sanitize to the same name (e.g.
+ * `solve.quadratic_equation` and `solve_quadratic_equation` both → `solve_quadratic_equation`),
+ * which real corpora like BFCL contain. We disambiguate by suffixing (`_2`, `_3`, …)
+ * so each id gets a unique name and `nameToId` still maps the trace's `toolName`
+ * back to the right canonical id. A repeated identical id (deduped pool safety) is
+ * a no-op.
+ */
 export function registerDirect(spec: ToolSpec, bundle: ToolBundle): void {
   const exec = toExecutable(spec);
-  const name = sanitizeToolName(exec.id);
+  let name = sanitizeToolName(exec.id);
+  // Same canonical id already registered under this name → nothing to do.
+  if (bundle.nameToId.get(name) === exec.id) return;
+  // Name taken by a *different* id (sanitization collision) → find a free suffix.
   if (Object.hasOwn(bundle.tools, name)) {
-    throw new Error(
-      `tool name collision after sanitization: "${name}" is already registered ` +
-        `(would clash with id "${exec.id}"). Rename one of the tool ids.`,
-    );
+    let i = 2;
+    while (Object.hasOwn(bundle.tools, `${name}_${i}`)) i++;
+    name = `${name}_${i}`;
   }
   bundle.tools[name] = toAISDK(exec);
   bundle.nameToId.set(name, exec.id);

@@ -24,10 +24,10 @@
 //                   normalized corpora for debugging)
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { REPO_ROOT, resolveRepoPath } from "./paths.js";
 
-type CorpusName = "metatool" | "toolret" | "bfcl-simple" | "bfcl-multiple";
+type CorpusName = "metatool" | "toolret" | "bfcl-simple" | "bfcl-multiple" | "bfcl-all";
 type TargetName = "metatool" | "toolret" | "sragents";
 
 interface CorpusSpec {
@@ -59,28 +59,29 @@ const CORPORA: CorpusSpec[] = [
 ];
 
 /**
- * BFCL is a focused, self-contained pipeline (own ingest that emits two files,
- * a qwen3.5 agent campaign, a dedicated report, and a cleanup of downloaded
- * data). It is opt-in via `--bfcl` so the default run-all stays $0/key-free and
- * doesn't require a local Ollama. Retrieval pool sizes go up to each subset's
- * function-universe ceiling (~400 simple / ~600 multiple).
+ * BFCL is a focused, self-contained pipeline (own ingest, a qwen3.5 agent
+ * campaign, a dedicated report, and a cleanup of downloaded data). It is opt-in
+ * via `--bfcl` so the default run-all stays $0/key-free and doesn't require a
+ * local Ollama.
+ *
+ * The pipeline always runs on **bfcl-all** (the two ingested subsets
+ * concatenated): one retrieval pass and one agent campaign, each writing a
+ * single raw artifact. The report stage splits back into bfcl-simple /
+ * bfcl-multiple via the scenario-id prefix.
  */
-const BFCL_CORPORA: CorpusSpec[] = [
-  {
-    name: "bfcl-simple",
-    corpus: "test-data/bfcl-simple.jsonl",
-    retrievalOut: "results/bfcl-simple-retrieval.jsonl",
-    poolSizes: "30,100,400",
-    topK: "1,3,5,10",
-  },
-  {
-    name: "bfcl-multiple",
-    corpus: "test-data/bfcl-multiple.jsonl",
-    retrievalOut: "results/bfcl-multiple-retrieval.jsonl",
-    poolSizes: "30,100,600",
-    topK: "1,3,5,10",
-  },
-];
+const BFCL_SUBSET_FILES = ["test-data/bfcl-simple.jsonl", "test-data/bfcl-multiple.jsonl"] as const;
+const BFCL_ALL_CORPUS = "test-data/bfcl-all.jsonl";
+const BFCL_RETRIEVAL_ROWS = "results/raw/bfcl/retrieval-rows.jsonl";
+const BFCL_AGENT_CELLS = "results/raw/bfcl/agent.jsonl";
+
+/** Single retrieval pass over bfcl-all. Pool sizes span the combined function universe. */
+const BFCL_ALL_SPEC: CorpusSpec = {
+  name: "bfcl-all",
+  corpus: BFCL_ALL_CORPUS,
+  retrievalOut: BFCL_RETRIEVAL_ROWS,
+  poolSizes: "30,100,600",
+  topK: "1,3,5,10",
+};
 
 /**
  * Pool size the BFCL **agent** campaign runs at (distinct from the retrieval
@@ -320,69 +321,89 @@ function bfclAgentCampaign(skipAgent: boolean): void {
     console.log("\n→ BFCL agent campaign\n  --skip-agent set, skipping.");
     return;
   }
-  for (const spec of BFCL_CORPORA) {
-    runStep(`BFCL agent campaign ${spec.name} (${BFCL_AGENT_MODEL})`, "pnpm", [
-      "-F",
-      "@ratel-ai/benchmark",
-      "start",
-      "--corpus",
-      spec.corpus,
-      "--arms",
-      "control-baseline,control-oracle,ratel-full",
-      "--models",
-      BFCL_AGENT_MODEL,
-      "--pool-sizes",
-      BFCL_AGENT_POOL_SIZE,
-      "--runs",
-      "1",
-      "--no-judge",
-      "--concurrency",
-      "4",
-      "--quiet",
-    ]);
-  }
+  runStep(`BFCL agent campaign (${BFCL_AGENT_MODEL})`, "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "start",
+    "--corpus",
+    BFCL_ALL_CORPUS,
+    "--output",
+    BFCL_AGENT_CELLS,
+    "--arms",
+    "control-baseline,control-oracle,ratel-full",
+    "--models",
+    BFCL_AGENT_MODEL,
+    "--pool-sizes",
+    BFCL_AGENT_POOL_SIZE,
+    "--runs",
+    "1",
+    "--no-judge",
+    "--concurrency",
+    "4",
+    "--quiet",
+  ]);
+}
+
+/** Concatenate the two ingested subsets into the combined bfcl-all corpus. */
+function writeBfclAll(): void {
+  const parts = BFCL_SUBSET_FILES.map((p) => {
+    const body = readFileSync(resolveRepoPath(p), "utf-8");
+    return body.endsWith("\n") || body === "" ? body : `${body}\n`;
+  });
+  writeFileSync(resolveRepoPath(BFCL_ALL_CORPUS), parts.join(""), "utf-8");
+  console.log(`✓ wrote ${BFCL_ALL_CORPUS} (bfcl-simple + bfcl-multiple)`);
 }
 
 /**
- * One consolidated `results/BFCL.json`: retrieval evaluation (split single/multi),
- * task-completion evaluation (combined, with vs without Ratel), timestamp, and
- * the ratel-ai-core / SDK versions. Replaces the per-scenario markdown.
+ * Turn the raw artifacts into per-row metrics + append the experiment summaries:
+ * `task-completion-rows.jsonl` (overwrite) and `{retrieval,task-completion}-summary.jsonl`
+ * (append). Pure transform — no recompute, no API spend.
  */
-function bfclReport(): void {
-  runStep("export BFCL.json", "pnpm", [
+function bfclSummarize(): void {
+  runStep("summarize BFCL", "pnpm", [
     "-F",
     "@ratel-ai/benchmark",
-    "exec",
-    "tsx",
-    "src/bfcl-export.ts",
-    "--out",
-    "results/BFCL.json",
+    "bfcl-summarize",
+    "--retrieval-rows",
+    BFCL_RETRIEVAL_ROWS,
+    "--agent",
+    BFCL_AGENT_CELLS,
+    "--corpus",
+    BFCL_ALL_CORPUS,
   ]);
 }
 
 /**
- * Delete downloaded/cached BFCL data after the run (per requirement). Results
- * (`results/bfcl-*-retrieval.jsonl`, `agent/results/agent.jsonl`, `results/BFCL.json`)
- * are kept — only the fixtures and the regenerable normalized corpora go.
+ * Rebuild `results/reports/bfcl/report.json` from the append-only summaries:
+ * one entry per ratel-ai-core version, latest timestamp per (source, model, type).
  */
-function cleanupBfcl(): void {
-  for (const p of [
-    "fixtures/bfcl",
-    "test-data/bfcl-simple.jsonl",
-    "test-data/bfcl-multiple.jsonl",
-  ]) {
-    rmSync(resolveRepoPath(p), { recursive: true, force: true });
-  }
-  console.log("✓ cleaned up BFCL fixtures + normalized corpora (results kept)");
+function bfclReport(): void {
+  runStep("create BFCL report", "pnpm", ["-F", "@ratel-ai/benchmark", "bfcl-report"]);
 }
 
-/** Self-contained BFCL pipeline: ingest → retrieval → qwen campaign → report → cleanup. */
+/**
+ * Delete downloaded/cached BFCL data after the run (per requirement). Raw
+ * results (`results/raw/bfcl/*`) and the report (`results/reports/bfcl/report.json`)
+ * are kept — only the fixtures and the regenerable normalized corpora (incl.
+ * the concatenated bfcl-all) go.
+ */
+function cleanupBfcl(): void {
+  for (const p of ["fixtures/bfcl", ...BFCL_SUBSET_FILES, BFCL_ALL_CORPUS]) {
+    rmSync(resolveRepoPath(p), { recursive: true, force: true });
+  }
+  console.log("✓ cleaned up BFCL fixtures + normalized corpora (raw results + report kept)");
+}
+
+/**
+ * Self-contained BFCL pipeline on bfcl-all:
+ * ingest → concat → retrieval → qwen campaign → summarize → report → cleanup.
+ */
 function runBfcl(force: boolean, skipIngest: boolean, skipAgent: boolean, keepData: boolean): void {
   ingestBfcl(force, skipIngest);
-  for (const spec of BFCL_CORPORA) {
-    retrieval(spec);
-  }
+  writeBfclAll();
+  retrieval(BFCL_ALL_SPEC);
   bfclAgentCampaign(skipAgent);
+  bfclSummarize();
   bfclReport();
   if (keepData) {
     console.log("\n(--keep-bfcl set — leaving fixtures/bfcl + test-data/bfcl-*.jsonl in place)");

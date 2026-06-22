@@ -5,6 +5,7 @@
 import { createRequire } from "node:module";
 import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
+import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 // Resolve the installed SDK version once. Used as the `ratel_version` row
 // dimension and (downstream) cache-key component, so a campaign run is
@@ -177,6 +178,7 @@ export async function meter(
     model: ctx.model,
     run_index: ctx.runIndex,
     ratel_version: SDK_VERSION,
+    ratel_ai_core_version: RATEL_AI_CORE_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
     seed: ctx.seed,
