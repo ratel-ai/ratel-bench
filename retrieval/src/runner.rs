@@ -36,10 +36,24 @@ pub struct RunConfig {
     pub seed: u64,
 }
 
-/// One row of retrieval-only output. Joined to agent-loop rows by `scenario_id`.
+/// One row of retrieval-only output. Joined to agent-loop rows by `scenario_id`;
+/// `run_type` distinguishes the two export kinds and `run_id`/`generated_at`
+/// scope the row to one invocation of this runner.
 #[derive(Debug, Clone, Serialize)]
 pub struct RetrievalRow {
+    /// Always `"retrieval"` — lets a consumer tell retrieval rows from
+    /// task-completion rows when both are pooled.
+    pub run_type: &'static str,
+    /// Unique id for this `run_retrieval` invocation; shared by every row and
+    /// the summary line of the same run.
+    pub run_id: String,
+    /// RFC-3339 timestamp of the run; identical across all rows of the run.
+    pub generated_at: String,
     pub scenario_id: String,
+    /// The user query/question BM25 ranked against (the scenario prompt).
+    pub query: String,
+    /// The gold tool id(s) BM25 should surface — the "real answer" for retrieval.
+    pub golden_answer: Vec<String>,
     /// Scenario category (e.g. `metatool-single` / `metatool-multi`), carried
     /// through so the report can bucket rows by `(subset, mode)` without
     /// re-deriving it. `None` for category-less corpora (the report then falls
@@ -175,6 +189,12 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         .map_err(|e| anyhow::anyhow!("creating {}: {e}", config.output_path.display()))?;
     let mut writer = BufWriter::new(file);
 
+    // Per-run identity, generated once and stamped on every detail row and the
+    // summary line so they join back to this single invocation.
+    let now = chrono::Utc::now();
+    let generated_at = now.to_rfc3339();
+    let run_id = format!("ret-{}", now.timestamp_micros());
+
     // Tool scenarios compete against the plugin tool universe (real
     // `ToolRegistry`), pooled across all scenarios and deduped by id.
     let tool_distractors = collect_tool_distractors(&scenarios);
@@ -208,7 +228,12 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
 
             for metrics in all_metrics {
                 let row = RetrievalRow {
+                    run_type: "retrieval",
+                    run_id: run_id.clone(),
+                    generated_at: generated_at.clone(),
                     scenario_id: scenario.id.clone(),
+                    query: scenario.prompt.clone(),
+                    golden_answer: scenario.gold_tools.clone(),
                     category: scenario.category.clone(),
                     target_pool_size: target_size,
                     actual_pool_size: *actual_pool_size,
@@ -248,7 +273,8 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     }
 
     let summary = OverallSummary {
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        run_id: run_id.clone(),
+        generated_at: generated_at.clone(),
         ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.corpus_path.display().to_string(),
         output: config.output_path.display().to_string(),
@@ -451,6 +477,9 @@ pub struct BucketSummary {
 /// multi-tool tool retrieval are reported separately with the same metric set.
 #[derive(Debug, Clone, Serialize)]
 pub struct OverallSummary {
+    /// Unique id for the run that produced this summary; matches the `run_id`
+    /// on that run's detail rows.
+    pub run_id: String,
     pub generated_at: String,
     /// Resolved `ratel-ai-core` version that produced these metrics (captured
     /// from Cargo.lock at build time). Lets the append-only summary track how

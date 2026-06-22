@@ -9,6 +9,15 @@ use serde::Serialize;
 
 use crate::corpus::{Identified, SkillSpec, ToolSpec};
 
+/// One ranked hit: a tool id and its raw BM25 score. Emitted in `retrieved`
+/// (the top-K ranking) so a detail row shows what BM25 actually returned, not
+/// just the aggregate metrics.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RetrievedHit {
+    pub id: String,
+    pub score: f64,
+}
+
 /// Retrieval metrics for one (scenario, pool, K) cell.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RetrievalMetrics {
@@ -37,6 +46,9 @@ pub struct RetrievalMetrics {
     /// gold tool appeared in the ranking at all. Independent of `k` — every
     /// row for the same (scenario, pool) carries the same value.
     pub gold_score: Option<f64>,
+    /// The top-K ranking BM25 returned for this row, best-first, with raw
+    /// scores. Length ≤ `k` (shorter when the pool has fewer than `k` tools).
+    pub retrieved: Vec<RetrievedHit>,
 }
 
 /// Evaluate retrieval quality at multiple K cutoffs in one BM25 pass.
@@ -117,7 +129,12 @@ fn metrics_at_ks(
             let mut gold_in_topk = 0usize;
             let mut first_gold_rank: Option<usize> = None;
             let mut dcg = 0.0f64;
-            for (rank0, (id, _)) in ranked.iter().take(cutoff).enumerate() {
+            let mut retrieved: Vec<RetrievedHit> = Vec::with_capacity(cutoff);
+            for (rank0, (id, score)) in ranked.iter().take(cutoff).enumerate() {
+                retrieved.push(RetrievedHit {
+                    id: id.clone(),
+                    score: *score,
+                });
                 if gold_ids.iter().any(|g| g == id) {
                     gold_in_topk += 1;
                     if first_gold_rank.is_none() {
@@ -152,6 +169,7 @@ fn metrics_at_ks(
                 complete_at_k: gold_count > 0 && gold_in_topk == gold_count,
                 ndcg_at_k,
                 gold_score,
+                retrieved,
             }
         })
         .collect()

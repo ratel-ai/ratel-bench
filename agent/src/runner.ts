@@ -14,6 +14,7 @@
 // `ignore.*` filenames are gitignored so each developer can drop local-only
 // arms next to the committed ones).
 
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -531,6 +532,11 @@ function buildTaskQueue(
 }
 
 export async function run(config: RunnerConfig): Promise<RunnerSummary> {
+  // Per-run identity stamped on every freshly produced cell so task-completion
+  // rows join to retrieval rows (by `scenario_id`) and are scoped to this run.
+  const runId = randomUUID();
+  const runTimestamp = new Date().toISOString();
+
   const allScenarios = loadScenarios(config.corpusPath);
   const scenarios = sampleScenarios(allScenarios, config.scenarioLimit, config.seed);
 
@@ -636,6 +642,11 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         poolSize: task.poolSize,
         config,
       });
+      // Tag with this run's identity before persisting (single write path, so
+      // every fresh row is stamped; cached/older rows keep their own tags).
+      cell.run_type = "task_completion";
+      cell.run_id = runId;
+      cell.generated_at = runTimestamp;
       // Synchronous tail: append + counters happen without yielding, so two
       // workers cannot interleave their writes or accumulator updates.
       appendRow(config.outputPath, cell);

@@ -105,6 +105,16 @@ export interface AgentDescriptor {
 }
 
 export interface CellResult {
+  /**
+   * Export kind, always `"task_completion"` for agent rows. Lets a consumer
+   * pool these with retrieval rows and tell them apart. Optional because rows
+   * written before this field existed don't carry it.
+   */
+  run_type?: "task_completion";
+  /** Unique id for the `run()` invocation that produced this row; shared by every cell of the run. */
+  run_id?: string;
+  /** ISO-8601 timestamp of the run; identical across all cells of the run. */
+  generated_at?: string;
   scenario_id: string;
   /**
    * Scenario category from the corpus (e.g. `bfcl-simple`, `bfcl-multiple`,

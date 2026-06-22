@@ -121,6 +121,32 @@ describe("runner", () => {
     expect(lines.length).toBe(3);
   });
 
+  it("stamps run_type/run_id/generated_at on every emitted cell, shared across the run", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const output = join(tempDir, "agent.jsonl");
+
+    // makeFakeRunCell intentionally omits these fields — the runner must add them.
+    await run({
+      ...baseConfig(corpus, output),
+      runCell: makeFakeRunCell(0.001, []),
+    });
+
+    const rows: CellResult[] = readFileSync(output, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(rows.length).toBe(3);
+    for (const row of rows) {
+      expect(row.run_type).toBe("task_completion");
+      expect(typeof row.run_id).toBe("string");
+      expect(row.run_id).toBeTruthy();
+      expect(row.generated_at).toBe(rows[0].generated_at);
+    }
+    // One run → one shared run_id across all its cells.
+    expect(new Set(rows.map((r) => r.run_id)).size).toBe(1);
+  });
+
   it("records pool_size in every emitted cell", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
