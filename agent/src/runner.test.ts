@@ -36,6 +36,7 @@ function makeFakeRunCell(perCellDollars: number, called: string[]): RunCellFn {
     called.push(key);
     const cell: CellResult = {
       scenario_id: s.id,
+      category: s.category ?? null,
       arm,
       model: model.id,
       run_index: runIndex,
@@ -54,6 +55,7 @@ function makeFakeRunCell(perCellDollars: number, called: string[]): RunCellFn {
       non_gateway_calls: 1,
       turns: 1,
       programmatic_verdict: "pass",
+      ast_verdict: "n/a",
       judge_verdict: "n/a",
       final_text: "done",
       finish_reason: "stop",
@@ -117,6 +119,32 @@ describe("runner", () => {
     ]);
     const lines = readFileSync(output, "utf-8").trim().split("\n");
     expect(lines.length).toBe(3);
+  });
+
+  it("stamps run_type/run_id/generated_at on every emitted cell, shared across the run", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const output = join(tempDir, "agent.jsonl");
+
+    // makeFakeRunCell intentionally omits these fields — the runner must add them.
+    await run({
+      ...baseConfig(corpus, output),
+      runCell: makeFakeRunCell(0.001, []),
+    });
+
+    const rows: CellResult[] = readFileSync(output, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(rows.length).toBe(3);
+    for (const row of rows) {
+      expect(row.run_type).toBe("task_completion");
+      expect(typeof row.run_id).toBe("string");
+      expect(row.run_id).toBeTruthy();
+      expect(row.generated_at).toBe(rows[0].generated_at);
+    }
+    // One run → one shared run_id across all its cells.
+    expect(new Set(rows.map((r) => r.run_id)).size).toBe(1);
   });
 
   it("records pool_size in every emitted cell", async () => {
@@ -545,6 +573,7 @@ describe("runner", () => {
     const path = join(tempDir, "appended.jsonl");
     const sample: CellResult = {
       scenario_id: "x",
+      category: null,
       arm: "control-baseline",
       model: "m",
       run_index: 0,
@@ -563,6 +592,7 @@ describe("runner", () => {
       non_gateway_calls: 0,
       turns: 0,
       programmatic_verdict: "n/a",
+      ast_verdict: "n/a",
       judge_verdict: "n/a",
       final_text: "",
       finish_reason: "stop",
@@ -602,6 +632,7 @@ describe("runner", () => {
       inFlight--;
       const cell: CellResult = {
         scenario_id: args.scenario.id,
+        category: args.scenario.category ?? null,
         arm: args.arm,
         model: args.model.id,
         run_index: args.runIndex,
@@ -620,6 +651,7 @@ describe("runner", () => {
         non_gateway_calls: 0,
         turns: 0,
         programmatic_verdict: "pass",
+        ast_verdict: "n/a",
         judge_verdict: "n/a",
         final_text: "ok",
         finish_reason: "stop",

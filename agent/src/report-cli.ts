@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
-import { type RetrievalRow, renderReport } from "./report.js";
+import { corpusOf, type RetrievalRow, renderReport } from "./report.js";
 import type { CellResult } from "./types.js";
 
 function arg(name: string, fallback: string): string {
@@ -40,8 +40,17 @@ const retrievalPaths =
   explicit.length > 0 ? explicit.map((p) => resolveRepoPath(p)) : discoverRetrievalFiles();
 const outputPath = resolveRepoPath(arg("--output", "results/REPORT.md"));
 
-const cells = readJsonl<CellResult>(agentPath);
-const retrieval = retrievalPaths.flatMap((p) => readJsonl<RetrievalRow>(p));
+// Optional scenario-type filter for a focused report (e.g. a BFCL-only file):
+// keeps cells whose `category` and retrieval rows whose corpus label start with
+// the prefix. Without it, every corpus is included (the shared REPORT.md).
+const categoryPrefix = arg("--category-prefix", "");
+
+let cells = readJsonl<CellResult>(agentPath);
+let retrieval = retrievalPaths.flatMap((p) => readJsonl<RetrievalRow>(p));
+if (categoryPrefix) {
+  cells = cells.filter((c) => (c.category ?? "").startsWith(categoryPrefix));
+  retrieval = retrieval.filter((r) => corpusOf(r.scenario_id).startsWith(categoryPrefix));
+}
 const md = renderReport({ cells, retrieval });
 
 mkdirSync(dirname(outputPath), { recursive: true });

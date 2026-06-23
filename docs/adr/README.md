@@ -9,3 +9,5 @@ The ADRs are not edited to reflect the new layout because they document *decisio
 - [0005-benchmark-design.md](0005-benchmark-design.md) — overall harness (arms, models, variance, results storage)
 - [0006-benchmark-corpus-and-eval-modes.md](0006-benchmark-corpus-and-eval-modes.md) — corpus pivot + the three eval modes
 - [0007-benchmark-corpus-not-snapshotted.md](0007-benchmark-corpus-not-snapshotted.md) — corpus is ingested locally; no committed snapshot, no MetaTool sampling
+- [0008-skill-retrieval-eval-mode.md](0008-skill-retrieval-eval-mode.md) — skill retrieval evaluated separately on an authored skill corpus (SR-Agents) via `SkillRegistry`
+- [0009-bfcl-evaluation-and-export.md](0009-bfcl-evaluation-and-export.md) — BFCL function-calling eval + reproducible per-row / append-only summary / rebuildable multi-version report

@@ -16,13 +16,19 @@
 //   --skip-ingest   never call the ingest CLI (fail loudly if missing)
 //   --skip-agent    never run mode (c), even if a provider key is present
 //   --only NAME     restrict to a single corpus: "metatool" | "toolret" | "sragents"
+//   --bfcl          run ONLY the self-contained BFCL pipeline (ingest both
+//                   subsets → BM25 retrieval → qwen3.5 campaign → BFCL.json →
+//                   delete downloaded data). Requires a local Ollama with
+//                   qwen3.5 unless paired with --skip-agent.
+//   --keep-bfcl     with --bfcl, skip the post-run cleanup (keep fixtures +
+//                   normalized corpora for debugging)
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { REPO_ROOT, resolveRepoPath } from "./paths.js";
 
-type CorpusName = "metatool" | "toolret";
-type TargetName = CorpusName | "sragents";
+type CorpusName = "metatool" | "toolret" | "bfcl-simple" | "bfcl-multiple" | "bfcl-all";
+type TargetName = "metatool" | "toolret" | "sragents";
 
 interface CorpusSpec {
   name: CorpusName;
@@ -51,6 +57,46 @@ const CORPORA: CorpusSpec[] = [
     topK: "1,3,5,10",
   },
 ];
+
+/**
+ * BFCL is a focused, self-contained pipeline (own ingest, a qwen3.5 agent
+ * campaign, a dedicated report, and a cleanup of downloaded data). It is opt-in
+ * via `--bfcl` so the default run-all stays $0/key-free and doesn't require a
+ * local Ollama.
+ *
+ * The pipeline always runs on **bfcl-all** (the two ingested subsets
+ * concatenated): one retrieval pass and one agent campaign, each writing a
+ * single raw artifact. The report stage splits back into bfcl-simple /
+ * bfcl-multiple via the scenario-id prefix.
+ */
+const BFCL_SUBSET_FILES = ["test-data/bfcl-simple.jsonl", "test-data/bfcl-multiple.jsonl"] as const;
+const BFCL_ALL_CORPUS = "test-data/bfcl-all.jsonl";
+const BFCL_RETRIEVAL_ROWS = "results/raw/bfcl/retrieval-rows.jsonl";
+const BFCL_AGENT_CELLS = "results/raw/bfcl/agent.jsonl";
+
+/** Single retrieval pass over bfcl-all. Pool sizes span the combined function universe. */
+const BFCL_ALL_SPEC: CorpusSpec = {
+  name: "bfcl-all",
+  corpus: BFCL_ALL_CORPUS,
+  retrievalOut: BFCL_RETRIEVAL_ROWS,
+  poolSizes: "30,100,600",
+  topK: "1,3,5,10",
+};
+
+/**
+ * Pool size the BFCL **agent** campaign runs at (distinct from the retrieval
+ * sweep above). control-baseline puts the whole pool in context, so this is the
+ * "fat context" the ratel arms are saving against — 100 distractors is enough to
+ * make the savings meaningful while still fitting a local qwen3.5 context and
+ * keeping a full-dataset run tractable.
+ */
+const BFCL_AGENT_POOL_SIZE = "100";
+
+/**
+ * Model the BFCL agent campaign runs on (local Ollama, $0). The `ollama:` prefix
+ * routes through the local server; the tag must exist there (`ollama list`).
+ */
+const BFCL_AGENT_MODEL = "ollama:qwen3.5:4b";
 
 // SR-Agents skill corpus (separate from the tool corpora above): an authored
 // skill catalog (~26k skills) is the BM25 index, and instances carry gold skill
@@ -239,10 +285,146 @@ function report(): void {
   runStep("render REPORT.md", "pnpm", ["-F", "@ratel-ai/benchmark", "report"]);
 }
 
+/** One cargo call emits BOTH normalized BFCL corpora (simple + multiple). */
+function ingestBfcl(force: boolean, skipIngest: boolean): void {
+  const simple = resolveRepoPath("test-data/bfcl-simple.jsonl");
+  const multiple = resolveRepoPath("test-data/bfcl-multiple.jsonl");
+  if (existsSync(simple) && existsSync(multiple) && !force) {
+    console.log("✓ bfcl: corpora present, skipping ingest");
+    return;
+  }
+  if (skipIngest) {
+    throw new Error(
+      "bfcl: corpora missing and --skip-ingest set. Run " +
+        "`cargo run -p ratel-benchmark-retrieval --release -- ingest bfcl --download` first.",
+    );
+  }
+  const fixturesDir = resolveRepoPath("fixtures/bfcl");
+  const args = ["run", "-p", "ratel-benchmark-retrieval", "--release", "--", "ingest", "bfcl"];
+  if (force || !isNonEmptyDir(fixturesDir)) {
+    args.push("--download");
+  } else {
+    console.log(`  (fixtures cached at ${fixturesDir} — skipping --download)`);
+  }
+  runStep("ingest bfcl", "cargo", args);
+}
+
+/**
+ * BFCL agent campaign on qwen3.5 (local Ollama, $0). Runs both subsets with
+ * control-baseline (without Ratel), ratel-full (with Ratel), and control-oracle
+ * (upper bound + savings-table oracle column). Selection-only judging, so the
+ * LLM judge is skipped (`--no-judge`) — no provider key needed. Full datasets:
+ * no `--scenarios` cap.
+ */
+function bfclAgentCampaign(skipAgent: boolean): void {
+  if (skipAgent) {
+    console.log("\n→ BFCL agent campaign\n  --skip-agent set, skipping.");
+    return;
+  }
+  runStep(`BFCL agent campaign (${BFCL_AGENT_MODEL})`, "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "start",
+    "--corpus",
+    BFCL_ALL_CORPUS,
+    "--output",
+    BFCL_AGENT_CELLS,
+    "--arms",
+    "control-baseline,control-oracle,ratel-full",
+    "--models",
+    BFCL_AGENT_MODEL,
+    "--pool-sizes",
+    BFCL_AGENT_POOL_SIZE,
+    "--runs",
+    "1",
+    "--no-judge",
+    "--concurrency",
+    "4",
+    "--quiet",
+  ]);
+}
+
+/** Concatenate the two ingested subsets into the combined bfcl-all corpus. */
+function writeBfclAll(): void {
+  const parts = BFCL_SUBSET_FILES.map((p) => {
+    const body = readFileSync(resolveRepoPath(p), "utf-8");
+    return body.endsWith("\n") || body === "" ? body : `${body}\n`;
+  });
+  writeFileSync(resolveRepoPath(BFCL_ALL_CORPUS), parts.join(""), "utf-8");
+  console.log(`✓ wrote ${BFCL_ALL_CORPUS} (bfcl-simple + bfcl-multiple)`);
+}
+
+/**
+ * Turn the raw artifacts into per-row metrics + append the experiment summaries:
+ * `task-completion-rows.jsonl` (overwrite) and `{retrieval,task-completion}-summary.jsonl`
+ * (append). Pure transform — no recompute, no API spend.
+ */
+function bfclSummarize(): void {
+  runStep("summarize BFCL", "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "bfcl-summarize",
+    "--retrieval-rows",
+    BFCL_RETRIEVAL_ROWS,
+    "--agent",
+    BFCL_AGENT_CELLS,
+    "--corpus",
+    BFCL_ALL_CORPUS,
+  ]);
+}
+
+/**
+ * Rebuild `results/reports/bfcl/report.json` from the append-only summaries:
+ * one entry per ratel-ai-core version, latest timestamp per (source, model, type).
+ */
+function bfclReport(): void {
+  runStep("create BFCL report", "pnpm", ["-F", "@ratel-ai/benchmark", "bfcl-report"]);
+}
+
+/**
+ * Delete downloaded/cached BFCL data after the run (per requirement). Raw
+ * results (`results/raw/bfcl/*`) and the report (`results/reports/bfcl/report.json`)
+ * are kept — only the fixtures and the regenerable normalized corpora (incl.
+ * the concatenated bfcl-all) go.
+ */
+function cleanupBfcl(): void {
+  for (const p of ["fixtures/bfcl", ...BFCL_SUBSET_FILES, BFCL_ALL_CORPUS]) {
+    rmSync(resolveRepoPath(p), { recursive: true, force: true });
+  }
+  console.log("✓ cleaned up BFCL fixtures + normalized corpora (raw results + report kept)");
+}
+
+/**
+ * Self-contained BFCL pipeline on bfcl-all:
+ * ingest → concat → retrieval → qwen campaign → summarize → report → cleanup.
+ */
+function runBfcl(force: boolean, skipIngest: boolean, skipAgent: boolean, keepData: boolean): void {
+  ingestBfcl(force, skipIngest);
+  writeBfclAll();
+  retrieval(BFCL_ALL_SPEC);
+  bfclAgentCampaign(skipAgent);
+  bfclSummarize();
+  bfclReport();
+  if (keepData) {
+    console.log("\n(--keep-bfcl set — leaving fixtures/bfcl + test-data/bfcl-*.jsonl in place)");
+  } else {
+    cleanupBfcl();
+  }
+}
+
 function main(): void {
   const force = hasFlag("--force");
   const skipIngest = hasFlag("--skip-ingest");
   const skipAgent = hasFlag("--skip-agent");
+
+  // BFCL is a focused, self-contained run (own report + cleanup); `--bfcl` runs
+  // just that pipeline and returns.
+  if (hasFlag("--bfcl")) {
+    runBfcl(force, skipIngest, skipAgent, hasFlag("--keep-bfcl"));
+    console.log("\n✓ BFCL run-all complete.");
+    return;
+  }
+
   const only = flagValue("--only") as TargetName | undefined;
 
   const validTargets: TargetName[] = ["metatool", "toolret", "sragents"];

@@ -58,7 +58,7 @@ tuning change, or on a later date) builds up a comparable history of experiments
 clobbering the previous run; `generated_at` on each line is what distinguishes one run from
 another. Each line has an `overall` block (mean/median precision/recall/nDCG/MRR + hit-rate per
 K, aggregated across every pool size) and a `by_pool_size` breakdown with the same shape per
-pool size. Both blocks also report `bm25_gold_score` — the mean/median/population-stddev of
+pool size. Both blocks also report `similarity_score` — the mean/median/population-stddev of
 the raw BM25 score assigned to the gold tool when it's found in the ranking, plus `coverage`
 (the fraction of scenarios where it was found at all). This is the standalone "average
 retriever performance" artifact; no TS report run required. (Note: unlike the summary, the
@@ -137,7 +137,7 @@ cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
   --top-k 1,3,5,10 --pool-sizes 100,1000,26262
 ```
 
-For each instance, the gold skills are pooled with distractors sampled from the catalog up to each `pool_size`, ranked by BM25 over **name + description** (the markdown `body` is carried in the catalog file for fidelity but is *not* indexed, so it never affects scores), and scored with the same metric set as the tool path — recall@K, precision@K, MRR@K, hit@K, nDCG@K, plus `bm25_gold_score` mean/median/population-stddev.
+For each instance, the gold skills are pooled with distractors sampled from the catalog up to each `pool_size`, ranked by BM25 over **name + description** (the markdown `body` is carried in the catalog file for fidelity but is *not* indexed, so it never affects scores), and scored with the same metric set as the tool path — recall@K, precision@K, MRR@K, hit@K, nDCG@K, plus `similarity_score` mean/median/population-stddev.
 
 The append-only **summary** (default `results/sragents-skill-retrieval-summary.jsonl`, derived from `--output`) carries one block per dataset (`subset = <dataset>`, `mode = "skill"`) plus an aggregate `all` block, each with the same `overall` + `by_pool_size` shape as the tool summary. The detail JSONL at `--output` is overwritten each run; the summary accumulates one line per run.
 

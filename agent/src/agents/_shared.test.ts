@@ -71,12 +71,38 @@ describe("buildToolBundle", () => {
     expect(bundle.nameToId.get("mail_send")).toBe("mail.send");
   });
 
-  it("throws on collisions after sanitization", () => {
+  it("disambiguates distinct ids that sanitize to the same provider name", () => {
+    // BFCL contains exactly this shape (e.g. solve.quadratic_equation vs
+    // solve_quadratic_equation); both must register with the gold id recoverable.
     const collision: ToolSpec[] = [
-      { ...specs[0], id: "fs.read_file" },
-      { ...specs[0], id: "fs/read_file" },
+      { ...specs[0], id: "solve.quadratic_equation" },
+      { ...specs[0], id: "solve_quadratic_equation" },
     ];
-    expect(() => buildToolBundle(collision)).toThrow(/collision/);
+    const bundle = buildToolBundle(collision);
+    // Both canonical ids are present (nothing dropped).
+    expect(bundle.activeToolIds.sort()).toEqual([
+      "solve.quadratic_equation",
+      "solve_quadratic_equation",
+    ]);
+    // Two distinct provider-safe names: the base + a suffixed variant.
+    expect(Object.keys(bundle.tools).sort()).toEqual([
+      "solve_quadratic_equation",
+      "solve_quadratic_equation_2",
+    ]);
+    // Each name maps back to the right canonical id (so judging stays correct).
+    expect(new Set(bundle.nameToId.values())).toEqual(
+      new Set(["solve.quadratic_equation", "solve_quadratic_equation"]),
+    );
+  });
+
+  it("treats a repeated identical id as a no-op", () => {
+    const dup: ToolSpec[] = [
+      { ...specs[0], id: "fs.read_file" },
+      { ...specs[0], id: "fs.read_file" },
+    ];
+    const bundle = buildToolBundle(dup);
+    expect(bundle.activeToolIds).toEqual(["fs.read_file"]);
+    expect(Object.keys(bundle.tools)).toEqual(["fs_read_file"]);
   });
 
   it("normalizes empty schemas at the AI SDK boundary", () => {

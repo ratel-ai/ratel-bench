@@ -9,6 +9,15 @@ use serde::Serialize;
 
 use crate::corpus::{Identified, SkillSpec, ToolSpec};
 
+/// One ranked hit: a tool id and its raw BM25 score. Emitted in `retrieved`
+/// (the top-K ranking) so a detail row shows what BM25 actually returned, not
+/// just the aggregate metrics.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RetrievedHit {
+    pub id: String,
+    pub score: f64,
+}
+
 /// Retrieval metrics for one (scenario, pool, K) cell.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RetrievalMetrics {
@@ -25,7 +34,8 @@ pub struct RetrievalMetrics {
     pub hit_at_k: bool,
     /// True if *every* gold tool is in the top-K (recall == 1.0) — the strict
     /// sibling of `hit_at_k`. For single-gold queries the two are identical;
-    /// for multi-gold tool retrieval this is the "complete set retrieved" flag.
+    /// for multi-gold retrieval this is the "complete set retrieved" flag.
+    /// False when there are no gold tools.
     pub complete_at_k: bool,
     /// Normalized DCG@K under binary relevance: DCG / IDCG, where IDCG places
     /// every gold tool at the top of the ranking. 0.0 when there are no gold
@@ -36,6 +46,9 @@ pub struct RetrievalMetrics {
     /// gold tool appeared in the ranking at all. Independent of `k` — every
     /// row for the same (scenario, pool) carries the same value.
     pub gold_score: Option<f64>,
+    /// The top-K ranking BM25 returned for this row, best-first, with raw
+    /// scores. Length ≤ `k` (shorter when the pool has fewer than `k` tools).
+    pub retrieved: Vec<RetrievedHit>,
 }
 
 /// Evaluate retrieval quality at multiple K cutoffs in one BM25 pass.
@@ -116,7 +129,12 @@ fn metrics_at_ks(
             let mut gold_in_topk = 0usize;
             let mut first_gold_rank: Option<usize> = None;
             let mut dcg = 0.0f64;
-            for (rank0, (id, _)) in ranked.iter().take(cutoff).enumerate() {
+            let mut retrieved: Vec<RetrievedHit> = Vec::with_capacity(cutoff);
+            for (rank0, (id, score)) in ranked.iter().take(cutoff).enumerate() {
+                retrieved.push(RetrievedHit {
+                    id: id.clone(),
+                    score: *score,
+                });
                 if gold_ids.iter().any(|g| g == id) {
                     gold_in_topk += 1;
                     if first_gold_rank.is_none() {
@@ -151,6 +169,7 @@ fn metrics_at_ks(
                 complete_at_k: gold_count > 0 && gold_in_topk == gold_count,
                 ndcg_at_k,
                 gold_score,
+                retrieved,
             }
         })
         .collect()
@@ -272,6 +291,36 @@ mod tests {
             m.recall_at_k > 0.0,
             "expected at least one gold to be retrieved, got {m:?}"
         );
+    }
+
+    #[test]
+    fn complete_at_k_equals_hit_for_single_gold() {
+        let pool = read_file_pool();
+        let m = evaluate(&pool, "send an email via SMTP", &["mail.send".into()], 5);
+        assert!(m.hit_at_k);
+        assert!(m.complete_at_k);
+    }
+
+    #[test]
+    fn complete_at_k_requires_all_gold_in_topk() {
+        // One gold lands, the other does not → hit but not complete.
+        let pool = read_file_pool();
+        let m = evaluate(
+            &pool,
+            "send an email via SMTP",
+            &["mail.send".into(), "does.not.exist".into()],
+            5,
+        );
+        assert_eq!(m.gold_count, 2);
+        assert!(m.hit_at_k);
+        assert!(!m.complete_at_k);
+    }
+
+    #[test]
+    fn complete_at_k_false_when_no_gold_tools() {
+        let pool = read_file_pool();
+        let m = evaluate(&pool, "anything", &[], 5);
+        assert!(!m.complete_at_k);
     }
 
     #[test]

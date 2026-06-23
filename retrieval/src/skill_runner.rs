@@ -120,6 +120,12 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
     let mut writer = BufWriter::new(file);
     let mut rows = 0usize;
 
+    // Per-run identity, generated once and stamped on every detail row and the
+    // summary line so they join back to this single invocation.
+    let now = chrono::Utc::now();
+    let generated_at = now.to_rfc3339();
+    let run_id = format!("ret-{}", now.timestamp_micros());
+
     // One accumulator per dataset, plus a shared aggregate.
     let mut by_dataset: HashMap<String, BucketAcc> = HashMap::new();
     let mut all = BucketAcc::default();
@@ -157,10 +163,16 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
 
             for metrics in all_metrics {
                 let row = RetrievalRow {
+                    run_type: "retrieval",
+                    run_id: run_id.clone(),
+                    generated_at: generated_at.clone(),
                     scenario_id: inst.id.clone(),
+                    query: inst.prompt.clone(),
+                    golden_answer: inst.gold_skill_ids.clone(),
                     category: Some(category.clone()),
                     target_pool_size: target_size,
                     actual_pool_size: *actual_pool_size,
+                    ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
                     metrics: metrics.clone(),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&row)?)?;
@@ -186,7 +198,8 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
             .map_err(|e| anyhow::anyhow!("creating summary dir {}: {e}", parent.display()))?;
     }
     let summary = OverallSummary {
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        run_id: run_id.clone(),
+        generated_at: generated_at.clone(),
         ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.instances_path.display().to_string(),
         output: config.output_path.display().to_string(),

@@ -3,6 +3,7 @@
 //! [`crate::corpus::Scenario`]s; the skill corpus (SR-Agents) produces a skill
 //! catalog plus [`sragents::SkillInstance`]s for `crate::skill_runner`.
 
+pub mod bfcl;
 pub mod metatool;
 pub mod sragents;
 pub mod toolret;

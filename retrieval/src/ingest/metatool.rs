@@ -198,6 +198,7 @@ fn build_single_scenario(
         gold_tools: vec![q.tool.clone()],
         judge_criteria: None,
         category: Some("metatool-single".into()),
+        gold_calls: Vec::new(),
     })
 }
 
@@ -219,6 +220,7 @@ fn build_multi_scenario(
         gold_tools: q.tools.clone(),
         judge_criteria: None,
         category: Some("metatool-multi".into()),
+        gold_calls: Vec::new(),
     })
 }
 

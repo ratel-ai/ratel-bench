@@ -3,6 +3,7 @@ use std::process::Command as ShellCommand;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use ratel_benchmark_retrieval::ingest::bfcl::{BfclPaths, ingest_to_jsonl as ingest_bfcl};
 use ratel_benchmark_retrieval::ingest::metatool::{
     self as metatool, MetaToolPaths, PLUGIN_DES_URL, SINGLE_TOOL_CSV_URL,
     ingest_to_jsonl as ingest_metatool,
@@ -143,6 +144,26 @@ enum IngestSource {
         #[arg(short, long, default_value = "test-data/toolret.jsonl")]
         output: PathBuf,
     },
+    /// BFCL (Berkeley Function Calling Leaderboard, gorilla-llm on HuggingFace).
+    /// With `--download` the four source files (simple + multiple data, plus
+    /// their `possible_answer/` ground truth) are pulled into `--fixtures-dir`.
+    /// Emits two normalized corpora: single-tool (simple) and multi-tool
+    /// (multiple). Rows with unknown gold / no answer are skipped (counted).
+    Bfcl {
+        /// Where downloaded source files live (mirrors upstream layout).
+        #[arg(long, default_value = "fixtures/bfcl")]
+        fixtures_dir: PathBuf,
+        /// Pull upstream sources into `--fixtures-dir` before ingesting (uses
+        /// the system `curl`). Skip the flag to read pre-existing files.
+        #[arg(long, default_value_t = false)]
+        download: bool,
+        /// Where to write the normalized single-tool (simple) corpus.
+        #[arg(long, default_value = "test-data/bfcl-simple.jsonl")]
+        simple_output: PathBuf,
+        /// Where to write the normalized multi-tool (multiple) corpus.
+        #[arg(long, default_value = "test-data/bfcl-multiple.jsonl")]
+        multiple_output: PathBuf,
+    },
     /// SR-Agents (oneal2000/SR-Agents). With `--download` the upstream skill
     /// corpus zip + six instance files are pulled into `--fixtures-dir` and the
     /// corpus is unzipped before ingesting. Produces a skill catalog JSONL and
@@ -222,6 +243,18 @@ fn download_toolret_upstream(paths: &ToolRetPaths) -> anyhow::Result<()> {
     for ((subset, url), (_, dest)) in TOOLRET_QUERIES_URLS.iter().zip(paths.queries.iter()) {
         eprintln!("  queries/{subset}");
         fetch_via_curl(url, dest)?;
+    }
+    Ok(())
+}
+
+fn download_bfcl_upstream(paths: &BfclPaths) -> anyhow::Result<()> {
+    let targets = paths.download_targets();
+    eprintln!(
+        "downloading BFCL upstream sources via curl ({} files)...",
+        targets.len()
+    );
+    for (url, dest) in targets {
+        fetch_via_curl(url, &dest)?;
     }
     Ok(())
 }
@@ -363,6 +396,31 @@ fn main() -> anyhow::Result<()> {
                     stats.skipped_no_positive_label,
                     stats.scenarios_out,
                     output.display(),
+                );
+            }
+            IngestSource::Bfcl {
+                fixtures_dir,
+                download,
+                simple_output,
+                multiple_output,
+            } => {
+                let paths = BfclPaths::under_fixtures_dir(&fixtures_dir);
+                if download {
+                    download_bfcl_upstream(&paths)?;
+                }
+                let stats = ingest_bfcl(&paths, &simple_output, &multiple_output)?;
+                println!(
+                    "bfcl: {} simple in / {} multiple in, \
+                     {} skipped (unknown gold), {} skipped (missing answer), \
+                     {} ids disambiguated → {} scenarios at {} + {}",
+                    stats.simple_in,
+                    stats.multiple_in,
+                    stats.skipped_unknown_gold,
+                    stats.skipped_missing_answer,
+                    stats.collisions_disambiguated,
+                    stats.scenarios_out,
+                    simple_output.display(),
+                    multiple_output.display(),
                 );
             }
             IngestSource::Sragents {

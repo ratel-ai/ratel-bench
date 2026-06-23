@@ -14,6 +14,7 @@
 // `ignore.*` filenames are gitignored so each developer can drop local-only
 // arms next to the committed ones).
 
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -28,9 +29,10 @@ import type { LanguageModel } from "ai";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { descriptor as controlOracle } from "./agents/control-oracle.js";
 import { loadScenarios } from "./corpus.js";
+import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
-import { type PricingTable, SDK_VERSION } from "./metering.js";
+import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import type { AgentDescriptor, Arm, CellResult, Scenario, ToolSpec } from "./types.js";
 
@@ -73,6 +75,8 @@ export interface RunnerConfig {
   dollarGlobalCap: number;
   force: boolean;
   judgeModel?: LanguageModel;
+  /** Skip the argument-level (AST) task-completion verdict. Defaults to off (AST on). */
+  noAst?: boolean;
   seed: number;
   pricing?: PricingTable;
   /**
@@ -370,6 +374,14 @@ export function makeRegistryRunCell(
     const programmatic = judgeProgrammatic(scenario.gold_tools, cell.effective_tool_ids);
     cell.programmatic_verdict = programmatic.verdict;
 
+    // Task-completion (AST) verdict: right function AND right arguments. Computed
+    // independently of the selection verdict — a selection pass can still be an
+    // argument fail — and LLM-free, so it always runs when the scenario carries
+    // argument ground truth (BFCL). `n/a` otherwise (MetaTool/ToolRet).
+    if (!config.noAst) {
+      cell.ast_verdict = judgeAst(scenario.gold_calls, effectiveCalls(cell.tool_calls)).verdict;
+    }
+
     if (judgeModel && (programmatic.verdict === "n/a" || programmatic.verdict === "fail")) {
       const judged = await judgeLLM({
         prompt: scenario.prompt,
@@ -520,6 +532,11 @@ function buildTaskQueue(
 }
 
 export async function run(config: RunnerConfig): Promise<RunnerSummary> {
+  // Per-run identity stamped on every freshly produced cell so task-completion
+  // rows join to retrieval rows (by `scenario_id`) and are scoped to this run.
+  const runId = randomUUID();
+  const runTimestamp = new Date().toISOString();
+
   const allScenarios = loadScenarios(config.corpusPath);
   const scenarios = sampleScenarios(allScenarios, config.scenarioLimit, config.seed);
 
@@ -625,6 +642,11 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         poolSize: task.poolSize,
         config,
       });
+      // Tag with this run's identity before persisting (single write path, so
+      // every fresh row is stamped; cached/older rows keep their own tags).
+      cell.run_type = "task_completion";
+      cell.run_id = runId;
+      cell.generated_at = runTimestamp;
       // Synchronous tail: append + counters happen without yielding, so two
       // workers cannot interleave their writes or accumulator updates.
       appendRow(config.outputPath, cell);

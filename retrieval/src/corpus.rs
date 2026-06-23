@@ -47,6 +47,16 @@ impl From<&ToolSpec> for ratel_ai_core::Tool {
     }
 }
 
+/// One gold function call: the expected tool plus, per argument, the list of
+/// acceptable values (BFCL's `possible_answer` shape). `args` values are kept as
+/// raw JSON so nested dicts/lists survive for the argument-level (AST) judge.
+/// Empty for corpora that ship no argument ground truth (MetaTool, ToolRet).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoldCall {
+    pub tool: String,
+    pub args: serde_json::Map<String, Value>,
+}
+
 /// A skill definition — an authored knowledge/procedure document. Mirrors
 /// `ratel_ai_core::Skill`: the indexed fields (`name`, `description`, `tags`)
 /// drive BM25 ranking; `body` carries the markdown content (the dispatch
@@ -113,6 +123,11 @@ pub struct Scenario {
     pub judge_criteria: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Argument-level ground truth for task-completion (AST) scoring: the
+    /// acceptable values per argument. Defaults to empty for corpora without it,
+    /// so the agent layer reports an `n/a` AST verdict there.
+    #[serde(default)]
+    pub gold_calls: Vec<GoldCall>,
 }
 
 fn empty_object() -> Value {
@@ -172,6 +187,7 @@ mod tests {
             gold_tools: vec!["fs.read_file".into()],
             judge_criteria: Some("Mentions localhost".into()),
             category: Some("filesystem".into()),
+            gold_calls: Vec::new(),
         }
     }
 

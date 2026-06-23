@@ -5,6 +5,7 @@
 import { createRequire } from "node:module";
 import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
+import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 // Resolve the installed SDK version once. Used as the `ratel_version` row
 // dimension and (downstream) cache-key component, so a campaign run is
@@ -114,6 +115,8 @@ export function dollarCost(
 
 export interface MeterContext {
   scenarioId: string;
+  /** Scenario category from the corpus (e.g. `bfcl-simple`); `null`/absent when uncategorized. */
+  category?: string | null;
   arm: Arm;
   model: string;
   runIndex: number;
@@ -170,10 +173,12 @@ export async function meter(
 
   const cell: CellResult = {
     scenario_id: ctx.scenarioId,
+    category: ctx.category ?? null,
     arm: ctx.arm,
     model: ctx.model,
     run_index: ctx.runIndex,
     ratel_version: SDK_VERSION,
+    ratel_ai_core_version: RATEL_AI_CORE_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
     seed: ctx.seed,
@@ -189,6 +194,7 @@ export async function meter(
     turns: summary.turns,
     effective_tool_ids: summary.effectiveToolIds,
     programmatic_verdict: "n/a" as ProgrammaticVerdict,
+    ast_verdict: "n/a" as ProgrammaticVerdict,
     judge_verdict: "n/a",
     final_text: raw?.text ?? "",
     finish_reason: raw?.finishReason ?? (error ? "error" : "unknown"),
@@ -231,6 +237,41 @@ export function effectiveToolIds(calls: ToolCall[]): string[] {
       continue;
     }
     out.push(call.toolId);
+  }
+  return out;
+}
+
+/** A tool call after gateway unwrapping: the canonical tool id + the args. */
+export interface EffectiveCall {
+  toolId: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Like {@link effectiveToolIds} but preserves each call's arguments — the
+ * argument-level (AST) judge needs them. `search_tools` is dropped; an
+ * `invoke_tool` call is unwrapped to its inner tool id and inner args (the SDK
+ * may nest the inner args under `args` or spread them alongside `toolId`, so we
+ * handle both). Direct tool calls pass through unchanged.
+ */
+export function effectiveCalls(calls: ToolCall[]): EffectiveCall[] {
+  const out: EffectiveCall[] = [];
+  for (const call of calls) {
+    if (call.toolId === SEARCH_TOOLS_ID) continue;
+    if (call.toolId === INVOKE_TOOL_ID) {
+      const inner = call.args?.toolId;
+      if (typeof inner !== "string") continue;
+      const nested = call.args?.args;
+      const args =
+        nested && typeof nested === "object" && !Array.isArray(nested)
+          ? (nested as Record<string, unknown>)
+          : Object.fromEntries(
+              Object.entries(call.args ?? {}).filter(([k]) => k !== "toolId" && k !== "args"),
+            );
+      out.push({ toolId: inner, args });
+      continue;
+    }
+    out.push({ toolId: call.toolId, args: call.args ?? {} });
   }
   return out;
 }

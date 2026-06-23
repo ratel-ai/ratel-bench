@@ -22,6 +22,8 @@ function retrievalRow(over: {
   k?: number;
   gold_count?: number;
   ndcg_at_k?: number;
+  precision_at_k?: number;
+  complete_at_k?: boolean;
   category?: string;
 }) {
   return {
@@ -33,9 +35,10 @@ function retrievalRow(over: {
     pool_size: over.target_pool_size,
     gold_count: over.gold_count ?? 1,
     recall_at_k: over.recall_at_k,
-    precision_at_k: 0,
+    precision_at_k: over.precision_at_k ?? 0,
     reciprocal_rank: over.reciprocal_rank,
     hit_at_k: over.hit_at_k,
+    complete_at_k: over.complete_at_k,
     ndcg_at_k: over.ndcg_at_k ?? over.reciprocal_rank,
   };
 }
@@ -43,6 +46,7 @@ function retrievalRow(over: {
 function cell(over: Partial<CellResult>): CellResult {
   return {
     scenario_id: "s1",
+    category: null,
     arm: "control-baseline" as Arm,
     model: "gpt-5.4-mini",
     run_index: 0,
@@ -61,6 +65,7 @@ function cell(over: Partial<CellResult>): CellResult {
     non_gateway_calls: 1,
     turns: 1,
     programmatic_verdict: "pass",
+    ast_verdict: "n/a",
     judge_verdict: "n/a",
     final_text: "ok",
     finish_reason: "stop",
@@ -113,6 +118,34 @@ describe("statsByArmModel", () => {
     expect(control?.mean_input_tokens).toBe(1250);
     expect(ratel?.mean_input_tokens).toBe(250);
     expect(ratel?.success_rate).toBe(1);
+  });
+
+  it("combines BFCL simple + multiple into one `bfcl` agent row (coarse category)", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0", category: "bfcl-simple", arm: "ratel-full" }),
+      cell({ scenario_id: "bfcl-multiple-0", category: "bfcl-multiple", arm: "ratel-full" }),
+    ];
+    const stats = statsByArmModel(cells);
+    // Agent metrics pool single+multi into a single `bfcl` group (retrieval stays split).
+    expect(stats).toHaveLength(1);
+    expect(stats[0].category).toBe("bfcl");
+    expect(stats[0].scenarios).toBe(2);
+  });
+
+  it("computes task_completion_rate from ast_verdict (null when no AST verdicts)", () => {
+    const stats = statsByArmModel([
+      cell({ scenario_id: "a", category: "bfcl-simple", arm: "ratel-full", ast_verdict: "pass" }),
+      cell({ scenario_id: "b", category: "bfcl-simple", arm: "ratel-full", ast_verdict: "fail" }),
+    ]);
+    expect(stats[0].task_completion_rate).toBe(0.5);
+    // A group with only n/a AST verdicts → null (rendered as "—").
+    const naStats = statsByArmModel([cell({ arm: "control-baseline", ast_verdict: "n/a" })]);
+    expect(naStats[0].task_completion_rate).toBeNull();
+  });
+
+  it("normalizes a missing category to (uncategorized)", () => {
+    const stats = statsByArmModel([cell({ arm: "ratel-full" })]);
+    expect(stats[0].category).toBe("(uncategorized)");
   });
 
   it("averages per-scenario means across scenarios — equal weight per scenario, regardless of run count", () => {
@@ -311,6 +344,12 @@ describe("corpusOf", () => {
   it("recognizes toolret ids", () => {
     expect(corpusOf("toolret-001")).toBe("toolret");
   });
+  it("separates BFCL simple and multiple into distinct corpora", () => {
+    // Both subsets are single-gold, so the corpus prefix (not gold count) is
+    // what splits them into separate panels.
+    expect(corpusOf("bfcl-simple-simple_0")).toBe("bfcl-simple");
+    expect(corpusOf("bfcl-multiple-multiple_0")).toBe("bfcl-multiple");
+  });
   it("falls back to 'other' for unprefixed ids", () => {
     expect(corpusOf("fs-001")).toBe("other");
     expect(corpusOf("anything-else")).toBe("other");
@@ -405,6 +444,52 @@ describe("retrievalByPoolSize", () => {
     expect(summaries[0].median_recall).toBeCloseTo(0.75);
     expect(summaries[0].hit_rate).toBe(1);
     expect(summaries[1].hit_rate).toBe(0);
+  });
+
+  it("aggregates complete@K (all-gold-in-topK) and precision separately from hit rate", () => {
+    const rows = [
+      // hit but NOT complete (multi-gold partial), with precision 0.5
+      retrievalRow({
+        scenario_id: "s1",
+        target_pool_size: 30,
+        gold_count: 2,
+        recall_at_k: 0.5,
+        precision_at_k: 0.5,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        complete_at_k: false,
+      }),
+      // hit AND complete, precision 1
+      retrievalRow({
+        scenario_id: "s2",
+        target_pool_size: 30,
+        gold_count: 2,
+        recall_at_k: 1,
+        precision_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+        complete_at_k: true,
+      }),
+    ];
+    const [s] = retrievalByPoolSize(rows);
+    expect(s.hit_rate).toBe(1); // both hit
+    expect(s.complete_rate).toBe(0.5); // only one complete
+    expect(s.mean_precision).toBeCloseTo(0.75);
+  });
+
+  it("falls back to hit_at_k for complete@K when the row predates the field", () => {
+    const rows = [
+      // No complete_at_k provided → treated as its hit value.
+      retrievalRow({
+        scenario_id: "s1",
+        target_pool_size: 30,
+        recall_at_k: 1,
+        reciprocal_rank: 1,
+        hit_at_k: true,
+      }),
+    ];
+    const [s] = retrievalByPoolSize(rows);
+    expect(s.complete_rate).toBe(1);
   });
 
   it("aggregates nDCG into mean and median per cell", () => {
@@ -659,11 +744,12 @@ describe("renderReport", () => {
     ];
     const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
     // Headline shows "—" in the pool column for the oracle row, and a real catalog count.
-    expect(md).toMatch(/\| control-oracle \| [^|]+ \| — \|/);
+    // Columns: arm | model | category | pool | catalog ...
+    expect(md).toMatch(/\| control-oracle \| [^|]+ \| [^|]+ \| — \|/);
     // The catalog column carries 1.5 for oracle (mean of gold counts 1 and 2).
     expect(md).toMatch(/control-oracle.*\| — \| 1\.5/);
     // Sweep arms keep their literal pool size in the pool column.
-    expect(md).toMatch(/\| control-baseline \| [^|]+ \| 30 \|/);
+    expect(md).toMatch(/\| control-baseline \| [^|]+ \| [^|]+ \| 30 \|/);
   });
 
   it("renders one retrieval panel per (corpus, subset) when input spans both", () => {

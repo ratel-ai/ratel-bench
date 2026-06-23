@@ -17,6 +17,8 @@ export interface RetrievalRow {
   category?: string;
   target_pool_size: number;
   actual_pool_size: number;
+  /** BM25 engine version (= `ratel-ai-core` crate) this row was scored with. */
+  ratel_ai_core_version?: string;
   k: number;
   pool_size: number;
   gold_count: number;
@@ -42,9 +44,31 @@ export function mean(xs: number[]): number {
   return xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
+/** Normalize a (possibly absent) cell category into a stable grouping key. */
+export function categoryOf(c: Pick<CellResult, "category">): string {
+  return c.category ?? "(uncategorized)";
+}
+
+/**
+ * Coarsen a category for AGENT aggregation: BFCL's `bfcl-simple` /
+ * `bfcl-multiple` collapse to a single `bfcl` group so task-completion and
+ * token/cost savings are reported combined (not per scenario type). Retrieval
+ * panels stay split — they key off `corpusOf(scenario_id)`, not this. Other
+ * corpora's categories pass through unchanged.
+ */
+export function coarseCategory(category: string): string {
+  return category === "bfcl-simple" || category === "bfcl-multiple" ? "bfcl" : category;
+}
+
 export interface ArmModelStats {
   arm: Arm;
   model: string;
+  /**
+   * Scenario category (e.g. `bfcl-simple`, `bfcl-multiple`, `metatool-single`)
+   * or `(uncategorized)`. Part of the grouping key so corpora with multiple
+   * scenario types (BFCL) keep them on separate rows.
+   */
+  category: string;
   /**
    * Pool size this row aggregates; sweeps emit one row per (arm, model, pool_size).
    * `null` for pool-size-agnostic arms (e.g. `control-oracle`) — exactly one row
@@ -55,8 +79,14 @@ export interface ArmModelStats {
   scenarios: number;
   /** Total cells (= scenarios × runs_per_scenario_for_this_group). */
   n: number;
-  /** Mean across per-scenario success rates (passes / runs, averaged across scenarios). */
+  /** Mean across per-scenario *selection* success rates (programmatic|judge pass / runs). */
   success_rate: number;
+  /**
+   * Mean across per-scenario *task-completion* rates (AST: right function AND
+   * arguments). `null` when no scenario in the group has argument ground truth
+   * (non-BFCL corpora) — render as "—".
+   */
+  task_completion_rate: number | null;
   /**
    * Mean catalog (= tools the agent actually saw) size across cells. Counts
    * direct tools AND gateway tools (`search_tools` / `invoke_tool`) — the
@@ -75,10 +105,13 @@ export interface ArmModelStats {
 interface ScenarioStats {
   arm: Arm;
   model: string;
+  category: string;
   pool_size: number | null;
   scenario_id: string;
-  /** Passes / runs for this scenario in this (arm, model, pool_size). */
+  /** Selection passes / runs for this scenario in this (arm, model, pool_size). */
   success_rate: number;
+  /** AST passes / ast-applicable runs; `null` when the scenario has no arg ground truth. */
+  task_rate: number | null;
   mean_catalog: number;
   mean_input: number;
   mean_total: number;
@@ -105,11 +138,18 @@ interface ScenarioStats {
  * of how many other scenarios ran 1× or 10×. This is the natural reading
  * of "what fraction of scenarios succeed" when runs-per-scenario varies.
  */
-export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
+/**
+ * @param coarsen When `true` (default), BFCL `bfcl-simple` + `bfcl-multiple`
+ * pool into one `bfcl` agent group (the `REPORT.md` behavior). Pass `false` to
+ * keep them split per subset — used by the BFCL website report.
+ */
+export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelStats[] {
+  const cat = (c: Pick<CellResult, "category">): string =>
+    coarsen ? coarseCategory(categoryOf(c)) : categoryOf(c);
   // Stage 1: per (scenario, arm, model, pool_size) → per-scenario means.
   const byScenario = new Map<string, CellResult[]>();
   for (const c of cells) {
-    const key = `${c.scenario_id}::${c.arm}::${c.model}::${c.pool_size}`;
+    const key = `${c.scenario_id}::${c.arm}::${c.model}::${cat(c)}::${c.pool_size}`;
     const arr = byScenario.get(key) ?? [];
     arr.push(c);
     byScenario.set(key, arr);
@@ -120,12 +160,20 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
     const passes = arr.filter(
       (c) => c.programmatic_verdict === "pass" || c.judge_verdict === "pass",
     ).length;
+    // Task-completion: only over runs that carry an AST verdict (BFCL); null otherwise.
+    const astCells = arr.filter((c) => c.ast_verdict !== "n/a");
+    const task_rate =
+      astCells.length > 0
+        ? astCells.filter((c) => c.ast_verdict === "pass").length / astCells.length
+        : null;
     perScenario.push({
       arm: head.arm,
       model: head.model,
+      category: cat(head),
       pool_size: head.pool_size,
       scenario_id: head.scenario_id,
       success_rate: passes / arr.length,
+      task_rate,
       mean_catalog: mean(arr.map((c) => c.catalog_size)),
       mean_input: mean(arr.map((c) => c.input_tokens)),
       mean_total: mean(arr.map((c) => c.total_tokens)),
@@ -139,7 +187,7 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
   // Stage 2: per (arm, model, pool_size) → mean across per-scenario means.
   const byGroup = new Map<string, ScenarioStats[]>();
   for (const p of perScenario) {
-    const key = `${p.arm}::${p.model}::${p.pool_size}`;
+    const key = `${p.arm}::${p.model}::${p.category}::${p.pool_size}`;
     const arr = byGroup.get(key) ?? [];
     arr.push(p);
     byGroup.set(key, arr);
@@ -150,10 +198,15 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
     out.push({
       arm: head.arm,
       model: head.model,
+      category: head.category,
       pool_size: head.pool_size,
       scenarios: ps.length,
       n: ps.reduce((acc, p) => acc + p.runs, 0),
       success_rate: mean(ps.map((p) => p.success_rate)),
+      task_completion_rate: (() => {
+        const rates = ps.map((p) => p.task_rate).filter((r): r is number => r !== null);
+        return rates.length > 0 ? mean(rates) : null;
+      })(),
       mean_catalog_size: mean(ps.map((p) => p.mean_catalog)),
       mean_input_tokens: mean(ps.map((p) => p.mean_input)),
       mean_total_tokens: mean(ps.map((p) => p.mean_total)),
@@ -165,6 +218,7 @@ export function statsByArmModel(cells: CellResult[]): ArmModelStats[] {
   return out.sort(
     (a, b) =>
       a.model.localeCompare(b.model) ||
+      a.category.localeCompare(b.category) ||
       a.arm.localeCompare(b.arm) ||
       comparePoolSizes(a.pool_size, b.pool_size),
   );
@@ -180,6 +234,7 @@ function comparePoolSizes(a: number | null, b: number | null): number {
 
 export interface SavingsRow {
   model: string;
+  category: string;
   pool_size: number;
   control_mean_input: number;
   ratel_mean_input: number;
@@ -212,11 +267,12 @@ function pctSavings(control: number, ratel: number): number {
  * so its tokens/turns are joined per-model and shown identically across all
  * pool rows for that model.
  */
-export function savingsByModel(cells: CellResult[]): SavingsRow[] {
-  const stats = statsByArmModel(cells);
+export function savingsByModel(cells: CellResult[], coarsen = true): SavingsRow[] {
+  const stats = statsByArmModel(cells, coarsen);
+  // Oracle is pool-size-agnostic but still per-category, so key it by both.
   const oracleByModel = new Map<string, ArmModelStats>();
   for (const s of stats) {
-    if (s.arm === "control-oracle") oracleByModel.set(s.model, s);
+    if (s.arm === "control-oracle") oracleByModel.set(`${s.model}::${s.category}`, s);
   }
   // Skip oracle (and any other agnostic arm) when grouping for the per-pool
   // pairing — its `pool_size` is `null` and would never pair with control/ratel
@@ -224,7 +280,7 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
   const byGroup = new Map<string, ArmModelStats[]>();
   for (const s of stats) {
     if (s.pool_size === null) continue;
-    const key = `${s.model}::${s.pool_size}`;
+    const key = `${s.model}::${s.category}::${s.pool_size}`;
     const arr = byGroup.get(key) ?? [];
     arr.push(s);
     byGroup.set(key, arr);
@@ -234,9 +290,10 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
     const control = arr.find((s) => s.arm === "control-baseline");
     const ratel = arr.find((s) => s.arm === "ratel-full");
     if (!control || !ratel || control.pool_size === null) continue;
-    const oracle = oracleByModel.get(control.model);
+    const oracle = oracleByModel.get(`${control.model}::${control.category}`);
     out.push({
       model: control.model,
+      category: control.category,
       pool_size: control.pool_size,
       control_mean_input: control.mean_input_tokens,
       ratel_mean_input: ratel.mean_input_tokens,
@@ -256,7 +313,12 @@ export function savingsByModel(cells: CellResult[]): SavingsRow[] {
       wall_savings_pct: pctSavings(control.mean_wall_ms, ratel.mean_wall_ms),
     });
   }
-  return out.sort((a, b) => a.model.localeCompare(b.model) || a.pool_size - b.pool_size);
+  return out.sort(
+    (a, b) =>
+      a.model.localeCompare(b.model) ||
+      a.category.localeCompare(b.category) ||
+      a.pool_size - b.pool_size,
+  );
 }
 
 /**
@@ -280,6 +342,8 @@ export interface RetrievalSummary {
   k: number;
   pool_size: number;
   n: number;
+  mean_precision: number;
+  median_precision: number;
   mean_recall: number;
   median_recall: number;
   /** Fraction of queries with recall == 1.0 (every gold in top-K). Equals
@@ -289,7 +353,10 @@ export interface RetrievalSummary {
   median_mrr: number;
   mean_ndcg: number;
   median_ndcg: number;
+  /** hit@K — for single-gold corpora (e.g. BFCL) this is accuracy@K. */
   hit_rate: number;
+  /** Fraction of scenarios with *every* gold tool in the top-K. */
+  complete_rate: number;
 }
 
 /**
@@ -299,6 +366,11 @@ export interface RetrievalSummary {
  * by that prefix so multi-corpus runs render one table per source.
  */
 export function corpusOf(scenarioId: string): string {
+  // BFCL ships two subsets that BOTH have a single gold tool, so `subsetOf`
+  // can't separate them — the corpus prefix does. Check these before the
+  // generic prefixes so each renders as its own panel.
+  if (scenarioId.startsWith("bfcl-simple-")) return "bfcl-simple";
+  if (scenarioId.startsWith("bfcl-multiple-")) return "bfcl-multiple";
   if (scenarioId.startsWith("metatool-")) return "metatool";
   if (scenarioId.startsWith("toolret-")) return "toolret";
   if (scenarioId.startsWith("sragents-")) return "sragents";
@@ -364,6 +436,7 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       string,
       string,
     ];
+    const precisions = arr.map((r) => r.precision_at_k);
     const recalls = arr.map((r) => r.recall_at_k);
     const mrrs = arr.map((r) => r.reciprocal_rank);
     const ndcgs = arr.map((r) => r.ndcg_at_k);
@@ -374,6 +447,8 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       k: Number(kStr),
       pool_size: Number(poolStr),
       n: arr.length,
+      mean_precision: mean(precisions),
+      median_precision: median(precisions),
       mean_recall: mean(recalls),
       median_recall: median(recalls),
       // complete = every gold in top-K. Prefer the explicit per-row flag;
@@ -384,6 +459,9 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
       mean_ndcg: mean(ndcgs),
       median_ndcg: median(ndcgs),
       hit_rate: mean(arr.map((r) => (r.hit_at_k ? 1 : 0))),
+      // `complete_at_k` may be absent on pre-change rows → treat as hit (true
+      // for single-gold, which is the only case those older rows covered).
+      complete_rate: mean(arr.map((r) => ((r.complete_at_k ?? r.hit_at_k) ? 1 : 0))),
     });
   }
   // tool before skill within a subset, so the multi-tool panels read
@@ -402,6 +480,7 @@ export function retrievalByPoolSize(rows: RetrievalRow[]): RetrievalSummary[] {
 export interface FailureCounts {
   arm: Arm;
   model: string;
+  category: string;
   pool_size: number | null;
   pass: number;
   fail: number;
@@ -413,7 +492,7 @@ export interface FailureCounts {
 export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
   const groups = new Map<string, CellResult[]>();
   for (const c of cells) {
-    const key = `${c.arm}::${c.model}::${c.pool_size}`;
+    const key = `${c.arm}::${c.model}::${coarseCategory(categoryOf(c))}::${c.pool_size}`;
     const arr = groups.get(key) ?? [];
     arr.push(c);
     groups.set(key, arr);
@@ -424,6 +503,7 @@ export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
     out.push({
       arm: head.arm,
       model: head.model,
+      category: coarseCategory(categoryOf(head)),
       pool_size: head.pool_size,
       pass: arr.filter((c) => c.programmatic_verdict === "pass").length,
       fail: arr.filter((c) => c.programmatic_verdict === "fail").length,
@@ -438,6 +518,7 @@ export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
   return out.sort(
     (a, b) =>
       a.model.localeCompare(b.model) ||
+      a.category.localeCompare(b.category) ||
       a.arm.localeCompare(b.arm) ||
       comparePoolSizes(a.pool_size, b.pool_size),
   );
@@ -493,12 +574,13 @@ export function renderReport(args: {
   lines.push("## Headline");
   lines.push("");
   lines.push(
-    "| arm | model | pool | catalog | scenarios | n | success | mean input | mean total | mean turns | mean $ | mean wall |",
+    "| arm | model | category | pool | catalog | scenarios | n | selection | task-completion | mean input | mean total | mean turns | mean $ | mean wall |",
   );
-  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const s of stats) {
+    const task = s.task_completion_rate === null ? "—" : fmtPct(s.task_completion_rate * 100);
     lines.push(
-      `| ${s.arm} | ${s.model} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} |`,
+      `| ${s.arm} | ${s.model} | ${s.category} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${task} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} |`,
     );
   }
   lines.push("");
@@ -510,13 +592,13 @@ export function renderReport(args: {
     lines.push("_No control + ratel pairs in this run._");
   } else {
     lines.push(
-      "| model | pool | input (ctrl → ratel) | input savings | total (ctrl → ratel) | total savings | $ (ctrl → ratel) | $ savings | wall (ctrl → ratel) | wall savings | oracle input | turns Δ |",
+      "| model | category | pool | input (ctrl → ratel) | input savings | total (ctrl → ratel) | total savings | $ (ctrl → ratel) | $ savings | wall (ctrl → ratel) | wall savings | oracle input | turns Δ |",
     );
-    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (const s of savings) {
       const turnsDelta = s.ratel_mean_turns - s.control_mean_turns;
       lines.push(
-        `| ${s.model} | ${s.pool_size} | ${fmtNum(s.control_mean_input)} → ${fmtNum(s.ratel_mean_input)} | **${fmtPct(s.input_savings_pct)}** | ${fmtNum(s.control_mean_total)} → ${fmtNum(s.ratel_mean_total)} | **${fmtPct(s.total_savings_pct)}** | ${fmtDollars(s.control_mean_dollars)} → ${fmtDollars(s.ratel_mean_dollars)} | **${fmtPct(s.dollar_savings_pct)}** | ${fmtSeconds(s.control_mean_wall_ms)} → ${fmtSeconds(s.ratel_mean_wall_ms)} | **${fmtPct(s.wall_savings_pct)}** | ${fmtNum(s.oracle_mean_input)} | ${turnsDelta >= 0 ? "+" : ""}${fmtNum(turnsDelta)} |`,
+        `| ${s.model} | ${s.category} | ${s.pool_size} | ${fmtNum(s.control_mean_input)} → ${fmtNum(s.ratel_mean_input)} | **${fmtPct(s.input_savings_pct)}** | ${fmtNum(s.control_mean_total)} → ${fmtNum(s.ratel_mean_total)} | **${fmtPct(s.total_savings_pct)}** | ${fmtDollars(s.control_mean_dollars)} → ${fmtDollars(s.ratel_mean_dollars)} | **${fmtPct(s.dollar_savings_pct)}** | ${fmtSeconds(s.control_mean_wall_ms)} → ${fmtSeconds(s.ratel_mean_wall_ms)} | **${fmtPct(s.wall_savings_pct)}** | ${fmtNum(s.oracle_mean_input)} | ${turnsDelta >= 0 ? "+" : ""}${fmtNum(turnsDelta)} |`,
       );
     }
   }
@@ -555,12 +637,12 @@ export function renderReport(args: {
       lines.push(`### ${corpus} / ${subset} / ${mode}-retrieval`);
       lines.push("");
       lines.push(
-        "| K | pool size | n | hit@K | complete set@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",
+        "| K | pool size | n | accuracy@K (hit@K) | complete@K | mean precision@K | median precision@K | mean recall@K | median recall@K | mean MRR@K | median MRR@K | mean nDCG@K | median nDCG@K |",
       );
-      lines.push("|---|---|---|---|---|---|---|---|---|---|---|");
+      lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
       for (const r of summaries) {
         lines.push(
-          `| ${r.k} | ${r.pool_size} | ${r.n} | ${fmtPct(r.hit_rate * 100)} | ${fmtPct(r.complete_set_rate * 100)} | ${r.mean_recall.toFixed(3)} | ${r.median_recall.toFixed(3)} | ${r.mean_mrr.toFixed(3)} | ${r.median_mrr.toFixed(3)} | ${r.mean_ndcg.toFixed(3)} | ${r.median_ndcg.toFixed(3)} |`,
+          `| ${r.k} | ${r.pool_size} | ${r.n} | ${fmtPct(r.hit_rate * 100)} | ${fmtPct(r.complete_rate * 100)} | ${r.mean_precision.toFixed(3)} | ${r.median_precision.toFixed(3)} | ${r.mean_recall.toFixed(3)} | ${r.median_recall.toFixed(3)} | ${r.mean_mrr.toFixed(3)} | ${r.median_mrr.toFixed(3)} | ${r.mean_ndcg.toFixed(3)} | ${r.median_ndcg.toFixed(3)} |`,
         );
       }
       lines.push("");
@@ -570,11 +652,13 @@ export function renderReport(args: {
   // 4. Failure taxonomy
   lines.push("## Failure taxonomy");
   lines.push("");
-  lines.push("| arm | model | pool | pass | fail | errored | missing gold | step-limit |");
-  lines.push("|---|---|---|---|---|---|---|---|");
+  lines.push(
+    "| arm | model | category | pool | pass | fail | errored | missing gold | step-limit |",
+  );
+  lines.push("|---|---|---|---|---|---|---|---|---|");
   for (const f of failures) {
     lines.push(
-      `| ${f.arm} | ${f.model} | ${fmtPoolSize(f.pool_size)} | ${f.pass} | ${f.fail} | ${f.errored} | ${f.missing_gold} | ${f.step_limit} |`,
+      `| ${f.arm} | ${f.model} | ${f.category} | ${fmtPoolSize(f.pool_size)} | ${f.pass} | ${f.fail} | ${f.errored} | ${f.missing_gold} | ${f.step_limit} |`,
     );
   }
   lines.push("");

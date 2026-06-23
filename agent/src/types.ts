@@ -12,6 +12,17 @@ export interface ToolSpec {
   output_schema?: Record<string, unknown>;
 }
 
+/**
+ * One gold function call: the expected tool plus, per argument, the list of
+ * acceptable values (BFCL `possible_answer` shape). Consumed by the
+ * argument-level (AST) task-completion judge. Absent for corpora that ship no
+ * argument ground truth (MetaTool, ToolRet) → AST verdict is `n/a` there.
+ */
+export interface GoldCall {
+  tool: string;
+  args: Record<string, unknown[]>;
+}
+
 export interface Scenario {
   id: string;
   prompt: string;
@@ -19,6 +30,7 @@ export interface Scenario {
   gold_tools: string[];
   judge_criteria?: string;
   category?: string;
+  gold_calls?: GoldCall[];
 }
 
 /**
@@ -93,12 +105,34 @@ export interface AgentDescriptor {
 }
 
 export interface CellResult {
+  /**
+   * Export kind, always `"task_completion"` for agent rows. Lets a consumer
+   * pool these with retrieval rows and tell them apart. Optional because rows
+   * written before this field existed don't carry it.
+   */
+  run_type?: "task_completion";
+  /** Unique id for the `run()` invocation that produced this row; shared by every cell of the run. */
+  run_id?: string;
+  /** ISO-8601 timestamp of the run; identical across all cells of the run. */
+  generated_at?: string;
   scenario_id: string;
+  /**
+   * Scenario category from the corpus (e.g. `bfcl-simple`, `bfcl-multiple`,
+   * `metatool-single`). Carried through so the report can keep scenario types
+   * separate. `null` for older rows / uncategorized corpora.
+   */
+  category: string | null;
   arm: Arm;
   model: string;
   run_index: number;
   /** `@ratel-ai/sdk` version this row was produced against. Cache key dimension. */
   ratel_version: string;
+  /**
+   * `ratel-ai-core` version resolved from the repo-root `Cargo.lock` — the same
+   * authoritative value the retrieval layer stamps. The cross-layer alignment key
+   * `create-report` verifies. Optional: older rows predate it.
+   */
+  ratel_ai_core_version?: string;
   /** Tools the model directly sees this run (= what its context pays for). */
   catalog_size: number;
   /**
@@ -124,6 +158,12 @@ export interface CellResult {
   effective_tool_ids: string[];
   // Outcome
   programmatic_verdict: ProgrammaticVerdict;
+  /**
+   * Argument-level task-completion verdict (right function AND right arguments,
+   * BFCL AST-style). `n/a` for corpora without argument ground truth
+   * (MetaTool/ToolRet) or older rows that predate the AST judge.
+   */
+  ast_verdict: ProgrammaticVerdict;
   judge_verdict: JudgeVerdict;
   /**
    * Free-form rationale from the LLM judge for the most recent verdict, kept
