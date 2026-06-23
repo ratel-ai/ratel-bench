@@ -37,7 +37,13 @@ CLAUDE.local.md
 .claude/scheduled_tasks.lock
 
 # Benchmark outputs (per ADR-0007: corpus and results are not snapshotted)
-/results
+# — except the published BFCL report, which the website repo consumes.
+/results/*
+!/results/reports/
+/results/reports/*
+!/results/reports/bfcl/
+/results/reports/bfcl/*
+!/results/reports/bfcl/report.json
 fixtures/
 test-data/
 agent/results/
