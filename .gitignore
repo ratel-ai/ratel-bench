@@ -37,6 +37,7 @@ CLAUDE.local.md
 .claude/scheduled_tasks.lock
 
 # Benchmark outputs (per ADR-0007: corpus and results are not snapshotted)
+/results
 fixtures/
 test-data/
 agent/results/
