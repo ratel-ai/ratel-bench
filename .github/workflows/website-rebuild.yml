@@ -1,0 +1,40 @@
+# Rebuild the Ratel benchmark website when published results change here.
+#
+# The benchmark site (ratel-ai/ratel-websites, apps/benchmark) reads
+# results/reports/bfcl/report.json from this repo at BUILD time via
+# scripts/sync-ratel-docs.mjs. That site deploys independently, so a push here
+# would not otherwise refresh the published numbers. This pings a Vercel Deploy Hook.
+#
+# One-time setup:
+#   1. Vercel -> benchmark project -> Settings -> Git -> Deploy Hooks -> create one (branch: main).
+#   2. Add the URL as a repo secret named VERCEL_BENCHMARK_DEPLOY_HOOK
+#      (Settings -> Secrets and variables -> Actions).
+# Until the secret exists this job no-ops (it does not fail).
+name: Website rebuild
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "results/reports/bfcl/report.json"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger benchmark website deploy
+        env:
+          HOOK: ${{ secrets.VERCEL_BENCHMARK_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::VERCEL_BENCHMARK_DEPLOY_HOOK not set — skipping website rebuild."
+            exit 0
+          fi
+          echo "Triggering benchmark website rebuild…"
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Done."
