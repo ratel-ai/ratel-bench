@@ -148,3 +148,41 @@ export function judgeAst(goldCalls: GoldCall[] | undefined, observed: ObservedCa
     arg_mismatches: mismatches,
   };
 }
+
+/**
+ * Argument recall: across each gold call's **required** arguments (acceptable
+ * list without `""`), the fraction the model supplied with an acceptable value —
+ * a partial-credit complement to the all-or-nothing AST verdict. `0` when the
+ * gold tool wasn't called; `1` for a gold call with no required args (as long as
+ * the tool was called); `null` when there's no argument ground truth. For
+ * several candidate calls to the gold tool, the best-matching one wins; multiple
+ * gold calls are averaged.
+ */
+export function astArgRecall(
+  goldCalls: GoldCall[] | undefined,
+  observed: ObservedCall[],
+): number | null {
+  if (!goldCalls || goldCalls.length === 0) return null;
+  const perCall: number[] = [];
+  for (const gold of goldCalls) {
+    const candidates = observed.filter((o) => o.toolId === gold.tool);
+    if (candidates.length === 0) {
+      perCall.push(0);
+      continue;
+    }
+    const required = Object.entries(gold.args).filter(([, acc]) => !isOptional(acc));
+    if (required.length === 0) {
+      perCall.push(1);
+      continue;
+    }
+    let best = 0;
+    for (const cand of candidates) {
+      const matched = required.filter(
+        ([k, acc]) => k in cand.args && valueMatches(cand.args[k], acc),
+      ).length;
+      best = Math.max(best, matched / required.length);
+    }
+    perCall.push(best);
+  }
+  return perCall.reduce((a, b) => a + b, 0) / perCall.length;
+}

@@ -35,13 +35,11 @@ function task(over: Partial<TaskSummaryRow>): TaskSummaryRow {
     arm: "ratel-full",
     type: "simple",
     scenarios: 50,
-    selection_accuracy: 0.8,
     task_completion_accuracy: 0.7,
-    mean_input_tokens: 1000,
+    selection_accuracy: 0.8,
+    recall: 0.85,
     mean_total_tokens: 1100,
-    mean_dollar_cost: 0.001,
-    mean_wall_ms: 900,
-    mean_turns: 1,
+    latency_p50_ms: 900,
     ...over,
   };
 }
@@ -68,16 +66,16 @@ describe("buildReport", () => {
     const report = buildReport(
       [],
       [
-        task({ arm: "control-baseline", task_completion_accuracy: 0.6, mean_input_tokens: 30000 }),
+        task({ arm: "control-baseline", task_completion_accuracy: 0.6, mean_total_tokens: 30000 }),
         task({ arm: "control-oracle", task_completion_accuracy: 0.95 }),
-        task({ arm: "ratel-full", task_completion_accuracy: 0.84, mean_input_tokens: 3500 }),
+        task({ arm: "ratel-full", task_completion_accuracy: 0.84, mean_total_tokens: 3500 }),
       ],
       NOW,
     );
     const tc = report.ratel_versions["0.2.0"].task_completion["claude-haiku-4-5"];
     expect(Object.keys(tc).sort()).toEqual(["control-baseline", "control-oracle", "ratel-full"]);
-    expect(tc["control-baseline"].simple.metrics).toMatchObject({ mean_input_tokens: 30000 });
-    expect(tc["ratel-full"].simple.metrics).toMatchObject({ mean_input_tokens: 3500 });
+    expect(tc["control-baseline"].simple.metrics).toMatchObject({ mean_total_tokens: 30000 });
+    expect(tc["ratel-full"].simple.metrics).toMatchObject({ mean_total_tokens: 3500 });
   });
 
   it("takes the latest timestamp per (version, source, model, type)", () => {

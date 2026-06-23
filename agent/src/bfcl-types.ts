@@ -80,6 +80,8 @@ export interface TaskRow {
   selection_pass: boolean;
   /** null when the scenario has no AST ground truth. */
   task_completion_pass: boolean | null;
+  /** Argument recall: fraction of required gold args supplied with an acceptable value. null when no AST ground truth. */
+  recall: number | null;
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
@@ -88,7 +90,11 @@ export interface TaskRow {
   turns: number;
 }
 
-/** Append-only task-completion summary row (one per type × LLM × arm). */
+/**
+ * Append-only task-completion summary row (one per type × LLM × arm). The five
+ * leaderboard metrics: task-completion accuracy, selection accuracy, argument
+ * recall, token cost, and p50 latency.
+ */
 export interface TaskSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
@@ -96,15 +102,17 @@ export interface TaskSummaryRow {
   model: string; // LLM name
   arm: string; // control-baseline | control-oracle | ratel-full | …
   type: BfclType;
-  scenarios: number;
-  selection_accuracy: number;
-  /** null when no scenario in the group carried an AST verdict. */
+  scenarios: number; // n (denominator)
+  /** 1 — right function AND arguments (BFCL AST). null when no AST ground truth. */
   task_completion_accuracy: number | null;
-  mean_input_tokens: number;
+  /** 2 — right function (name only). */
+  selection_accuracy: number;
+  /** 3 — mean argument recall (partial credit on required args). null when no AST ground truth. */
+  recall: number | null;
+  /** 4 — token cost: mean total (input+output) tokens per scenario. */
   mean_total_tokens: number;
-  mean_dollar_cost: number;
-  mean_wall_ms: number;
-  mean_turns: number;
+  /** 5 — p50 (median) wall-clock latency in ms. */
+  latency_p50_ms: number;
 }
 
 export type SummaryRow = RetrievalSummaryRow | TaskSummaryRow;

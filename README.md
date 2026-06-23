@@ -297,21 +297,24 @@ pnpm -F @ratel-ai/benchmark bfcl-report
   "true_answers": { "gold_tools": ["calculate_triangle_area"],
                     "gold_calls": [ { "tool": "calculate_triangle_area", "args": { "base": [10], "height": [5] } } ] },
   "llm_answer": [ { "toolId": "calculate_triangle_area", "args": { "base": 10, "height": 5 } } ],
-  "selection_pass": true, "task_completion_pass": true,
+  "selection_pass": true, "task_completion_pass": true, "recall": 1.0,
   "input_tokens": 1234, "output_tokens": 56, "total_tokens": 1290,
   "dollar_cost": 0.0006, "wall_ms": 980, "turns": 1
 }
 ```
 
-**Task-completion summary** (`task-completion-summary.jsonl`, append — one row per type × LLM × arm):
+**Task-completion summary** (`task-completion-summary.jsonl`, append — one row per type × LLM × arm). Five leaderboard metrics:
 
 ```jsonc
 {
   "timestamp": "2026-06-22T10:00:00.000Z", "ratel_ai_core_version": "0.2.0",
   "source": "task_completion", "model": "claude-haiku-4-5", "arm": "ratel-full", "type": "simple",
-  "scenarios": 399, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84,
-  "mean_input_tokens": 1234, "mean_total_tokens": 1290, "mean_dollar_cost": 0.0006,
-  "mean_wall_ms": 980, "mean_turns": 1
+  "scenarios": 63,                       // n (denominator)
+  "task_completion_accuracy": 0.921,     // 1 — right function AND arguments (AST)
+  "selection_accuracy": 0.968,           // 2 — right function (name only)
+  "recall": 0.947,                       // 3 — mean argument recall (partial credit on required args)
+  "mean_total_tokens": 3699,             // 4 — token cost (input+output)
+  "latency_p50_ms": 5037                 // 5 — p50 wall-clock latency
 }
 ```
 
@@ -328,9 +331,9 @@ pnpm -F @ratel-ai/benchmark bfcl-report
       },
       "task_completion": {
         "claude-haiku-4-5": {
-          "ratel-full":       { "simple": { "timestamp": "...", "metrics": { "scenarios": 399, "selection_accuracy": 0.91, "task_completion_accuracy": 0.84, "mean_input_tokens": 3471, "mean_dollar_cost": 0.0049, "...": "..." } },
+          "ratel-full":       { "simple": { "timestamp": "...", "metrics": { "scenarios": 63, "task_completion_accuracy": 0.921, "selection_accuracy": 0.968, "recall": 0.947, "mean_total_tokens": 3699, "latency_p50_ms": 5037 } },
                                 "multiple": { "timestamp": "...", "metrics": { "...": "..." } } },
-          "control-baseline": { "simple": { "metrics": { "task_completion_accuracy": 0.82, "mean_input_tokens": 30160, "...": "..." } }, "multiple": { "...": "..." } },
+          "control-baseline": { "simple": { "metrics": { "task_completion_accuracy": 0.921, "mean_total_tokens": 29047, "latency_p50_ms": 6200, "...": "..." } }, "multiple": { "...": "..." } },
           "control-oracle":   { "simple": { "metrics": { "...": "..." } }, "multiple": { "...": "..." } }
         }
       }

@@ -22,6 +22,7 @@ import type {
   TaskSummaryRow,
 } from "./bfcl-types.js";
 import { appendJsonl, readJsonl } from "./io.js";
+import { astArgRecall } from "./judges/ast.js";
 import { effectiveCalls } from "./metering.js";
 import { resolveRepoPath } from "./paths.js";
 import { corpusOf, mean, median } from "./report.js";
@@ -150,6 +151,7 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[], arm?: string)
       llm_answer: effectiveCalls(c.tool_calls),
       selection_pass: c.programmatic_verdict === "pass",
       task_completion_pass: c.ast_verdict === "n/a" ? null : c.ast_verdict === "pass",
+      recall: astArgRecall(scenario?.gold_calls, effectiveCalls(c.tool_calls)),
       input_tokens: c.input_tokens,
       output_tokens: c.output_tokens,
       total_tokens: c.total_tokens,
@@ -171,6 +173,7 @@ function summarizeTask(rows: TaskRow[]): TaskSummaryRow[] {
   for (const [key, arr] of groups) {
     const [type, model, arm] = key.split("::");
     const astRows = arr.filter((r) => r.task_completion_pass !== null);
+    const recalls = arr.map((r) => r.recall).filter((x): x is number => x !== null);
     out.push({
       timestamp: latest(arr.map((r) => r.generated_at)),
       ratel_ai_core_version:
@@ -180,14 +183,12 @@ function summarizeTask(rows: TaskRow[]): TaskSummaryRow[] {
       arm,
       type: type as BfclType,
       scenarios: arr.length,
-      selection_accuracy: mean(arr.map((r) => (r.selection_pass ? 1 : 0))),
       task_completion_accuracy:
         astRows.length === 0 ? null : mean(astRows.map((r) => (r.task_completion_pass ? 1 : 0))),
-      mean_input_tokens: mean(arr.map((r) => r.input_tokens)),
+      selection_accuracy: mean(arr.map((r) => (r.selection_pass ? 1 : 0))),
+      recall: recalls.length === 0 ? null : mean(recalls),
       mean_total_tokens: mean(arr.map((r) => r.total_tokens)),
-      mean_dollar_cost: mean(arr.map((r) => r.dollar_cost)),
-      mean_wall_ms: mean(arr.map((r) => r.wall_ms)),
-      mean_turns: mean(arr.map((r) => r.turns)),
+      latency_p50_ms: median(arr.map((r) => r.wall_ms)),
     });
   }
   return out.sort(

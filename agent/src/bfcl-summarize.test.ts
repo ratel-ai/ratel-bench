@@ -177,6 +177,52 @@ describe("summarizeBfcl — task completion", () => {
     expect(multiple?.task_completion_accuracy).toBeNull(); // only n/a verdict
   });
 
+  it("computes argument recall as partial credit, and emits the 5-metric summary", () => {
+    const sc: Scenario[] = [
+      {
+        id: "bfcl-simple-9",
+        prompt: "q",
+        candidate_pool: [],
+        gold_tools: ["t"],
+        category: "bfcl-simple",
+        gold_calls: [{ tool: "t", args: { a: [1], b: [2] } }], // two required args
+      },
+    ];
+    const c = cell({
+      scenario_id: "bfcl-simple-9",
+      tool_calls: [{ toolId: "t", args: { a: 1, b: 99 } }], // a right, b wrong
+      effective_tool_ids: ["t"],
+      wall_ms: 700,
+    });
+    const { taskRows, taskSummary } = summarizeBfcl({
+      retrievalRows: [],
+      cells: [c],
+      scenarios: sc,
+    });
+
+    expect(taskRows[0].recall).toBe(0.5); // 1 of 2 required args
+    const s = taskSummary[0];
+    expect(s.recall).toBe(0.5);
+    expect(s.latency_p50_ms).toBe(700);
+    // exactly the five metrics (+ identity/dims + n), nothing extra
+    expect(Object.keys(s).sort()).toEqual(
+      [
+        "arm",
+        "latency_p50_ms",
+        "mean_total_tokens",
+        "model",
+        "ratel_ai_core_version",
+        "recall",
+        "scenarios",
+        "selection_accuracy",
+        "source",
+        "task_completion_accuracy",
+        "timestamp",
+        "type",
+      ].sort(),
+    );
+  });
+
   it("groups the task summary separately per arm", () => {
     const cells = [
       cell({ scenario_id: "bfcl-simple-0", arm: "ratel-full" as Arm, ast_verdict: "pass" }),
