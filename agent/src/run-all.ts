@@ -111,6 +111,12 @@ const SRAGENTS = {
   // Catalog is ~26k skills — small / mid / full.
   poolSizes: "100,1000,26262",
   topK: "1,3,5,10",
+  // LLM skill-selection campaign: a focused candidates file (full pool at k=P +
+  // ratel shortlist at k=K_ratel) feeds the with/without-ratel A/B.
+  candidatesOut: "results/raw/sragents/candidates.jsonl",
+  agentOut: "results/raw/sragents/agent.jsonl",
+  selectPool: "50",
+  selectRatelK: "10",
 } as const;
 
 function hasFlag(name: string): boolean {
@@ -233,9 +239,83 @@ function skillRetrieval(poolSizes: string = SRAGENTS.poolSizes): void {
 }
 
 /**
- * Roll the raw skill-retrieval rows up into the append-only experiment summary
- * (`results/raw/sragents/retrieval-summary.jsonl`), bucketed per dataset plus an
- * aggregate `all`. Pure transform — no recompute, no API spend.
+ * Second skill-retrieval pass producing the LLM campaign's candidate lists: at
+ * pool `P` with `--top-k K_ratel,P`, each scenario's `retrieved@k=P` is the full
+ * pool (baseline) and `retrieved@k=K_ratel` is Ratel's shortlist.
+ */
+function sragentsCandidates(): void {
+  runStep("skill-retrieval sragents (candidates)", "cargo", [
+    "run",
+    "-p",
+    "ratel-benchmark-retrieval",
+    "--release",
+    "--",
+    "skill-retrieval",
+    "--instances",
+    SRAGENTS.instances,
+    "--skills-catalog",
+    SRAGENTS.catalog,
+    "--output",
+    SRAGENTS.candidatesOut,
+    "--top-k",
+    `${SRAGENTS.selectRatelK},${SRAGENTS.selectPool}`,
+    "--pool-sizes",
+    SRAGENTS.selectPool,
+  ]);
+}
+
+/**
+ * LLM skill-selection campaign (the analog of `bfclAgentCampaign`). Gated on a
+ * provider key; conservative defaults (sampled scenarios, $5 cap) so an automated
+ * `run-all` doesn't blow the budget. `--scenarios` caps the sample. Skipped with a
+ * notice when no key is set, so the retrieval report still emits ($0, key-free).
+ */
+function sragentsSelectCampaign(skipAgent: boolean, scenarios?: string): void {
+  if (skipAgent) {
+    console.log("\n→ sragents skill-selection campaign\n  --skip-agent set, skipping.");
+    return;
+  }
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+  if (!hasOpenAI && !hasAnthropic) {
+    console.log(
+      "\n→ sragents skill-selection campaign\n" +
+        "  no provider key (OPENAI_API_KEY / ANTHROPIC_API_KEY). Skipping the LLM half; " +
+        "retrieval report still emits.",
+    );
+    return;
+  }
+  const model = hasOpenAI ? "gpt-5.4-mini" : "claude-haiku-4-5";
+  runStep("sragents skill-selection campaign", "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "sragents-select",
+    "--candidates",
+    SRAGENTS.candidatesOut,
+    "--catalog",
+    SRAGENTS.catalog,
+    "--output",
+    SRAGENTS.agentOut,
+    "--models",
+    model,
+    "--pool-size",
+    SRAGENTS.selectPool,
+    "--top-k",
+    SRAGENTS.selectRatelK,
+    "--scenarios",
+    scenarios ?? "60",
+    "--dollar-global",
+    "5",
+    "--concurrency",
+    "8",
+    "--quiet",
+  ]);
+}
+
+/**
+ * Roll the raw skill-retrieval rows (and the LLM selection cells, when present)
+ * into the append-only summaries, bucketed per dataset plus an aggregate `all`.
+ * Pure transform — no recompute, no API spend.
  */
 function sragentsSummarize(): void {
   runStep("summarize sragents", "pnpm", [
@@ -244,6 +324,8 @@ function sragentsSummarize(): void {
     "sragents-summarize",
     "--retrieval-rows",
     SRAGENTS.retrievalOut,
+    "--agent",
+    SRAGENTS.agentOut,
   ]);
 }
 
@@ -256,16 +338,26 @@ function sragentsReport(): void {
 }
 
 /**
- * Self-contained SR-Agents skill-retrieval pipeline (the mirror of `runBfcl`,
- * but retrieval-only — skill eval has no agent campaign):
- * ingest → skill-retrieval → summarize → report. Opt-in via `--sragents`.
+ * Self-contained SR-Agents pipeline (the mirror of `runBfcl`):
+ * ingest → skill-retrieval (metrics) → skill-retrieval (candidates) →
+ * LLM skill-selection campaign → summarize → report. Opt-in via `--sragents`.
  *
- * `poolSizes` overrides the BM25 sweep (`run-all --sragents --pool-sizes 100,1000`
- * for a fast run; default includes the slow 26k full-catalog pool).
+ * `poolSizes` overrides the retrieval BM25 sweep (`--pool-sizes 100,1000` for a
+ * fast run; default includes the slow 26k full-catalog pool). The LLM campaign is
+ * gated on a provider key (skipped with `--skip-agent` or when no key is set), so
+ * the retrieval report still emits $0/key-free.
  */
-function runSragents(force: boolean, skipIngest: boolean, poolSizes?: string): void {
+function runSragents(
+  force: boolean,
+  skipIngest: boolean,
+  skipAgent: boolean,
+  poolSizes?: string,
+  scenarios?: string,
+): void {
   ingestSragents(force, skipIngest);
   skillRetrieval(poolSizes);
+  sragentsCandidates();
+  sragentsSelectCampaign(skipAgent, scenarios);
   sragentsSummarize();
   sragentsReport();
 }
@@ -472,11 +564,12 @@ function main(): void {
     return;
   }
 
-  // SR-Agents skill retrieval is likewise self-contained (retrieval-only, own
-  // report); `--sragents` runs just that pipeline and returns. `--pool-sizes`
-  // overrides the BM25 sweep (default includes the slow 26k full-catalog pool).
+  // SR-Agents is likewise self-contained (own report + LLM campaign); `--sragents`
+  // runs just that pipeline and returns. `--pool-sizes` overrides the retrieval
+  // BM25 sweep; `--scenarios` caps the LLM campaign sample; `--skip-agent` runs
+  // retrieval-only.
   if (hasFlag("--sragents")) {
-    runSragents(force, skipIngest, flagValue("--pool-sizes"));
+    runSragents(force, skipIngest, skipAgent, flagValue("--pool-sizes"), flagValue("--scenarios"));
     console.log("\n✓ SR-Agents run-all complete.");
     return;
   }
