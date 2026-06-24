@@ -1,9 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { summarizeSragents } from "./sragents-summarize.js";
-import type { SragentsRetrievalRow } from "./sragents-types.js";
+import type { SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 
 const TS = "2026-06-22T00:00:00.000Z";
 const CORE = "0.2.0";
+
+function cell(over: Partial<SragentsSelectCell>): SragentsSelectCell {
+  return {
+    run_type: "skill_selection",
+    generated_at: TS,
+    ratel_ai_core_version: CORE,
+    scenario_id: "sragents-toolqa_0",
+    category: "sragents-toolqa",
+    arm: "ratel-full",
+    model: "gpt-5.4-mini",
+    run_index: 0,
+    pool_size: 50,
+    candidate_count: 10,
+    gold_skill_ids: ["toolqa_1"],
+    selected_skill_ids: ["toolqa_1"],
+    input_tokens: 1000,
+    output_tokens: 20,
+    total_tokens: 1020,
+    dollar_cost: 0.001,
+    wall_ms: 700,
+    error: null,
+    ...over,
+  };
+}
 
 function retrievalRow(over: Partial<SragentsRetrievalRow>): SragentsRetrievalRow {
   return {
@@ -119,5 +143,80 @@ describe("summarizeSragents — retrieval summary", () => {
     ];
     const { retrievalSummary } = summarizeSragents({ retrievalRows: rows });
     expect(retrievalSummary.map((r) => r.dataset).sort()).toEqual(["all", "toolqa"]);
+  });
+});
+
+describe("summarizeSragents — skill selection (task)", () => {
+  it("computes per-row selection metrics (hit, complete, recall, precision)", () => {
+    const cells = [
+      // single-gold, exact hit → all 1.0
+      cell({ scenario_id: "sragents-toolqa_0", gold_skill_ids: ["a"], selected_skill_ids: ["a"] }),
+      // multi-gold, partial: 1 of 2 gold, 1 extra → recall .5, precision .5, complete=false
+      cell({
+        scenario_id: "sragents-champ_0",
+        category: "sragents-champ",
+        gold_skill_ids: ["a", "b"],
+        selected_skill_ids: ["a", "x"],
+      }),
+    ];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    const champ = taskRows.find((r) => r.dataset === "champ");
+    expect(champ).toMatchObject({
+      selection_pass: true,
+      task_completion_pass: false, // not every gold selected
+      recall: 0.5,
+      precision: 0.5,
+    });
+    const toolqa = taskRows.find((r) => r.dataset === "toolqa");
+    expect(toolqa).toMatchObject({ task_completion_pass: true, recall: 1, precision: 1 });
+  });
+
+  it("aggregates per (dataset, model, arm) + an `all` rollup", () => {
+    const cells = [
+      cell({
+        scenario_id: "sragents-toolqa_0",
+        arm: "ratel-full",
+        selected_skill_ids: ["toolqa_1"],
+      }),
+      cell({
+        scenario_id: "sragents-toolqa_1",
+        arm: "ratel-full",
+        gold_skill_ids: ["toolqa_9"],
+        selected_skill_ids: [], // miss
+      }),
+      cell({
+        scenario_id: "sragents-champ_0",
+        category: "sragents-champ",
+        arm: "ratel-full",
+        gold_skill_ids: ["c"],
+        selected_skill_ids: ["c"],
+      }),
+    ];
+    const { taskSummary } = summarizeSragents({ retrievalRows: [], cells });
+    const datasets = taskSummary
+      .filter((r) => r.arm === "ratel-full")
+      .map((r) => r.dataset)
+      .sort();
+    expect(datasets).toEqual(["all", "champ", "toolqa"]);
+    const toolqa = taskSummary.find((r) => r.dataset === "toolqa");
+    expect(toolqa).toMatchObject({
+      source: "task_completion",
+      scenarios: 2,
+      selection_accuracy: 0.5,
+    });
+    const all = taskSummary.find((r) => r.dataset === "all");
+    expect(all?.scenarios).toBe(3); // every cell rolls up
+  });
+
+  it("separates control-baseline from ratel-full under the same model", () => {
+    const cells = [
+      cell({ arm: "control-baseline", selected_skill_ids: [] }), // miss
+      cell({ arm: "ratel-full", selected_skill_ids: ["toolqa_1"] }), // hit
+    ];
+    const { taskSummary } = summarizeSragents({ retrievalRows: [], cells });
+    const base = taskSummary.find((r) => r.arm === "control-baseline" && r.dataset === "toolqa");
+    const ratel = taskSummary.find((r) => r.arm === "ratel-full" && r.dataset === "toolqa");
+    expect(base?.selection_accuracy).toBe(0);
+    expect(ratel?.selection_accuracy).toBe(1);
   });
 });
