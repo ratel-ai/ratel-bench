@@ -12,6 +12,8 @@
     "report": "tsx src/report-cli.ts",
     "bfcl-summarize": "tsx src/bfcl-summarize.ts",
     "bfcl-report": "tsx src/bfcl-report.ts",
+    "sragents-summarize": "tsx src/sragents-summarize.ts",
+    "sragents-report": "tsx src/sragents-report.ts",
     "run-all": "tsx src/run-all.ts"
   },
   "dependencies": {

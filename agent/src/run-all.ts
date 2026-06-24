@@ -104,7 +104,10 @@ const BFCL_AGENT_MODEL = "ollama:qwen3.5:4b";
 const SRAGENTS = {
   catalog: "test-data/sragents-skills.jsonl",
   instances: "test-data/sragents.jsonl",
-  retrievalOut: "results/sragents-skill-retrieval.jsonl",
+  // Mirrors the BFCL raw layout (results/raw/<corpus>/retrieval-rows.jsonl) so
+  // the summarize → report stage is identical; this keeps sragents out of the
+  // shared REPORT.md (which only discovers top-level results/*retrieval.jsonl).
+  retrievalOut: "results/raw/sragents/retrieval-rows.jsonl",
   // Catalog is ~26k skills — small / mid / full.
   poolSizes: "100,1000,26262",
   topK: "1,3,5,10",
@@ -202,7 +205,13 @@ function ingestSragents(force: boolean, skipIngest: boolean): void {
   runStep("ingest sragents", "cargo", args);
 }
 
-function skillRetrieval(): void {
+/**
+ * BM25 skill retrieval over the SR-Agents catalog. `poolSizes` defaults to the
+ * full sweep (`SRAGENTS.poolSizes`, incl. the 26k full-catalog pool); pass a
+ * smaller sweep (e.g. `100,1000`) via `run-all --sragents --pool-sizes …` for a
+ * fast run — the full-catalog pass dominates wall time.
+ */
+function skillRetrieval(poolSizes: string = SRAGENTS.poolSizes): void {
   runStep("skill-retrieval sragents", "cargo", [
     "run",
     "-p",
@@ -219,8 +228,46 @@ function skillRetrieval(): void {
     "--top-k",
     SRAGENTS.topK,
     "--pool-sizes",
-    SRAGENTS.poolSizes,
+    poolSizes,
   ]);
+}
+
+/**
+ * Roll the raw skill-retrieval rows up into the append-only experiment summary
+ * (`results/raw/sragents/retrieval-summary.jsonl`), bucketed per dataset plus an
+ * aggregate `all`. Pure transform — no recompute, no API spend.
+ */
+function sragentsSummarize(): void {
+  runStep("summarize sragents", "pnpm", [
+    "-F",
+    "@ratel-ai/benchmark",
+    "sragents-summarize",
+    "--retrieval-rows",
+    SRAGENTS.retrievalOut,
+  ]);
+}
+
+/**
+ * Rebuild `results/reports/sragents/report.json` from the append-only summary:
+ * one entry per ratel-ai-core version, latest timestamp per dataset.
+ */
+function sragentsReport(): void {
+  runStep("create sragents report", "pnpm", ["-F", "@ratel-ai/benchmark", "sragents-report"]);
+}
+
+/**
+ * Self-contained SR-Agents skill-retrieval pipeline (the mirror of `runBfcl`,
+ * but retrieval-only — skill eval has no agent campaign):
+ * ingest → skill-retrieval → summarize → report. Opt-in via `--sragents`.
+ *
+ * `poolSizes` overrides the BM25 sweep (`run-all --sragents --pool-sizes 100,1000`
+ * for a fast run; default includes the slow 26k full-catalog pool).
+ */
+function runSragents(force: boolean, skipIngest: boolean, poolSizes?: string): void {
+  ingestSragents(force, skipIngest);
+  skillRetrieval(poolSizes);
+  sragentsSummarize();
+  sragentsReport();
 }
 
 /**
@@ -425,6 +472,15 @@ function main(): void {
     return;
   }
 
+  // SR-Agents skill retrieval is likewise self-contained (retrieval-only, own
+  // report); `--sragents` runs just that pipeline and returns. `--pool-sizes`
+  // overrides the BM25 sweep (default includes the slow 26k full-catalog pool).
+  if (hasFlag("--sragents")) {
+    runSragents(force, skipIngest, flagValue("--pool-sizes"));
+    console.log("\n✓ SR-Agents run-all complete.");
+    return;
+  }
+
   const only = flagValue("--only") as TargetName | undefined;
 
   const validTargets: TargetName[] = ["metatool", "toolret", "sragents"];
@@ -438,10 +494,13 @@ function main(): void {
     retrieval(spec);
   }
 
-  // SR-Agents skill retrieval (its own ingest + subcommand shape).
+  // SR-Agents skill retrieval (its own ingest + subcommand shape, then the
+  // BFCL-style summarize → report stage producing results/reports/sragents/report.json).
   if (!only || only === "sragents") {
     ingestSragents(force, skipIngest);
     skillRetrieval();
+    sragentsSummarize();
+    sragentsReport();
   }
 
   agentCampaign(skipAgent);
