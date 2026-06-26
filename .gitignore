@@ -41,6 +41,7 @@ CLAUDE.local.md
 /results/*
 !/results/reports/
 /results/reports/*
+!/results/reports/retrieval-comparison.md
 !/results/reports/bfcl/
 /results/reports/bfcl/*
 !/results/reports/bfcl/report.json
