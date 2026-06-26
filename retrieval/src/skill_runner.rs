@@ -101,13 +101,62 @@ fn load_instances(path: &std::path::Path) -> anyhow::Result<Vec<SkillInstance>> 
     Ok(out)
 }
 
+/// Stratified random sample of (about) `n` instances, balanced across datasets.
+///
+/// `--scenarios n` splits the budget evenly over the datasets present in the
+/// instance file — `n / num_datasets` each, with any remainder handed to the
+/// first datasets in name order so the total lands on exactly `n` — then draws
+/// that many instances at random, without replacement, from each dataset. Whole
+/// instances are sampled, so each carries its gold skill ids.
+///
+/// Reproducible and order-independent: every dataset's instances are sorted by
+/// id before the draw, and the draw uses an RNG seeded from `(seed, dataset)`.
+/// The same `(n, seed)` therefore yields the same question set regardless of the
+/// file's line order — re-run with the same `--seed` to repeat an experiment on
+/// the identical questions. A dataset smaller than its quota contributes all of
+/// its instances (so the realized total can be below `n` only when some dataset
+/// is too small to fill its share).
+fn stratified_sample(instances: Vec<SkillInstance>, n: usize, seed: u64) -> Vec<SkillInstance> {
+    use rand::seq::SliceRandom;
+
+    // BTreeMap keeps datasets in a stable, name-sorted order so both the
+    // remainder distribution and the per-dataset RNG are deterministic.
+    let mut by_dataset: std::collections::BTreeMap<String, Vec<SkillInstance>> =
+        std::collections::BTreeMap::new();
+    for inst in instances {
+        by_dataset.entry(inst.dataset.clone()).or_default().push(inst);
+    }
+    let num_datasets = by_dataset.len();
+    if num_datasets == 0 {
+        return Vec::new();
+    }
+
+    let base = n / num_datasets;
+    let remainder = n % num_datasets;
+
+    let mut sampled: Vec<SkillInstance> = Vec::new();
+    for (i, (dataset, mut group)) in by_dataset.into_iter().enumerate() {
+        // The first `remainder` datasets (in name order) take one extra so the
+        // realized total equals `n` whenever every dataset can fill its share.
+        let quota = base + usize::from(i < remainder);
+        // Sort by id so the draw is independent of input order, then shuffle with
+        // a per-dataset stream so each dataset samples independently yet stably.
+        group.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut rng = crate::runner::scenario_rng(&dataset, seed);
+        group.shuffle(&mut rng);
+        group.truncate(quota.min(group.len()));
+        sampled.extend(group);
+    }
+    sampled
+}
+
 pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary> {
     let catalog = load_catalog(&config.skills_catalog_path)?;
     let by_id: HashMap<&str, &SkillSpec> = catalog.iter().map(|s| (s.id.as_str(), s)).collect();
 
     let instances = load_instances(&config.instances_path)?;
     let instances: Vec<SkillInstance> = match config.scenario_limit {
-        Some(n) => instances.into_iter().take(n).collect(),
+        Some(n) => stratified_sample(instances, n, config.seed),
         None => instances,
     };
 
@@ -379,5 +428,91 @@ mod tests {
         assert_eq!(at1["complete_at_k"], false);
         assert_eq!(at2["recall_at_k"], 1.0);
         assert_eq!(at2["complete_at_k"], true);
+    }
+
+    /// Build `count` instances for a dataset with ids `<dataset>_000..`.
+    fn dataset_instances(dataset: &str, count: usize) -> Vec<SkillInstance> {
+        (0..count)
+            .map(|i| instance(&format!("{dataset}_{i:03}"), dataset, "q", &["g"]))
+            .collect()
+    }
+
+    fn counts_by_dataset(insts: &[SkillInstance]) -> std::collections::BTreeMap<String, usize> {
+        let mut m = std::collections::BTreeMap::new();
+        for i in insts {
+            *m.entry(i.dataset.clone()).or_insert(0) += 1;
+        }
+        m
+    }
+
+    #[test]
+    fn stratified_sample_is_balanced_across_datasets() {
+        // 3 datasets, budget 6 → 2 per dataset.
+        let mut all = dataset_instances("champ", 50);
+        all.extend(dataset_instances("toolqa", 50));
+        all.extend(dataset_instances("logicbench", 50));
+
+        let sampled = stratified_sample(all, 6, 42);
+        assert_eq!(sampled.len(), 6);
+        let counts = counts_by_dataset(&sampled);
+        assert_eq!(counts["champ"], 2);
+        assert_eq!(counts["toolqa"], 2);
+        assert_eq!(counts["logicbench"], 2);
+    }
+
+    #[test]
+    fn stratified_sample_remainder_goes_to_first_datasets_by_name() {
+        // 3 datasets, budget 7 → 2 each + 1 remainder to the first dataset in
+        // name order ("champ" < "logicbench" < "toolqa").
+        let mut all = dataset_instances("toolqa", 50);
+        all.extend(dataset_instances("champ", 50));
+        all.extend(dataset_instances("logicbench", 50));
+
+        let counts = counts_by_dataset(&stratified_sample(all, 7, 42));
+        assert_eq!(counts["champ"], 3);
+        assert_eq!(counts["logicbench"], 2);
+        assert_eq!(counts["toolqa"], 2);
+    }
+
+    #[test]
+    fn stratified_sample_is_reproducible_and_order_independent() {
+        let a = dataset_instances("champ", 40);
+        let b = dataset_instances("toolqa", 40);
+
+        let mut forward = a.clone();
+        forward.extend(b.clone());
+
+        // Same instances, reversed file order — the seeded, id-sorted draw must
+        // pick the identical question set.
+        let mut reversed = b;
+        reversed.extend(a);
+        reversed.reverse();
+
+        let ids = |insts: Vec<SkillInstance>| {
+            let mut v: Vec<String> = insts.into_iter().map(|i| i.id).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            ids(stratified_sample(forward.clone(), 8, 42)),
+            ids(stratified_sample(reversed, 8, 42)),
+            "same (n, seed) must yield the same questions regardless of file order",
+        );
+        // A different seed should (very likely) change the draw.
+        assert_ne!(
+            ids(stratified_sample(forward.clone(), 8, 42)),
+            ids(stratified_sample(forward, 8, 7)),
+            "different seed should change the sampled questions",
+        );
+    }
+
+    #[test]
+    fn stratified_sample_takes_all_when_dataset_smaller_than_quota() {
+        // champ has only 3; quota would be 5 → take all 3, no panic.
+        let mut all = dataset_instances("champ", 3);
+        all.extend(dataset_instances("toolqa", 50));
+        let counts = counts_by_dataset(&stratified_sample(all, 10, 42));
+        assert_eq!(counts["champ"], 3);
+        assert_eq!(counts["toolqa"], 5);
     }
 }

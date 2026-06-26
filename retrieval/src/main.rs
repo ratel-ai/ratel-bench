@@ -79,7 +79,9 @@ enum Command {
         /// its extension replaced by `-summary.jsonl`.
         #[arg(long)]
         summary_output: Option<PathBuf>,
-        /// Limit to first N instances (full set if omitted).
+        /// Sample N instances, stratified across datasets (N/num_datasets each,
+        /// drawn at random per `--seed`); full set if omitted. Re-run with the
+        /// same N + seed to repeat on the identical questions.
         #[arg(long)]
         scenarios: Option<usize>,
         /// Top-K cutoffs, comma-separated.
@@ -88,7 +90,7 @@ enum Command {
         /// Catalog sample sizes to evaluate at, comma-separated.
         #[arg(long, value_delimiter = ',', default_values_t = [30usize, 150, 600])]
         pool_sizes: Vec<usize>,
-        /// Seed for distractor shuffling.
+        /// Seed for distractor shuffling and `--scenarios` stratified sampling.
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
