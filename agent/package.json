@@ -15,6 +15,7 @@
     "sragents-select": "tsx src/sragents-select.ts",
     "sragents-summarize": "tsx src/sragents-summarize.ts",
     "sragents-report": "tsx src/sragents-report.ts",
+    "retrieval-compare": "tsx src/retrieval-compare.ts",
     "run-all": "tsx src/run-all.ts"
   },
   "dependencies": {
