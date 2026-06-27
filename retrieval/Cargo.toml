@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-ratel-ai-core = { git = "ssh://git@github.com/ratel-ai/ratel.git", rev = "d11116cfed9b2beae1c4724b35003a90e4872800" }
+ratel-ai-core = { git = "ssh://git@github.com/ratel-ai/ratel.git", rev = "v0.3.0-semantic.2" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 anyhow = "1.0"
