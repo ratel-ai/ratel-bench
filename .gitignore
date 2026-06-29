@@ -32,6 +32,9 @@ plan.md
 progress.md
 CLAUDE.local.md
 
+# version-set baseline snapshot (Cargo.toml/lock backup during a git-tag experiment)
+.version-set-baseline/
+
 # Claude Code — personal/runtime; commit .claude/skills and .claude/settings.json
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

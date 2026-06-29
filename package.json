@@ -7,6 +7,10 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
-    "run-all": "pnpm -F @ratel-ai/benchmark run-all"
+    "run-all": "pnpm -F @ratel-ai/benchmark run-all",
+    "version-set": "pnpm -F @ratel-ai/benchmark version-set",
+    "version-reset": "pnpm -F @ratel-ai/benchmark version-reset",
+    "prune-prerelease-reports": "pnpm -F @ratel-ai/benchmark prune-prerelease-reports",
+    "retrieval-compare": "pnpm -F @ratel-ai/benchmark retrieval-compare"
   }
 }

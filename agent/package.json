@@ -16,6 +16,9 @@
     "sragents-summarize": "tsx src/sragents-summarize.ts",
     "sragents-report": "tsx src/sragents-report.ts",
     "retrieval-compare": "tsx src/retrieval-compare.ts",
+    "version-set": "tsx src/version-set.ts",
+    "version-reset": "tsx src/version-reset.ts",
+    "prune-prerelease-reports": "tsx src/prune-prerelease-reports.ts",
     "run-all": "tsx src/run-all.ts"
   },
   "dependencies": {
