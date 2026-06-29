@@ -23,6 +23,7 @@ use crate::ingest::sragents::SkillInstance;
 use crate::retrieval::evaluate_skills_at_ks;
 use crate::runner::{
     BucketAcc, BucketSummary, OverallSummary, RetrievalRow, RunSummary, evaluate_scenario,
+    parallel_map,
 };
 
 /// Inputs for one skill-retrieval run. Mirrors [`crate::runner::RunConfig`] but
@@ -38,6 +39,10 @@ pub struct SkillRunConfig {
     pub top_ks: Vec<usize>,
     pub pool_sizes: Vec<usize>,
     pub seed: u64,
+    /// Worker threads for the per-instance evaluation. `1` = sequential.
+    /// Each instance is independent and seeded by its own id; results are folded
+    /// and written in input order, so output is identical regardless of `jobs`.
+    pub jobs: usize,
 }
 
 /// Subset name for the aggregate bucket spanning every dataset.
@@ -179,26 +184,32 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
     let mut by_dataset: HashMap<String, BucketAcc> = HashMap::new();
     let mut all = BucketAcc::default();
 
-    for inst in &instances {
-        // Resolve gold skills from the catalog (ingest guarantees presence).
-        let gold_specs: Vec<SkillSpec> = inst
-            .gold_skill_ids
-            .iter()
-            .filter_map(|id| by_id.get(id.as_str()).map(|s| (*s).clone()))
-            .collect();
+    // Phase 1 — evaluate every instance (the embedding-heavy work) in parallel.
+    // Resolving gold skills is part of the per-instance closure so it stays pure.
+    let per_instance: Vec<Vec<(usize, Vec<crate::retrieval::RetrievalMetrics>)>> =
+        parallel_map(&instances, config.jobs, |inst| {
+            // Resolve gold skills from the catalog (ingest guarantees presence).
+            let gold_specs: Vec<SkillSpec> = inst
+                .gold_skill_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()).map(|s| (*s).clone()))
+                .collect();
+            evaluate_scenario(
+                &gold_specs,
+                &catalog,
+                &inst.id,
+                &inst.prompt,
+                &inst.gold_skill_ids,
+                config.seed,
+                &config.pool_sizes,
+                &config.top_ks,
+                evaluate_skills_at_ks,
+            )
+        });
 
-        let per_pool = evaluate_scenario(
-            &gold_specs,
-            &catalog,
-            &inst.id,
-            &inst.prompt,
-            &inst.gold_skill_ids,
-            config.seed,
-            &config.pool_sizes,
-            &config.top_ks,
-            evaluate_skills_at_ks,
-        );
-
+    // Phase 2 — fold + write sequentially, in input order, so accumulation and
+    // output are identical to a single-threaded run.
+    for (inst, per_pool) in instances.iter().zip(per_instance.iter()) {
         let ds_acc = by_dataset.entry(inst.dataset.clone()).or_default();
         ds_acc.scenarios += 1;
         all.scenarios += 1;
@@ -334,6 +345,7 @@ mod tests {
             top_ks: vec![1, 3],
             pool_sizes: vec![5],
             seed: 42,
+            jobs: 1,
         };
         (dir, cfg)
     }

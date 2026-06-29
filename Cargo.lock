@@ -726,7 +726,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1734,8 +1734,8 @@ dependencies = [
 
 [[package]]
 name = "ratel-ai-core"
-version = "0.3.0-hybrid.1"
-source = "git+ssh://git@github.com/ratel-ai/ratel.git?tag=v0.3.0-hybrid.1#e8db8568101bd8df78e278281300abb1e0ff0345"
+version = "0.3.0-hybrid.2"
+source = "git+ssh://git@github.com/ratel-ai/ratel.git?tag=v0.3.0-hybrid.2#66ed181809b3dd7936309a746f737ff46ab85440"
 dependencies = [
  "bm25",
  "candle-core",
@@ -1885,7 +1885,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2152,7 +2152,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

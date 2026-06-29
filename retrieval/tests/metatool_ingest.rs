@@ -94,6 +94,7 @@ fn ingest_round_trips_through_retrieval_runner() {
         top_ks: vec![1, 3],
         pool_sizes: vec![3, 6],
         seed: 42,
+        jobs: 1,
     })
     .unwrap();
     assert_eq!(summary.scenarios, 8);

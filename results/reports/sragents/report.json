@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-29T12:59:11.443Z",
+  "generated_at": "2026-06-29T15:47:57.152Z",
   "ratel_versions": {
     "0.2.0": {
       "retriever_evaluation": {
@@ -8873,6 +8873,487 @@
                 "median": -5.162158012390137,
                 "stddev": 3.362426781874947,
                 "coverage": 0.725
+              }
+            }
+          ]
+        }
+      },
+      "task_completion": {}
+    },
+    "0.3.0-hybrid.2": {
+      "retriever_evaluation": {
+        "bigcodebench": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.96,
+              "median_precision": 1,
+              "mean_recall": 0.36766666666666664,
+              "median_recall": 0.3333333333333333,
+              "mean_mrr": 0.96,
+              "median_mrr": 1,
+              "mean_ndcg": 0.96,
+              "median_ndcg": 1,
+              "accuracy": 0.96,
+              "complete_rate": 0,
+              "gold_similarity": {
+                "mean": 0.033060428034514186,
+                "median": 0.03333333507180214,
+                "stddev": 0.0005842514244028675,
+                "coverage": 1
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.7133333333333336,
+              "median_precision": 0.6666666666666666,
+              "mean_recall": 0.7846666666666668,
+              "median_recall": 0.75,
+              "mean_mrr": 0.9783333333333333,
+              "median_mrr": 1,
+              "mean_ndcg": 0.8550997975740866,
+              "median_ndcg": 1,
+              "accuracy": 1,
+              "complete_rate": 0.48,
+              "gold_similarity": {
+                "mean": 0.033060428034514186,
+                "median": 0.03333333507180214,
+                "stddev": 0.0005842514244028675,
+                "coverage": 1
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.496,
+              "median_precision": 0.4,
+              "mean_recall": 0.8930000000000001,
+              "median_recall": 1,
+              "mean_mrr": 0.9783333333333333,
+              "median_mrr": 1,
+              "mean_ndcg": 0.8928251866047424,
+              "median_ndcg": 1,
+              "accuracy": 1,
+              "complete_rate": 0.72,
+              "gold_similarity": {
+                "mean": 0.033060428034514186,
+                "median": 0.03333333507180214,
+                "stddev": 0.0005842514244028675,
+                "coverage": 1
+              }
+            }
+          ]
+        },
+        "champ": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.57,
+              "median_precision": 1,
+              "mean_recall": 0.33416666666666667,
+              "median_recall": 0.3333333333333333,
+              "mean_mrr": 0.57,
+              "median_mrr": 1,
+              "mean_ndcg": 0.57,
+              "median_ndcg": 1,
+              "accuracy": 0.57,
+              "complete_rate": 0.17,
+              "gold_similarity": {
+                "mean": 0.030673277221227948,
+                "median": 0.03292790427803993,
+                "stddev": 0.005506197863973085,
+                "coverage": 0.76
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.3633333333333333,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.5891666666666666,
+              "median_recall": 0.6666666666666666,
+              "mean_mrr": 0.6333333333333333,
+              "median_mrr": 1,
+              "mean_ndcg": 0.5769665401327851,
+              "median_ndcg": 0.6309297535714575,
+              "accuracy": 0.7,
+              "complete_rate": 0.46,
+              "gold_similarity": {
+                "mean": 0.030673277221227948,
+                "median": 0.03292790427803993,
+                "stddev": 0.005506197863973085,
+                "coverage": 0.76
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.2439999999999997,
+              "median_precision": 0.2,
+              "mean_recall": 0.6708333333333333,
+              "median_recall": 1,
+              "mean_mrr": 0.6468333333333334,
+              "median_mrr": 1,
+              "mean_ndcg": 0.6075195106271487,
+              "median_ndcg": 0.6621780785943642,
+              "accuracy": 0.76,
+              "complete_rate": 0.56,
+              "gold_similarity": {
+                "mean": 0.030673277221227948,
+                "median": 0.03292790427803993,
+                "stddev": 0.005506197863973085,
+                "coverage": 0.76
+              }
+            }
+          ]
+        },
+        "logicbench": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.31,
+              "median_precision": 0,
+              "mean_recall": 0.31,
+              "median_recall": 0,
+              "mean_mrr": 0.31,
+              "median_mrr": 0,
+              "mean_ndcg": 0.31,
+              "median_ndcg": 0,
+              "accuracy": 0.31,
+              "complete_rate": 0.31,
+              "gold_similarity": {
+                "mean": 0.03147276369449885,
+                "median": 0.032279063016176224,
+                "stddev": 0.0029558719225553486,
+                "coverage": 0.46
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.1333333333333334,
+              "median_precision": 0,
+              "mean_recall": 0.4,
+              "median_recall": 0,
+              "mean_mrr": 0.35,
+              "median_mrr": 0,
+              "mean_ndcg": 0.36285578521428746,
+              "median_ndcg": 0,
+              "accuracy": 0.4,
+              "complete_rate": 0.4,
+              "gold_similarity": {
+                "mean": 0.03147276369449885,
+                "median": 0.032279063016176224,
+                "stddev": 0.0029558719225553486,
+                "coverage": 0.46
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.092,
+              "median_precision": 0,
+              "mean_recall": 0.46,
+              "median_recall": 0,
+              "mean_mrr": 0.364,
+              "median_mrr": 0,
+              "mean_ndcg": 0.387819903681914,
+              "median_ndcg": 0,
+              "accuracy": 0.46,
+              "complete_rate": 0.46,
+              "gold_similarity": {
+                "mean": 0.03147276369449885,
+                "median": 0.032279063016176224,
+                "stddev": 0.0029558719225553486,
+                "coverage": 0.46
+              }
+            }
+          ]
+        },
+        "medcalcbench": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.93,
+              "median_precision": 1,
+              "mean_recall": 0.93,
+              "median_recall": 1,
+              "mean_mrr": 0.93,
+              "median_mrr": 1,
+              "mean_ndcg": 0.93,
+              "median_ndcg": 1,
+              "accuracy": 0.93,
+              "complete_rate": 0.93,
+              "gold_similarity": {
+                "mean": 0.033058770096947236,
+                "median": 0.03333333507180214,
+                "stddev": 0.0008402055177692203,
+                "coverage": 0.97
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.31999999999999956,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.96,
+              "median_recall": 1,
+              "mean_mrr": 0.9416666666666668,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9463092975357145,
+              "median_ndcg": 1,
+              "accuracy": 0.96,
+              "complete_rate": 0.96,
+              "gold_similarity": {
+                "mean": 0.033058770096947236,
+                "median": 0.03333333507180214,
+                "stddev": 0.0008402055177692203,
+                "coverage": 0.97
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.19399999999999962,
+              "median_precision": 0.2,
+              "mean_recall": 0.97,
+              "median_recall": 1,
+              "mean_mrr": 0.9441666666666667,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9506160631164484,
+              "median_ndcg": 1,
+              "accuracy": 0.97,
+              "complete_rate": 0.97,
+              "gold_similarity": {
+                "mean": 0.033058770096947236,
+                "median": 0.03333333507180214,
+                "stddev": 0.0008402055177692203,
+                "coverage": 0.97
+              }
+            }
+          ]
+        },
+        "theoremqa": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.85,
+              "median_precision": 1,
+              "mean_recall": 0.85,
+              "median_recall": 1,
+              "mean_mrr": 0.85,
+              "median_mrr": 1,
+              "mean_ndcg": 0.85,
+              "median_ndcg": 1,
+              "accuracy": 0.85,
+              "complete_rate": 0.85,
+              "gold_similarity": {
+                "mean": 0.032465860465581114,
+                "median": 0.03333333507180214,
+                "stddev": 0.0033575898714309207,
+                "coverage": 0.94
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.30999999999999955,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.93,
+              "median_recall": 1,
+              "mean_mrr": 0.89,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9004743802857164,
+              "median_ndcg": 1,
+              "accuracy": 0.93,
+              "complete_rate": 0.93,
+              "gold_similarity": {
+                "mean": 0.032465860465581114,
+                "median": 0.03333333507180214,
+                "stddev": 0.0033575898714309207,
+                "coverage": 0.94
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.18799999999999964,
+              "median_precision": 0.2,
+              "mean_recall": 0.94,
+              "median_recall": 1,
+              "mean_mrr": 0.8925,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9047811458664502,
+              "median_ndcg": 1,
+              "accuracy": 0.94,
+              "complete_rate": 0.94,
+              "gold_similarity": {
+                "mean": 0.032465860465581114,
+                "median": 0.03333333507180214,
+                "stddev": 0.0033575898714309207,
+                "coverage": 0.94
+              }
+            }
+          ]
+        },
+        "toolqa": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 100,
+              "mean_precision": 0.68,
+              "median_precision": 1,
+              "mean_recall": 0.68,
+              "median_recall": 1,
+              "mean_mrr": 0.68,
+              "median_mrr": 1,
+              "mean_ndcg": 0.68,
+              "median_ndcg": 1,
+              "accuracy": 0.68,
+              "complete_rate": 0.68,
+              "gold_similarity": {
+                "mean": 0.03074726267436216,
+                "median": 0.03333333507180214,
+                "stddev": 0.005524817142943892,
+                "coverage": 0.86
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 100,
+              "mean_precision": 0.26999999999999974,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.81,
+              "median_recall": 1,
+              "mean_mrr": 0.735,
+              "median_mrr": 1,
+              "mean_ndcg": 0.7541650827500019,
+              "median_ndcg": 1,
+              "accuracy": 0.81,
+              "complete_rate": 0.81,
+              "gold_similarity": {
+                "mean": 0.03074726267436216,
+                "median": 0.03333333507180214,
+                "stddev": 0.005524817142943892,
+                "coverage": 0.86
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 100,
+              "mean_precision": 0.1719999999999997,
+              "median_precision": 0.2,
+              "mean_recall": 0.86,
+              "median_recall": 1,
+              "mean_mrr": 0.7464999999999999,
+              "median_mrr": 1,
+              "mean_ndcg": 0.7748224356368945,
+              "median_ndcg": 1,
+              "accuracy": 0.86,
+              "complete_rate": 0.86,
+              "gold_similarity": {
+                "mean": 0.03074726267436216,
+                "median": 0.03333333507180214,
+                "stddev": 0.005524817142943892,
+                "coverage": 0.86
+              }
+            }
+          ]
+        },
+        "all": {
+          "timestamp": "2026-06-29T14:03:30.273030+00:00",
+          "metrics": [
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 600,
+              "mean_precision": 0.7166666666666667,
+              "median_precision": 1,
+              "mean_recall": 0.578638888888889,
+              "median_recall": 0.5,
+              "mean_mrr": 0.7166666666666667,
+              "median_mrr": 1,
+              "mean_ndcg": 0.7166666666666667,
+              "median_ndcg": 1,
+              "accuracy": 0.7166666666666667,
+              "complete_rate": 0.49,
+              "gold_similarity": {
+                "mean": 0.03203950936948966,
+                "median": 0.03333333507180214,
+                "stddev": 0.003749621565943013,
+                "coverage": 0.8316666666666667
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 600,
+              "mean_precision": 0.35166666666667,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.745638888888889,
+              "median_recall": 1,
+              "mean_mrr": 0.754722222222222,
+              "median_mrr": 1,
+              "mean_ndcg": 0.7326451472487656,
+              "median_ndcg": 1,
+              "accuracy": 0.8,
+              "complete_rate": 0.6733333333333333,
+              "gold_similarity": {
+                "mean": 0.03203950936948966,
+                "median": 0.03333333507180214,
+                "stddev": 0.003749621565943013,
+                "coverage": 0.8316666666666667
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 600,
+              "mean_precision": 0.2310000000000005,
+              "median_precision": 0.2,
+              "mean_recall": 0.7989722222222222,
+              "median_recall": 1,
+              "mean_mrr": 0.7620555555555553,
+              "median_mrr": 1,
+              "mean_ndcg": 0.7530640409222668,
+              "median_ndcg": 1,
+              "accuracy": 0.8316666666666667,
+              "complete_rate": 0.7516666666666667,
+              "gold_similarity": {
+                "mean": 0.03203950936948966,
+                "median": 0.03333333507180214,
+                "stddev": 0.003749621565943013,
+                "coverage": 0.8316666666666667
               }
             }
           ]
