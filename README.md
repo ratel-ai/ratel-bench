@@ -83,7 +83,9 @@ Output lands in `results/REPORT.md`. Re-runs skip already-recorded cells unless 
 
 ## Benchmarking a specific Ratel version
 
-Every retrieval row and agent cell is **stamped with the Ratel version it was produced under**, so reports compare versions side by side. There are **two version knobs**, and which one matters depends on the eval:
+Every retrieval row and agent cell is **stamped with the Ratel version it was produced under**, so reports compare versions side by side. **BFCL benchmarks _tools_** (function definitions — right function + right arguments); **SR-Agents benchmarks _skills_** (authored skills from the ~26k-skill catalog).
+
+There are **two version knobs**, and which one matters depends on the eval:
 
 - **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). Swap it with the `version-set` / `version-reset` bookends below.
 - **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it; you bump it in `agent/package.json` (see Scenario 4).
@@ -213,10 +215,9 @@ pnpm -F @ratel-ai/benchmark sragents-select \
   --models claude-haiku-4-5,gpt-5.4-mini \
   --scenarios 600 --concurrency 8 --dollar-global 5
 
-# 3. summarize → report → compare
+# 3. summarize → report
 pnpm -F @ratel-ai/benchmark sragents-summarize
 pnpm -F @ratel-ai/benchmark sragents-report
-pnpm retrieval-compare
 
 pnpm version-reset
 ```
@@ -228,7 +229,7 @@ pnpm version-reset
   - `--models` — comma-separated; `claude-*`, `gpt-*`, or `ollama:<tag>`. Use a *different* list than Scenario 4 for per-benchmark models.
   - `--pool-size 50 --top-k 10` — **must** match the candidate-gen slices.
   - `--concurrency 8` — parallel LLM calls. `--dollar-global 5` — hard USD cost cap for the run. `--scenarios 600` — cap; `--runs 1` repeats per cell.
-- summarize/report fold the cells into the task-completion section of `report.json`. `retrieval-compare` covers the retrieval columns; task-completion numbers live in `report.json` / the website.
+- summarize/report fold the cells into the task-completion section of `report.json`; the task-completion numbers live in `report.json` / the website.
 
 > **Cost:** the model is called 3× per scenario (3 arms): `600 × 3 × N_models` cells. The `control-baseline` and `control-oracle` arms are version-independent, so re-running them per version is redundant spend.
 
@@ -263,10 +264,9 @@ pnpm -F @ratel-ai/benchmark start \
   --models claude-sonnet-4-6 \
   --pool-sizes 100 --runs 1 --no-judge --concurrency 12
 
-# 4. summarize → report → compare
+# 4. summarize → report
 pnpm -F @ratel-ai/benchmark bfcl-summarize
 pnpm -F @ratel-ai/benchmark bfcl-report
-pnpm retrieval-compare
 
 # 5. restore baseline (and revert the package.json SDK bump if not shipping it)
 pnpm version-reset
