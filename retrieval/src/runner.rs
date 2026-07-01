@@ -34,6 +34,54 @@ pub struct RunConfig {
     pub top_ks: Vec<usize>,
     pub pool_sizes: Vec<usize>,
     pub seed: u64,
+    /// Worker threads for the per-scenario evaluation. `1` = sequential.
+    /// Parallelism only changes wall-clock: each scenario is independent and
+    /// seeded by its own id, results are accumulated/written sequentially in
+    /// input order, so the output is identical regardless of `jobs`.
+    pub jobs: usize,
+}
+
+/// Map `f` over `items` across up to `jobs` worker threads, returning results in
+/// input order. The heavy per-scenario evaluation is embarrassingly parallel
+/// (independent registries, no shared mutable state); callers then fold/write
+/// the returned Vec sequentially, so output is byte-identical to a 1-job run.
+pub(crate) fn parallel_map<T, R, F>(items: &[T], jobs: usize, f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> R + Sync,
+{
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let len = items.len();
+    let jobs = jobs.clamp(1, len.max(1));
+    if jobs == 1 {
+        return items.iter().map(&f).collect();
+    }
+
+    // One slot per item, each filled exactly once by the worker that claims that
+    // index, so the assembled Vec preserves input order.
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<R>>> = (0..len).map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= len {
+                        break;
+                    }
+                    let r = f(&items[i]);
+                    *slots[i].lock().expect("worker slot poisoned") = Some(r);
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|m| m.into_inner().expect("worker slot poisoned").expect("slot filled"))
+        .collect()
 }
 
 /// One row of retrieval-only output. Joined to agent-loop rows by `scenario_id`;
@@ -203,20 +251,26 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     // One accumulator set per `(subset, mode)` bucket.
     let mut buckets: HashMap<Bucket, BucketAcc> = HashMap::new();
 
-    for scenario in &scenarios {
-        let bucket = bucket_of(scenario);
+    // Phase 1 — evaluate every scenario (the embedding-heavy work) in parallel.
+    let per_scenario: Vec<Vec<(usize, Vec<RetrievalMetrics>)>> =
+        parallel_map(&scenarios, config.jobs, |scenario| {
+            evaluate_scenario(
+                &scenario.candidate_pool,
+                &tool_distractors,
+                &scenario.id,
+                &scenario.prompt,
+                &scenario.gold_tools,
+                config.seed,
+                &config.pool_sizes,
+                &config.top_ks,
+                evaluate_at_ks,
+            )
+        });
 
-        let per_pool = evaluate_scenario(
-            &scenario.candidate_pool,
-            &tool_distractors,
-            &scenario.id,
-            &scenario.prompt,
-            &scenario.gold_tools,
-            config.seed,
-            &config.pool_sizes,
-            &config.top_ks,
-            evaluate_at_ks,
-        );
+    // Phase 2 — fold + write sequentially, in input order, so accumulation and
+    // output are identical to a single-threaded run.
+    for (scenario, per_pool) in scenarios.iter().zip(per_scenario.iter()) {
+        let bucket = bucket_of(scenario);
 
         let acc = buckets.entry(bucket).or_default();
         acc.scenarios += 1;
@@ -624,6 +678,7 @@ mod tests {
             top_ks: vec![1, 3],
             pool_sizes: vec![1, 2, 5],
             seed: 42,
+            jobs: 1,
         };
         let summary = run_retrieval(&cfg).unwrap();
         assert_eq!(summary.scenarios, 2);
@@ -663,6 +718,7 @@ mod tests {
             top_ks: vec![3],
             pool_sizes: vec![5],
             seed: 42,
+            jobs: 1,
         };
         let summary = run_retrieval(&cfg).unwrap();
         assert_eq!(summary.scenarios, 2);
@@ -684,6 +740,7 @@ mod tests {
             top_ks: vec![3],
             pool_sizes: vec![1],
             seed: 42,
+            jobs: 1,
         };
         run_retrieval(&cfg).unwrap();
         assert!(out.exists());
@@ -717,6 +774,7 @@ mod tests {
             top_ks: vec![1, 3],
             pool_sizes: vec![1, 5],
             seed: 42,
+            jobs: 1,
         };
         let run_summary = run_retrieval(&cfg).unwrap();
         assert_eq!(run_summary.summary_path, summary_out.path());
@@ -813,6 +871,7 @@ mod tests {
             top_ks: vec![1, 3],
             pool_sizes: vec![5],
             seed: 42,
+            jobs: 1,
         };
         run_retrieval(&cfg).unwrap();
 
@@ -853,6 +912,7 @@ mod tests {
                 top_ks: vec![1],
                 pool_sizes: vec![1],
                 seed: 42,
+                jobs: 1,
             };
             run_retrieval(&cfg).unwrap();
         }

@@ -166,18 +166,17 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[], arm?: string)
 function summarizeTask(rows: TaskRow[]): TaskSummaryRow[] {
   const groups = new Map<string, TaskRow[]>();
   for (const r of rows) {
-    const key = `${r.type}::${r.model}::${r.arm}`;
+    const key = `${r.ratel_ai_core_version}::${r.type}::${r.model}::${r.arm}`;
     (groups.get(key) ?? groups.set(key, []).get(key))?.push(r);
   }
   const out: TaskSummaryRow[] = [];
   for (const [key, arr] of groups) {
-    const [type, model, arm] = key.split("::");
+    const [version, type, model, arm] = key.split("::");
     const astRows = arr.filter((r) => r.task_completion_pass !== null);
     const recalls = arr.map((r) => r.recall).filter((x): x is number => x !== null);
     out.push({
       timestamp: latest(arr.map((r) => r.generated_at)),
-      ratel_ai_core_version:
-        arr.find((r) => r.ratel_ai_core_version)?.ratel_ai_core_version ?? "unknown",
+      ratel_ai_core_version: version,
       source: "task_completion",
       model,
       arm,

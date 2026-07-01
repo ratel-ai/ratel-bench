@@ -60,6 +60,11 @@ enum Command {
         /// Seed for distractor shuffling.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        /// Worker threads for the per-scenario loop (default: detected CPU
+        /// cores). Parallelism only changes wall-clock — each scenario is
+        /// independent and seeded by its id, so results are identical to `1`.
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// Compute BM25 skill-retrieval metrics over an authored skill corpus
     /// (SR-Agents). Separate from `retrieval` (tools): the skill catalog is the
@@ -79,7 +84,9 @@ enum Command {
         /// its extension replaced by `-summary.jsonl`.
         #[arg(long)]
         summary_output: Option<PathBuf>,
-        /// Limit to first N instances (full set if omitted).
+        /// Sample N instances, stratified across datasets (N/num_datasets each,
+        /// drawn at random per `--seed`); full set if omitted. Re-run with the
+        /// same N + seed to repeat on the identical questions.
         #[arg(long)]
         scenarios: Option<usize>,
         /// Top-K cutoffs, comma-separated.
@@ -88,9 +95,14 @@ enum Command {
         /// Catalog sample sizes to evaluate at, comma-separated.
         #[arg(long, value_delimiter = ',', default_values_t = [30usize, 150, 600])]
         pool_sizes: Vec<usize>,
-        /// Seed for distractor shuffling.
+        /// Seed for distractor shuffling and `--scenarios` stratified sampling.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        /// Worker threads for the per-scenario loop (default: detected CPU
+        /// cores). Parallelism only changes wall-clock — each scenario is
+        /// independent and seeded by its id, so results are identical to `1`.
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// Convert an external corpus into the harness's normalized JSONL format.
     Ingest {
@@ -197,6 +209,14 @@ fn default_summary_path(output: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Default worker-thread count for the scenario loop: the machine's available
+/// parallelism, or 1 if it can't be detected.
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 fn fetch_via_curl(url: &str, dest: &Path) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
@@ -286,6 +306,7 @@ fn main() -> anyhow::Result<()> {
             top_k,
             pool_sizes,
             seed,
+            jobs,
         } => {
             let summary_path = summary_output.unwrap_or_else(|| default_summary_path(&output));
             let cfg = RunConfig {
@@ -296,6 +317,7 @@ fn main() -> anyhow::Result<()> {
                 top_ks: top_k,
                 pool_sizes,
                 seed,
+                jobs: jobs.unwrap_or_else(default_jobs),
             };
             let summary = run_retrieval(&cfg)?;
             println!(
@@ -315,6 +337,7 @@ fn main() -> anyhow::Result<()> {
             top_k,
             pool_sizes,
             seed,
+            jobs,
         } => {
             let summary_path = summary_output.unwrap_or_else(|| default_summary_path(&output));
             let cfg = SkillRunConfig {
@@ -326,6 +349,7 @@ fn main() -> anyhow::Result<()> {
                 top_ks: top_k,
                 pool_sizes,
                 seed,
+                jobs: jobs.unwrap_or_else(default_jobs),
             };
             let summary = run_skill_retrieval(&cfg)?;
             println!(
