@@ -174,17 +174,16 @@ function summarizeTask(rows: SragentsTaskRow[]): SragentsTaskSummaryRow[] {
   const groups = new Map<string, SragentsTaskRow[]>();
   for (const r of rows) {
     for (const ds of [r.dataset, ALL_DATASET]) {
-      const key = `${ds}::${r.model}::${r.arm}`;
+      const key = `${r.ratel_ai_core_version}::${ds}::${r.model}::${r.arm}`;
       (groups.get(key) ?? groups.set(key, []).get(key))?.push(r);
     }
   }
   const out: SragentsTaskSummaryRow[] = [];
   for (const [key, arr] of groups) {
-    const [dataset, model, arm] = key.split("::");
+    const [version, dataset, model, arm] = key.split("::");
     out.push({
       timestamp: latest(arr.map((r) => r.generated_at)),
-      ratel_ai_core_version:
-        arr.find((r) => r.ratel_ai_core_version)?.ratel_ai_core_version ?? "unknown",
+      ratel_ai_core_version: version,
       source: "task_completion",
       model,
       arm,

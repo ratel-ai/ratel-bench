@@ -543,7 +543,7 @@ describe("runner", () => {
     expect(called).toHaveLength(1);
   });
 
-  it("cache miss when ratel_version doesn't match", async () => {
+  it("reuses control cells across ratel versions (version-agnostic), re-stamped", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
     const canonical = join(tempDir, "canonical.jsonl");
@@ -561,12 +561,20 @@ describe("runner", () => {
       ...baseConfig(corpus, ephemeral),
       arms: ["control-baseline"],
       cacheSourcePath: canonical,
-      // New run at a different ratel version → cache miss, recompute.
+      // New run at a different ratel version → control arms are version-independent,
+      // so the prior cell is REUSED and re-stamped to the new version (not re-run).
       ratelVersion: "9.9.9",
       runCell: makeFakeRunCell(0.001, called),
     });
-    expect(summary.cells_cached).toBe(0);
-    expect(called).toHaveLength(1);
+    expect(summary.cells_cached).toBe(1);
+    expect(called).toHaveLength(0);
+    // The reused row is re-stamped to the current run's ratel version.
+    const rows = readFileSync(ephemeral, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as CellResult);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ratel_version).toBe("9.9.9");
   });
 
   it("appendRow writes one valid JSON line per call without quadratic rewrites", () => {

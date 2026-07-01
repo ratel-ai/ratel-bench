@@ -1,6 +1,16 @@
-import { describe, expect, it } from "vitest";
-import { armCandidates, buildCandidateSets, stratifiedSample } from "./sragents-select.js";
-import type { SragentsRetrievalRow } from "./sragents-types.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  armCandidates,
+  buildCandidateSets,
+  controlKey,
+  readControlIndex,
+  stratifiedSample,
+} from "./sragents-select.js";
+import type { SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
+import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 function row(over: Partial<SragentsRetrievalRow>): SragentsRetrievalRow {
   return {
@@ -99,5 +109,80 @@ describe("stratifiedSample", () => {
     const a = stratifiedSample(scenarios, 9, 1).map((s) => s.scenarioId);
     const b = stratifiedSample(scenarios, 9, 2).map((s) => s.scenarioId);
     expect(a).not.toEqual(b);
+  });
+});
+
+describe("control-arm reuse", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sragents-reuse-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function cell(over: Partial<SragentsSelectCell>): SragentsSelectCell {
+    return {
+      run_type: "skill_selection",
+      generated_at: "2026-06-24T00:00:00.000Z",
+      ratel_ai_core_version: "0.2.0",
+      scenario_id: "sragents-toolqa_0",
+      category: "sragents-toolqa",
+      arm: "control-baseline",
+      model: "gpt-5.4-mini",
+      run_index: 0,
+      pool_size: 100,
+      candidate_count: 100,
+      gold_skill_ids: ["g1"],
+      selected_skill_ids: ["g1"],
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      dollar_cost: 0,
+      wall_ms: 0,
+      error: null,
+      ...over,
+    };
+  }
+
+  function write(path: string, cells: SragentsSelectCell[]): void {
+    writeFileSync(path, cells.map((c) => JSON.stringify(c)).join("\n"));
+  }
+
+  it("controlKey is version-agnostic and encodes pool (null for oracle)", () => {
+    expect(controlKey("s", "control-baseline", "m", 100, 0)).toBe("s::control-baseline::m::100::0");
+    expect(controlKey("s", "control-oracle", "m", null, 0)).toBe("s::control-oracle::m::null::0");
+  });
+
+  it("indexes only control arms; earliest-generated per key wins", () => {
+    const path = join(dir, "agent.jsonl");
+    write(path, [
+      cell({ ratel_ai_core_version: "0.2.0", selected_skill_ids: ["early"] }),
+      cell({
+        generated_at: "2026-07-01T00:00:00.000Z",
+        ratel_ai_core_version: "0.3.0-rc.1",
+        selected_skill_ids: ["late"],
+      }),
+      cell({ arm: "ratel-full", selected_skill_ids: ["ignored"] }), // not cacheable
+    ]);
+    const { reuse } = readControlIndex(path);
+    const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
+    expect(reuse.size).toBe(1); // ratel-full excluded
+    expect(reuse.get(key)?.selected_skill_ids).toEqual(["early"]); // earliest wins
+  });
+
+  it("tracks keys already present at the current version (skip on resume)", () => {
+    const path = join(dir, "agent.jsonl");
+    write(path, [
+      cell({ arm: "control-baseline", ratel_ai_core_version: "0.0.0-not-current" }),
+      cell({ arm: "control-oracle", pool_size: null, ratel_ai_core_version: RATEL_AI_CORE_VERSION }),
+    ]);
+    const { current } = readControlIndex(path);
+    expect(
+      current.has(controlKey("sragents-toolqa_0", "control-oracle", "gpt-5.4-mini", null, 0)),
+    ).toBe(true);
+    expect(
+      current.has(controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0)),
+    ).toBe(false);
   });
 });

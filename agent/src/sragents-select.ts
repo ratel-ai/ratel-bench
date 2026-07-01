@@ -36,6 +36,10 @@ const OLLAMA_PREFIX = "ollama:";
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
 
+/** Control arms don't use Ratel retrieval, so their cells are version-independent
+ *  and reusable across ratel versions (re-stamped to the current version). */
+const CACHEABLE_ARMS = new Set<SragentsArm>(["control-baseline", "control-oracle"]);
+
 // ── Model resolution (mirrors cli.ts:resolveModel, kept local to avoid importing
 //    the campaign CLI) ────────────────────────────────────────────────────────
 
@@ -373,6 +377,39 @@ function arg(name: string, fallback: string): string {
   return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : fallback;
 }
 
+/** Version-agnostic identity for a control cell (reused across ratel versions). */
+export function controlKey(
+  scenarioId: string,
+  arm: string,
+  model: string,
+  poolSize: number | null,
+  runIndex: number,
+): string {
+  return `${scenarioId}::${arm}::${model}::${poolSize ?? "null"}::${runIndex}`;
+}
+
+/**
+ * Index existing control cells for reuse. `reuse` maps each key to the earliest-
+ * produced cell (the original baseline); `current` holds keys already present at
+ * the current ratel version, so a resumed run neither re-runs nor duplicates them.
+ */
+export function readControlIndex(path: string): {
+  reuse: Map<string, SragentsSelectCell>;
+  current: Set<string>;
+} {
+  const reuse = new Map<string, SragentsSelectCell>();
+  const current = new Set<string>();
+  if (!existsSync(path)) return { reuse, current };
+  for (const c of readJsonl<SragentsSelectCell>(path)) {
+    if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
+    const key = controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
+    if (c.ratel_ai_core_version === RATEL_AI_CORE_VERSION) current.add(key);
+    const prev = reuse.get(key);
+    if (!prev || (c.generated_at ?? "") < (prev.generated_at ?? "")) reuse.set(key, c);
+  }
+  return { reuse, current };
+}
+
 async function main(): Promise<void> {
   const candidatesPath = resolveRepoPath(
     arg("--candidates", "results/raw/sragents/candidates.jsonl"),
@@ -426,13 +463,45 @@ async function main(): Promise<void> {
   for (const t of tasks) t.query = queryById.get(t.sc.scenarioId) ?? "";
 
   mkdirSync(dirname(outputPath), { recursive: true });
+
+  // Control-arm reuse (default-on): control-baseline/control-oracle don't use Ratel,
+  // so their cells are version-independent. Reuse prior cells (re-stamped to the
+  // current version) instead of re-running them; a model with no prior controls falls
+  // through to a live run — the "new model" path that runs all three arms. `--force`/
+  // `--fresh` disables reuse and re-runs everything.
+  const force = process.argv.includes("--force") || process.argv.includes("--fresh");
+  const { reuse: reuseIndex, current: currentKeys } = force
+    ? { reuse: new Map<string, SragentsSelectCell>(), current: new Set<string>() }
+    : readControlIndex(outputPath);
+  const liveTasks: Task[] = [];
+  let reused = 0;
+  for (const t of tasks) {
+    if (CACHEABLE_ARMS.has(t.arm)) {
+      const poolForArm = t.arm === "control-oracle" ? null : poolSize;
+      const key = controlKey(t.sc.scenarioId, t.arm, t.model.id, poolForArm, t.runIndex);
+      if (currentKeys.has(key)) continue; // already have this version's control (resume)
+      const prior = reuseIndex.get(key);
+      if (prior) {
+        appendJsonl(outputPath, {
+          ...prior,
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          generated_at: new Date().toISOString(),
+        });
+        reused++;
+        continue;
+      }
+    }
+    liveTasks.push(t);
+  }
+
   console.log(
     `sragents-select: ${tasks.length} cells ` +
       `(${scenarios.length} scenarios × ${arms.length} arms × ${resolved.length} models × ${runs} runs), ` +
-      `pool=${poolSize} ratel-k=${ratelTopK}, cap $${dollarCap}`,
+      `pool=${poolSize} ratel-k=${ratelTopK}, cap $${dollarCap}` +
+      (reused ? ` — reused ${reused} control cells, ${liveTasks.length} live` : ""),
   );
 
-  const { cells, dollars, stopped } = await runCampaign(tasks, {
+  const { cells, dollars, stopped } = await runCampaign(liveTasks, {
     concurrency,
     dollarCap,
     seed,
@@ -442,7 +511,8 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `sragents-select: wrote ${cells} cells to ${arg("--output", "results/raw/sragents/agent.jsonl")} ` +
+    `sragents-select: wrote ${cells} live + ${reused} reused cells to ` +
+      `${arg("--output", "results/raw/sragents/agent.jsonl")} ` +
       `($${dollars.toFixed(3)}${stopped ? `, STOPPED at $${dollarCap} cap` : ""})`,
   );
 }

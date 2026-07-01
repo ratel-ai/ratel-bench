@@ -33,6 +33,7 @@ import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
 import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
+import { RATEL_AI_CORE_VERSION } from "./versions.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import type { AgentDescriptor, Arm, CellResult, Scenario, ToolSpec } from "./types.js";
 
@@ -175,6 +176,22 @@ function cellKeyOf(cell: CellResult): string {
   });
 }
 
+/** Version-agnostic identity for a control cell — reused across ratel versions. */
+function controlKeyString(k: Omit<CellKey, "ratelVersion">): string {
+  const base = `${k.scenarioId}::${k.arm}::${k.model}::${k.runIndex}`;
+  return k.poolSize === null ? base : `${base}::p${k.poolSize}`;
+}
+
+function controlKeyOf(cell: CellResult): string {
+  return controlKeyString({
+    scenarioId: cell.scenario_id,
+    arm: cell.arm,
+    model: cell.model,
+    runIndex: cell.run_index,
+    poolSize: cell.pool_size,
+  });
+}
+
 function readCompletedKeys(path: string): Set<string> {
   if (!existsSync(path)) return new Set();
   const out = new Set<string>();
@@ -196,11 +213,12 @@ function readCompletedKeys(path: string): Set<string> {
 }
 
 /**
- * Build a cache index from a canonical `agent.jsonl` for control-arm rows
- * matching `ratelVersion`. Used by ephemeral runs to skip re-running controls
- * (which don't depend on the ratel code path being iterated on).
+ * Index control-arm rows from a source file, keyed by a VERSION-AGNOSTIC key.
+ * Control arms don't use Ratel retrieval, so a control cell produced under any
+ * version is a valid result for every other version — reused (re-stamped) instead
+ * of re-run. The earliest-produced cell per key wins (the original baseline).
  */
-function readControlCacheIndex(path: string, ratelVersion: string): Map<string, CellResult> {
+function readControlCacheIndex(path: string): Map<string, CellResult> {
   if (!existsSync(path)) return new Map();
   const out = new Map<string, CellResult>();
   const text = readFileSync(path, "utf-8");
@@ -209,9 +227,10 @@ function readControlCacheIndex(path: string, ratelVersion: string): Map<string, 
     try {
       const cell = JSON.parse(line) as CellResult;
       if (typeof cell.ratel_version !== "string") continue;
-      if (cell.ratel_version !== ratelVersion) continue;
       if (!CACHEABLE_ARMS.has(cell.arm)) continue;
-      out.set(cellKeyOf(cell), cell);
+      const key = controlKeyOf(cell);
+      const prev = out.get(key);
+      if (!prev || (cell.generated_at ?? "") < (prev.generated_at ?? "")) out.set(key, cell);
     } catch {
       // Ignore malformed rows.
     }
@@ -566,12 +585,15 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   }
 
   const ratelVersion = config.ratelVersion ?? SDK_VERSION;
-  // Cache only applies when an external source is provided AND it isn't this
-  // run's output (which is already covered by the resume `completed` set).
-  // `--force` disables it.
+  // Control-arm reuse (default-on): control cells are version-independent, so reuse
+  // prior cells (from any version) re-stamped to this run instead of re-running them.
+  // Source defaults to this run's own output (its prior-version controls); --ephemeral
+  // points it at the canonical file. `--force` disables it. Same-version controls are
+  // already handled by the `completed` resume set, so there's no double-write.
+  const controlSource = config.cacheSourcePath ?? config.outputPath;
   const cacheIndex =
-    !config.force && config.cacheSourcePath && config.cacheSourcePath !== config.outputPath
-      ? readControlCacheIndex(config.cacheSourcePath, ratelVersion)
+    !config.force && existsSync(controlSource)
+      ? readControlCacheIndex(controlSource)
       : new Map<string, CellResult>();
 
   const { tasks, cellsSkipped: initialSkipped } = buildTaskQueue(
@@ -589,19 +611,36 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   let cellsCached = 0;
   const liveTasks: PendingTask[] = [];
   for (const task of tasks) {
-    const cached = cacheIndex.get(task.key);
+    const cached = CACHEABLE_ARMS.has(task.arm)
+      ? cacheIndex.get(
+          controlKeyString({
+            scenarioId: task.scenario.id,
+            arm: task.arm,
+            model: task.model.id,
+            runIndex: task.runIndex,
+            poolSize: task.poolSize,
+          }),
+        )
+      : undefined;
     if (cached) {
-      appendRow(config.outputPath, cached);
+      // Reuse the version-independent control result, re-stamped to this run.
+      appendRow(config.outputPath, {
+        ...cached,
+        ratel_version: ratelVersion,
+        ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+        run_id: runId,
+        generated_at: runTimestamp,
+      });
       cellsCached++;
     } else {
       liveTasks.push(task);
     }
   }
 
-  if ((config.logLevel ?? "normal") !== "quiet" && (cellsCached > 0 || cacheIndex.size > 0)) {
+  if ((config.logLevel ?? "normal") !== "quiet" && cellsCached > 0) {
     console.error(
-      `cache: ${cellsCached} control cells reused from ${config.cacheSourcePath} ` +
-        `(ratel ${ratelVersion}), ${liveTasks.length} will run`,
+      `cache: ${cellsCached} control cells reused (re-stamped to ${ratelVersion}), ` +
+        `${liveTasks.length} will run`,
     );
   }
 
