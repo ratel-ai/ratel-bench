@@ -93,17 +93,17 @@ There are **two version knobs**, and which one matters depends on the eval:
 ### The version bookends
 
 ```bash
-pnpm version-set --tag v0.3.0-hybrid.2 --expect 0.3.0-hybrid.2   # pin a git tag (pre-release / RC)
+pnpm version-set --tag v0.3.0-rc.1 --expect 0.3.0-rc.1           # pin a version (pre-release / RC)
 pnpm version-set --crate 0.3.0 --expect 0.3.0                    # pin a published crates.io release
-pnpm version-set --rev <commit-sha> --expect 0.3.0              # pin an exact commit
-pnpm version-reset                                              # restore the committed baseline
+pnpm version-set --rev <commit-sha> --expect 0.3.0               # pin an exact commit
+pnpm version-reset                                               # restore the committed baseline
 ```
 
 - `version-set` snapshots `retrieval/Cargo.toml` + `Cargo.lock`, swaps the `ratel-ai-core` dependency to the requested source, then **asserts** the resolved version equals `--expect` — aborting and restoring if not, so a force-moved tag can't silently benchmark the wrong build. It refuses to run twice without a reset.
 - `version-reset` restores the snapshot and deletes it. **Always run it when done** so the tree builds against the released version again.
-- `--expect` is the version string Cargo resolves (the git tag `v0.3.0-hybrid.2` resolves to crate version `0.3.0-hybrid.2`).
+- `--expect` is the version string Cargo resolves (the git tag `v0.3.0-rc.1` resolves to crate version `0.3.0-rc.1`).
 
-Each scenario below is self-contained: **reset → set → run → summarize → report → compare → reset**. The `v0.3.0-hybrid.2` pin is an example — substitute the version you're testing.
+Each scenario below is self-contained: **reset → set → run → summarize → report → compare → reset**. The `v0.3.0-rc.1` pin is an example — substitute the version you're testing.
 
 ---
 
@@ -114,7 +114,7 @@ Recall / MRR of the skill retriever over the ~26k-skill catalog. Free, no API ke
 ```bash
 # 1. pin the version under test
 pnpm version-reset
-pnpm version-set --tag v0.3.0-hybrid.2 --expect 0.3.0-hybrid.2
+pnpm version-set --tag v0.3.0-rc.1 --expect 0.3.0-rc.1
 
 # 2a. run — normal
 cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
@@ -156,7 +156,7 @@ Same as Scenario 1 over the BFCL function corpus, via the `retrieval` subcommand
 
 ```bash
 pnpm version-reset
-pnpm version-set --tag v0.3.0-hybrid.2 --expect 0.3.0-hybrid.2
+pnpm version-set --tag v0.3.0-rc.1 --expect 0.3.0-rc.1
 
 # run — normal
 cargo run -p ratel-benchmark-retrieval --release -- retrieval \
@@ -191,7 +191,7 @@ Task-completion with vs without Ratel. The LLM is shown skills from an **offline
 
 ```bash
 pnpm version-reset
-pnpm version-set --tag v0.3.0-hybrid.2 --expect 0.3.0-hybrid.2
+pnpm version-set --tag v0.3.0-rc.1 --expect 0.3.0-rc.1
 
 # 1. candidate-gen retrieval (pool 50, k 10,50 — the slices the LLM arms require)
 #    normal:
