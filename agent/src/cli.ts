@@ -8,6 +8,13 @@
 // OpenAI-compatible endpoint (http://localhost:11434/v1 by default). Examples:
 //   --models ollama:qwen3.5,ollama:gemma4
 //   --judge-model ollama:qwen3.5         (cost-free judge)
+//
+// User-hosted models (e.g. vLLM/TGI/LM Studio on EC2) that expose an
+// OpenAI-compatible endpoint are addressed by embedding the URL in the model
+// string as `<baseURL>#<model-name>`. Optional bearer token via --model-api-key
+// or MODEL_API_KEY env. Examples:
+//   --models 'https://my-host:8000/v1#meta-llama/Llama-3.1-70B-Instruct'
+//   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
@@ -131,6 +138,8 @@ interface ParsedArgs {
   /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
   judgeModelId?: string;
   ollamaBaseURL: string;
+  /** Optional bearer token for a user-hosted (`<url>#<model>`) endpoint. */
+  modelApiKey?: string;
   seed: number;
   /** Cells in flight at once. See `RunnerConfig.concurrency` for cap semantics. */
   concurrency: number;
@@ -155,6 +164,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     noJudge: false,
     noAst: false,
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    modelApiKey: process.env.MODEL_API_KEY,
     seed: 42,
     concurrency: 10,
     logLevel: "normal",
@@ -222,6 +232,9 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
         break;
+      case "--model-api-key":
+        args.modelApiKey = next();
+        break;
       case "--seed":
         args.seed = Number(next());
         break;
@@ -250,6 +263,8 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
 
 interface ResolveOpts {
   ollamaBaseURL: string;
+  /** Bearer token for user-hosted `<url>#<model>` endpoints (optional). */
+  modelApiKey?: string;
 }
 
 /**
@@ -273,7 +288,38 @@ function resolveOllama(modelTag: string, baseURL: string): RunnerModel {
   return { id: `${OLLAMA_PREFIX}${modelTag}`, model: provider.chat(modelTag) };
 }
 
+/**
+ * Resolve a user-hosted model addressed as `<baseURL>#<model-name>` (e.g. a
+ * vLLM/TGI/LM Studio server on EC2). Reuses the OpenAI-compatible SDK client
+ * pointed at the caller's URL, exactly like {@link resolveOllama}, with
+ * `.chat(...)` to force the legacy `/v1/chat/completions` wire format that
+ * self-hosted servers implement (they rarely speak OpenAI's Responses API).
+ *
+ * The full `<url>#<model>` string is kept as the id so report rows are
+ * unambiguous. Auth is optional: a bearer token from --model-api-key /
+ * MODEL_API_KEY when set, else a dummy key (unauthenticated endpoints).
+ */
+function resolveCustomEndpoint(raw: string, opts: ResolveOpts): RunnerModel {
+  const hashIdx = raw.indexOf("#");
+  if (hashIdx === -1) {
+    throw new Error(
+      `custom model URL must be of the form <baseURL>#<model-name>, ` +
+        `e.g. https://my-host:8000/v1#llama-3.1-70b (got "${raw}")`,
+    );
+  }
+  const baseURL = raw.slice(0, hashIdx);
+  const modelName = raw.slice(hashIdx + 1);
+  if (!modelName) {
+    throw new Error(`custom model URL "${raw}" is missing a model name after "#"`);
+  }
+  const provider = createOpenAI({ baseURL, apiKey: opts.modelApiKey ?? "none" });
+  return { id: raw, model: provider.chat(modelName) };
+}
+
 function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
+  if (modelId.startsWith("http://") || modelId.startsWith("https://")) {
+    return resolveCustomEndpoint(modelId, opts);
+  }
   if (modelId.startsWith(OLLAMA_PREFIX)) {
     return resolveOllama(modelId.slice(OLLAMA_PREFIX.length), opts.ollamaBaseURL);
   }
@@ -291,7 +337,8 @@ function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
   }
   throw new Error(
     `unknown model provider for: ${modelId} ` +
-      `(expected gpt-*, claude-*, or ${OLLAMA_PREFIX}<tag>)`,
+      `(expected gpt-*, claude-*, ${OLLAMA_PREFIX}<tag>, or a user-hosted ` +
+      `<baseURL>#<model-name> URL)`,
   );
 }
 
@@ -304,7 +351,10 @@ function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
 function resolveJudge(parsed: ParsedArgs): LanguageModel | undefined {
   if (parsed.noJudge) return undefined;
   if (parsed.judgeModelId) {
-    return resolveModel(parsed.judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model;
+    return resolveModel(parsed.judgeModelId, {
+      ollamaBaseURL: parsed.ollamaBaseURL,
+      modelApiKey: parsed.modelApiKey,
+    }).model;
   }
   if (process.env.ANTHROPIC_API_KEY) return anthropic("claude-sonnet-4-6");
   return undefined;
@@ -332,6 +382,8 @@ interface RejudgeParsedArgs {
   promptVariant: JudgePromptVariant;
   out?: string;
   ollamaBaseURL: string;
+  /** Bearer token for a user-hosted (`<url>#<model>`) judge endpoint (optional). */
+  modelApiKey?: string;
   /** Skip the LLM judge — only recompute the (LLM-free) AST task-completion verdict. */
   noJudge: boolean;
 }
@@ -342,6 +394,7 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
     corpus: "test-data/metatool.jsonl",
     promptVariant: "strict",
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    modelApiKey: process.env.MODEL_API_KEY,
     noJudge: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -375,6 +428,9 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
         break;
+      case "--model-api-key":
+        args.modelApiKey = next();
+        break;
       default:
         if (flag.startsWith("-")) {
           throw new Error(`unknown flag for rejudge: ${flag}`);
@@ -406,7 +462,10 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   // `--no-judge`: AST-only re-score — no LLM model resolved or called.
   const judgeModelId = parsed.noJudge ? undefined : (parsed.judgeModelId ?? "claude-sonnet-4-6");
   const judgeModel = judgeModelId
-    ? resolveModel(judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model
+    ? resolveModel(judgeModelId, {
+        ollamaBaseURL: parsed.ollamaBaseURL,
+        modelApiKey: parsed.modelApiKey,
+      }).model
     : undefined;
 
   const inputPath = resolveRepoPath(parsed.input);
@@ -445,7 +504,10 @@ async function runMain(): Promise<void> {
     parsed.output = ephemeralOutputPath();
     cacheSourcePath = resolveRepoPath(CANONICAL_AGENT_JSONL);
   }
-  const resolveOpts: ResolveOpts = { ollamaBaseURL: parsed.ollamaBaseURL };
+  const resolveOpts: ResolveOpts = {
+    ollamaBaseURL: parsed.ollamaBaseURL,
+    modelApiKey: parsed.modelApiKey,
+  };
   const models = parsed.models.map((m) => resolveModel(m, resolveOpts));
   const judgeModel = resolveJudge(parsed);
 
