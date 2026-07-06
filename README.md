@@ -226,8 +226,9 @@ pnpm version-reset
 - **The candidate-gen run is separate from Scenario 1.** It writes a *different* file (`candidates.jsonl`, not `retrieval-rows.jsonl`) with *different* slices (`--top-k 10,50 --pool-sizes 50`). The LLM arms need both the `k=10` slice (Ratel's shortlist → `ratel-full`) and the `k=50` slice (full pool → `control-baseline`). A quality-run file (`--top-k 1,3,5`) makes the LLM step **skip every scenario**.
 - "Parallelized" here is the same env-pin trick on the candidate-gen retrieval; the LLM step's own parallelism is `--concurrency`.
 - `sragents-select` — the LLM A/B. Reads `--candidates`, runs three arms (`control-baseline`, `ratel-full`, `control-oracle`) per scenario, writes `results/raw/sragents/agent.jsonl` (**overwritten** — copy aside to keep prior cells). **Version is stamped from the live `Cargo.lock`**, so keep the same pin as the candidate-gen run or the label won't match the retrieval it used.
-  - `--models` — comma-separated; `claude-*`, `gpt-*`, or `ollama:<tag>`. Use a *different* list than Scenario 4 for per-benchmark models.
+  - `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL (see below). Use a *different* list than Scenario 4 for per-benchmark models.
   - `--pool-size 50 --top-k 10` — **must** match the candidate-gen slices.
+  - **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/AWS gateway): pass the URL as the model id, e.g. `--models 'https://6nea2psszc.execute-api.eu-central-1.amazonaws.com/v1#qwen3-4b'`. Put the bearer token in `agent/.env` as `AWS_BEDROCK_BEARER` (or pass `--model-api-key`). The endpoint is auto-warmed (`POST /warm`, polled until ready) before the run. Cells record `$0` cost and keep the full URL as the model id.
   - `--concurrency 8` — parallel LLM calls. `--dollar-global 5` — hard USD cost cap for the run. `--scenarios 600` — cap; `--runs 1` repeats per cell.
 - summarize/report fold the cells into the task-completion section of `report.json`; the task-completion numbers live in `report.json` / the website.
 
@@ -276,7 +277,8 @@ pnpm version-reset
 - `start` (`agent/src/cli.ts`) — the BFCL agent runner. The `ratel-full` arm builds a live `ToolCatalog` from `@ratel-ai/sdk` and calls `catalog.search()` + the `search_tools` / `invoke_tool` gateway during the agent loop, so **the SDK version is the retriever** (recorded as `ratel_version`).
 - `--corpus test-data/bfcl-all.jsonl` — operates on the corpus directly (no candidates file). `--arms` — the three arms. `--pool-sizes 100` — catalog size per scenario. `--no-judge` — skip the LLM judge (use AST / programmatic verdicts). `--runs 1` — one run per cell.
 - **Normal vs parallelized:** the BFCL agent doesn't use the Rust thread-pool; it's network-latency-bound, so parallelism is just `--concurrency` (raise it to overlap more in-flight API calls — mind provider rate limits).
-- `--models` — set a *different* list than Scenario 3 for per-benchmark models.
+- `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Set a *different* list than Scenario 3 for per-benchmark models.
+- **User-hosted model** (OpenAI-compatible endpoint you run): pass the URL as the model id, e.g. `--models 'https://6nea2psszc.execute-api.eu-central-1.amazonaws.com/v1#qwen3-4b'`. Bearer token → `agent/.env` as `AWS_BEDROCK_BEARER` (or `--model-api-key`); the endpoint is auto-warmed before the run; cells record `$0` and keep the full URL as the model id. Use a longer `--timeout-ms` (e.g. 120000) for cold/remote models.
 - summarize/report fold the cells into `report.json`. Because both `ratel_version` (SDK) and `ratel_ai_core_version` (core, from the lock) are recorded, the report can refuse to merge layers whose versions disagree — which is why steps 1 and 2 must target the same 0.3.0. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
 
 ---

@@ -9,10 +9,11 @@
 //   --models ollama:qwen3.5,ollama:gemma4
 //   --judge-model ollama:qwen3.5         (cost-free judge)
 //
-// User-hosted models (e.g. vLLM/TGI/LM Studio on EC2) that expose an
-// OpenAI-compatible endpoint are addressed by embedding the URL in the model
-// string as `<baseURL>#<model-name>`. Optional bearer token via --model-api-key
-// or MODEL_API_KEY env. Examples:
+// User-hosted models (e.g. vLLM/TGI/LM Studio on EC2, or an AWS API-Gateway-fronted
+// model) that expose an OpenAI-compatible endpoint are addressed by embedding the
+// URL in the model string as `<baseURL>#<model-name>`. Optional bearer token via
+// --model-api-key or AWS_BEDROCK_BEARER env; endpoints are auto-warmed before the run.
+// Examples:
 //   --models 'https://my-host:8000/v1#meta-llama/Llama-3.1-70B-Instruct'
 //   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
@@ -21,6 +22,7 @@ import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import type { JudgePromptVariant } from "./judges/llm.js";
+import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
@@ -164,7 +166,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     noJudge: false,
     noAst: false,
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
-    modelApiKey: process.env.MODEL_API_KEY,
+    modelApiKey: process.env.AWS_BEDROCK_BEARER,
     seed: 42,
     concurrency: 10,
     logLevel: "normal",
@@ -297,28 +299,17 @@ function resolveOllama(modelTag: string, baseURL: string): RunnerModel {
  *
  * The full `<url>#<model>` string is kept as the id so report rows are
  * unambiguous. Auth is optional: a bearer token from --model-api-key /
- * MODEL_API_KEY when set, else a dummy key (unauthenticated endpoints).
+ * AWS_BEDROCK_BEARER when set, else a dummy key (unauthenticated endpoints).
  */
-function resolveCustomEndpoint(raw: string, opts: ResolveOpts): RunnerModel {
-  const hashIdx = raw.indexOf("#");
-  if (hashIdx === -1) {
-    throw new Error(
-      `custom model URL must be of the form <baseURL>#<model-name>, ` +
-        `e.g. https://my-host:8000/v1#llama-3.1-70b (got "${raw}")`,
-    );
-  }
-  const baseURL = raw.slice(0, hashIdx);
-  const modelName = raw.slice(hashIdx + 1);
-  if (!modelName) {
-    throw new Error(`custom model URL "${raw}" is missing a model name after "#"`);
-  }
-  const provider = createOpenAI({ baseURL, apiKey: opts.modelApiKey ?? "none" });
-  return { id: raw, model: provider.chat(modelName) };
+function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): RunnerModel {
+  const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: opts.modelApiKey ?? "none" });
+  return { id: raw, model: provider.chat(ep.modelName) };
 }
 
 function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
-  if (modelId.startsWith("http://") || modelId.startsWith("https://")) {
-    return resolveCustomEndpoint(modelId, opts);
+  const ep = parseCustomEndpoint(modelId);
+  if (ep) {
+    return resolveCustomEndpoint(modelId, ep, opts);
   }
   if (modelId.startsWith(OLLAMA_PREFIX)) {
     return resolveOllama(modelId.slice(OLLAMA_PREFIX.length), opts.ollamaBaseURL);
@@ -394,7 +385,7 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
     corpus: "test-data/metatool.jsonl",
     promptVariant: "strict",
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
-    modelApiKey: process.env.MODEL_API_KEY,
+    modelApiKey: process.env.AWS_BEDROCK_BEARER,
     noJudge: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -509,6 +500,9 @@ async function runMain(): Promise<void> {
     modelApiKey: parsed.modelApiKey,
   };
   const models = parsed.models.map((m) => resolveModel(m, resolveOpts));
+  // Warm any user-hosted endpoints once so early cells don't burn their timeout on
+  // a cold start (no-op for cloud/ollama model ids).
+  await warmUpModels(parsed.models, parsed.modelApiKey);
   const judgeModel = resolveJudge(parsed);
 
   if (!parsed.noJudge && !judgeModel) {

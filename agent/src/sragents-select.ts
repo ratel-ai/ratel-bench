@@ -26,6 +26,7 @@ import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { appendJsonl, readJsonl } from "./io.js";
 import { dollarCost } from "./metering.js";
+import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -48,7 +49,13 @@ interface RunnerModel {
   model: LanguageModel;
 }
 
-function resolveModel(modelId: string, ollamaBaseURL: string): RunnerModel {
+function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): RunnerModel {
+  // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
+  const ep = parseCustomEndpoint(modelId);
+  if (ep) {
+    const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
+    return { id: modelId, model: provider.chat(ep.modelName) };
+  }
   if (modelId.startsWith(OLLAMA_PREFIX)) {
     const provider = createOpenAI({ baseURL: ollamaBaseURL, apiKey: "ollama" });
     return { id: modelId, model: provider.chat(modelId.slice(OLLAMA_PREFIX.length)) };
@@ -64,7 +71,8 @@ function resolveModel(modelId: string, ollamaBaseURL: string): RunnerModel {
     return { id: modelId, model: openai(modelId) };
   }
   throw new Error(
-    `unknown model provider for: ${modelId} (expected gpt-*, claude-*, ollama:<tag>)`,
+    `unknown model provider for: ${modelId} ` +
+      `(expected gpt-*, claude-*, ollama:<tag>, or a user-hosted <baseURL>#<model-name> URL)`,
   );
 }
 
@@ -427,6 +435,8 @@ async function main(): Promise<void> {
   const seed = Number(arg("--seed", "42"));
   const quiet = process.argv.includes("--quiet") || process.argv.includes("-q");
   const ollamaBaseURL = process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL;
+  // Bearer token for user-hosted `<url>#<model>` endpoints (optional).
+  const modelApiKey = arg("--model-api-key", process.env.AWS_BEDROCK_BEARER ?? "");
 
   const rows = readJsonl<SragentsRetrievalRow>(candidatesPath);
   if (rows.length === 0) {
@@ -444,7 +454,9 @@ async function main(): Promise<void> {
     scenarios = stratifiedSample(scenarios, scenarioLimit, seed);
   }
 
-  const resolved = models.map((m) => resolveModel(m, ollamaBaseURL));
+  const resolved = models.map((m) => resolveModel(m, ollamaBaseURL, modelApiKey));
+  // Warm any user-hosted endpoints once before the campaign (no-op for cloud/ollama ids).
+  await warmUpModels(models, modelApiKey);
   const catalog = await loadCatalogMeta(catalogPath);
 
   // Enumerate cells: run × scenario × arm × model.
