@@ -124,6 +124,9 @@ interface ParsedArgs {
   output: string;
   outputExplicit: boolean;
   ephemeral: boolean;
+  /** Reuse version-independent control cells (baseline/oracle) from this canonical file
+   * instead of re-running them. Lets a per-method output file still pull cached controls. */
+  cacheSource?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
@@ -191,6 +194,9 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
         break;
       case "--ephemeral":
         args.ephemeral = true;
+        break;
+      case "--cache-source":
+        args.cacheSource = next();
         break;
       case "--scenarios":
         args.scenarios = Number(next());
@@ -498,13 +504,15 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
-  let cacheSourcePath: string | undefined;
+  let cacheSourcePath: string | undefined = parsed.cacheSource
+    ? resolveRepoPath(parsed.cacheSource)
+    : undefined;
   if (parsed.ephemeral) {
     if (parsed.outputExplicit) {
       throw new Error("--ephemeral and --output are mutually exclusive");
     }
     parsed.output = ephemeralOutputPath();
-    cacheSourcePath = resolveRepoPath(CANONICAL_AGENT_JSONL);
+    cacheSourcePath ??= resolveRepoPath(CANONICAL_AGENT_JSONL);
   }
   const resolveOpts: ResolveOpts = {
     ollamaBaseURL: parsed.ollamaBaseURL,

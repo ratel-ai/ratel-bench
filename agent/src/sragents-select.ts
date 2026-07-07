@@ -485,6 +485,14 @@ async function main(): Promise<void> {
   const { reuse: reuseIndex, current: currentKeys } = force
     ? { reuse: new Map<string, SragentsSelectCell>(), current: new Set<string>() }
     : readControlIndex(outputPath);
+  // --cache-source: also pull version-independent baseline/oracle from a canonical file
+  // (e.g. the 0.2.0 results) so they're reused (re-stamped) instead of re-run. The output
+  // file's own controls take precedence; the cache source only fills gaps.
+  const cacheSource = arg("--cache-source", "");
+  if (cacheSource && !force) {
+    const ext = readControlIndex(resolveRepoPath(cacheSource));
+    for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
+  }
   const liveTasks: Task[] = [];
   let reused = 0;
   for (const t of tasks) {
