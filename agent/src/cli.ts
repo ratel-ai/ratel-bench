@@ -26,7 +26,7 @@ import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-
 import { resolveRepoPath } from "./paths.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
-import type { Arm } from "./types.js";
+import type { Arm, RetrievalMethod } from "./types.js";
 
 loadEnv();
 
@@ -129,6 +129,8 @@ interface ParsedArgs {
   models: string[];
   runs: number;
   topK: number;
+  /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
+  retriever: RetrievalMethod;
   poolSizes: number[];
   maxSteps: number;
   timeoutMs: number;
@@ -158,6 +160,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     models: ["gpt-5.4-mini", "claude-sonnet-4-6"],
     runs: 1,
     topK: 5,
+    retriever: "bm25",
     poolSizes: [180],
     maxSteps: 12,
     timeoutMs: 60_000,
@@ -204,6 +207,14 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
       case "--top-k":
         args.topK = Number(next());
         break;
+      case "--retriever": {
+        const v = next();
+        if (v !== "bm25" && v !== "semantic" && v !== "hybrid") {
+          throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${v}")`);
+        }
+        args.retriever = v;
+        break;
+      }
       case "--pool-size":
         args.poolSizes = [parsePoolSize(flag, next())];
         break;
@@ -520,6 +531,7 @@ async function runMain(): Promise<void> {
     models,
     runsPerCell: parsed.runs,
     topK: parsed.topK,
+    retriever: parsed.retriever,
     poolSizes: parsed.poolSizes,
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,

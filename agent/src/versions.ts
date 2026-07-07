@@ -35,6 +35,12 @@ export function parseLockVersion(lock: string, name: string): string | null {
  * load — the lockfile doesn't change within a run.
  */
 export const RATEL_AI_CORE_VERSION: string = (() => {
+  // Explicit override for the version *label* stamped on rows (the field the
+  // reports group layers on). Lets one build be run under distinct labels — e.g.
+  // the same SDK 0.4.0 exercised as `0.4.0-sparse` / `0.4.0-dense` / `0.4.0-hybrid`
+  // by switching `--retriever` — since the retrieval method isn't a separate crate.
+  // Set on the command line: `RATEL_VERSION_LABEL=0.4.0-dense pnpm ... start ...`.
+  if (process.env.RATEL_VERSION_LABEL) return process.env.RATEL_VERSION_LABEL;
   const lockPath = resolveRepoPath("Cargo.lock");
   if (!existsSync(lockPath)) return "unknown";
   return parseLockVersion(readFileSync(lockPath, "utf-8"), "ratel-ai-core") ?? "unknown";

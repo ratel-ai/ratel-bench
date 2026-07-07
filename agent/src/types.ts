@@ -68,6 +68,9 @@ export interface UsageTotals {
  * `skipForModel(modelId)` lets a descriptor opt out for incompatible models —
  * e.g. the claude-sdk arm declines non-Claude models.
  */
+/** Ratel retrieval method. Mirrors `@ratel-ai/sdk`'s `SearchMethod`. */
+export type RetrievalMethod = "bm25" | "semantic" | "hybrid";
+
 export interface AgentRunInput {
   scenario: Scenario;
   /** Expanded pool (gold + distractors) at config.poolSize. Empty for pool-size-agnostic arms. */
@@ -81,6 +84,8 @@ export interface AgentRunInput {
   model: { id: string; model: LanguageModel };
   runIndex: number;
   topK: number;
+  /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
+  retriever: RetrievalMethod;
   maxSteps: number;
   perRunTimeoutMs: number;
   seed: number;

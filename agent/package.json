@@ -25,7 +25,7 @@
     "@ai-sdk/anthropic": "^2.0.0",
     "@ai-sdk/openai": "^3.0.0",
     "@anthropic-ai/sdk": "^0.95.2",
-    "@ratel-ai/sdk": "npm:@ratel-ai/sdk@0.3.0-rc.1",
+    "@ratel-ai/sdk": "npm:@ratel-ai/sdk@0.4.0",
     "ai": "^6.0.0",
     "dotenv": "^16.4.0",
     "zod": "^3.24.0"

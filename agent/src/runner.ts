@@ -33,9 +33,16 @@ import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
 import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
-import type { AgentDescriptor, Arm, CellResult, Scenario, ToolSpec } from "./types.js";
+import type {
+  AgentDescriptor,
+  Arm,
+  CellResult,
+  RetrievalMethod,
+  Scenario,
+  ToolSpec,
+} from "./types.js";
+import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 /**
  * Arms whose cell results don't depend on the ratel-specific code path being
@@ -62,6 +69,8 @@ export interface RunnerConfig {
   models: RunnerModel[];
   runsPerCell: number;
   topK: number;
+  /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). */
+  retriever: RetrievalMethod;
   /**
    * Pool sizes to sweep over for non-agnostic arms. Each scenario is evaluated
    * at every value (cells are duplicated across pool sizes), so a 50-scenario ×
@@ -384,6 +393,7 @@ export function makeRegistryRunCell(
       model: { id: model.id, model: model.model },
       runIndex,
       topK: config.topK,
+      retriever: config.retriever,
       maxSteps: config.maxSteps,
       perRunTimeoutMs: config.perRunTimeoutMs,
       seed: config.seed,

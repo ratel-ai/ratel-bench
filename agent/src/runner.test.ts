@@ -85,6 +85,7 @@ function baseConfig(corpusPath: string, outputPath: string): RunnerConfig {
     models: [{ id: "fake-model", model: {} as never }],
     runsPerCell: 1,
     topK: 3,
+    retriever: "bm25",
     poolSizes: [30],
     maxSteps: 8,
     perRunTimeoutMs: 1000,
