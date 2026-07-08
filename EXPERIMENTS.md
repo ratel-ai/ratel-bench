@@ -11,6 +11,11 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
    disables. So writing to `results/raw/bfcl/agent-0.4.0-sparse.jsonl` auto-reuses from
    `results/raw/bfcl/agent.jsonl` → only `ratel-full` runs live (control-baseline is the
    expensive arm ≈ 8k input tokens/cell, so this is the big saving).
+   **SR-Agents caveat:** control-baseline is built from the candidates' `pool_ids` (the full
+   gold-complete pool), so it is genuinely retriever-independent and shared across versions. The
+   reuse key ignores pool CONTENTS, so a stale pre-`pool_ids` cache would be silently re-adopted —
+   when first regenerating on the corrected pool, run baseline once with `--force` to purge it,
+   then let every other run reuse the fresh cells.
 2. **SR-Agents LLM eval is ALWAYS 600 scenarios = 100/dataset × 6** — a seeded subset of the
    full 5,400. ALWAYS pin it: `sragents-candidates --scenarios-from results/raw/sragents/candidates.jsonl`.
    Without it, all 5,400 run (9× cost + incomparable set).
@@ -92,21 +97,28 @@ pnpm -F @ratel-ai/benchmark bfcl-report
 ### SR-Agents
 ```bash
 # --- Candidate gen (SDK): re-rank the FIXED 0.2.0 pool with the 0.4.0 retriever ---
-# --pool-from uses the SAME 100-pool as 0.2.0 (keeps baseline/oracle identical & reusable;
-# only ratel-full's ranking changes) AND pins the canonical 600. Pool 100 for the LLM eval.
+# --pool-from reads the canonical pool from the reference's `pool_ids` field (the FULL
+# gold-complete membership — NOT the lossy `retrieved` ranking). Same 100-pool for every
+# version, so control-baseline/oracle stay identical & reusable; only ratel-full's ranking
+# changes. Pins the canonical 600. REQUIRES a pool_ids-aware reference (regenerate the Rust
+# candidates.jsonl first — see "Pre-0.4.0" below; else generation throws "no pool_ids").
 RATEL_VERSION_LABEL=0.4.0-<m> pnpm -F @ratel-ai/benchmark sragents-candidates \
   --retriever <method> --pool-sizes 100 --top-k 5 \
   --pool-from results/raw/sragents/candidates.jsonl \
   --output results/raw/sragents/candidates-0.4.0-<m>.jsonl
 
 # --- LLM eval (pool 100, top 5) ---
-# --cache-source reuses baseline/oracle from the 0.2.0 canonical → ONLY ratel-full runs live.
+# control-baseline is built from the candidates' `pool_ids` (full 100, gold-complete), so it
+# is retriever-INDEPENDENT and identical across versions: run it live ONCE (add --force on the
+# FIRST method to purge any pre-fix poisoned cache; the reuse key ignores pool contents), then
+# --cache-source reuses baseline+oracle for the other methods → only ratel-full runs live.
+# Baseline now shows the full 100 candidates (was ~9–83), so input tokens/cost rise — bump the cap.
 RATEL_VERSION_LABEL=0.4.0-<m> pnpm -F @ratel-ai/benchmark sragents-select \
   --candidates results/raw/sragents/candidates-0.4.0-<m>.jsonl \
   --cache-source results/raw/sragents/agent.jsonl \
   --output results/raw/sragents/agent-0.4.0.jsonl \
   --arms control-baseline,control-oracle,ratel-full --models "$M" \
-  --pool-size 100 --top-k 5 --concurrency 8 --dollar-global 30
+  --pool-size 100 --top-k 5 --concurrency 8 --dollar-global 60   # first method: add --force
 
 # --- summarize (retrieval eval from --retrieval-rows + task completion from --agent) + report ---
 pnpm -F @ratel-ai/benchmark sragents-summarize \

@@ -155,20 +155,28 @@ async function main(): Promise<void> {
   // --pool-from: use the FIXED pool from a reference file (the 0.2.0 candidates) instead of
   // building a fresh gold+distractors pool. This keeps the candidate pool identical across
   // versions, so control-baseline/oracle stay comparable and reusable — ONLY the ranking
-  // (ratel shortlist) changes per retriever. Keyed by (scenario, pool_size) from the
-  // full-pool rows (k == target_pool_size). Also restricts the scenario set to the reference.
+  // (ratel shortlist) changes per retriever. The pool is read from the authoritative
+  // `pool_ids` field (full gold-complete membership), NOT from `retrieved` (the retriever's
+  // ranking, which for BM25 omits zero-score docs and can drop gold). Keyed by
+  // (scenario, pool_size); also restricts the scenario set to the reference.
   const poolFrom = arg("--pool-from", "");
   const refPools = new Map<string, Map<number, string[]>>();
   if (poolFrom) {
     for (const r of readJsonl<{
       scenario_id: string;
-      k: number;
       target_pool_size: number;
-      retrieved: { id: string }[];
+      pool_ids?: string[];
     }>(resolveRepoPath(poolFrom))) {
-      if (r.k !== r.target_pool_size) continue; // the full-pool row carries the pool
+      if (!r.pool_ids) {
+        throw new Error(
+          `--pool-from reference ${poolFrom} has no pool_ids on scenario ${r.scenario_id}: ` +
+            `regenerate it with the pool_ids-aware Rust skill-retrieval runner (else the pool ` +
+            `would be reconstructed from the lossy 'retrieved' ranking and could drop gold).`,
+        );
+      }
       const m = refPools.get(r.scenario_id) ?? new Map<number, string[]>();
-      m.set(r.target_pool_size, r.retrieved.map((h) => h.id));
+      // pool_ids is per-cell (duplicated across k-rows); last-writer-wins is fine — identical.
+      m.set(r.target_pool_size, r.pool_ids);
       refPools.set(r.scenario_id, m);
     }
     scenarios = scenarios.filter((s) => refPools.has(s.id));
@@ -215,6 +223,19 @@ async function main(): Promise<void> {
       } else {
         pool = [...goldSpecs, ...distractors.slice(0, Math.max(0, poolSize - goldSpecs.length))];
       }
+      // Invariant guardrail: the pool MUST contain every gold skill. (A sparse retriever may
+      // still fail to *rank* a zero-overlap gold — that stays a real miss — but the gold must
+      // at least be *in the pool*, or baseline/dense are structurally sabotaged.) Fail loudly
+      // at generation time, before any LLM spend.
+      const poolIdSet = new Set(pool.map((s) => s.id));
+      const missingGold = sc.gold_skill_ids.filter((g) => !poolIdSet.has(g));
+      if (missingGold.length) {
+        throw new Error(
+          `pool for ${sc.id} (pool_size=${poolSize}) is missing gold [${missingGold.join(", ")}] — ` +
+            `pool is not gold-complete`,
+        );
+      }
+      const poolIds = pool.map((s) => s.id);
       const kValues = [...new Set([1, 3, 5, topK, poolSize])].filter((k) => k <= poolSize);
 
       const catalog = method === "bm25" ? new SkillCatalog() : new SkillCatalog({ method });
@@ -237,6 +258,7 @@ async function main(): Promise<void> {
             category,
             target_pool_size: poolSize,
             actual_pool_size: pool.length,
+            pool_ids: poolIds,
             k,
             pool_size: poolSize,
             retrieved: hits.slice(0, k),

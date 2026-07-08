@@ -110,6 +110,12 @@ pub struct RetrievalRow {
     pub category: Option<String>,
     pub target_pool_size: usize,
     pub actual_pool_size: usize,
+    /// The full pool membership (gold + distractors) this cell was ranked over,
+    /// in pool order (gold first). Unlike `metrics.retrieved` — which is the
+    /// retriever's *ranking* and, for BM25, omits zero-score docs — this is the
+    /// authoritative pool the downstream LLM eval reuses for `control-baseline`
+    /// and that `--pool-from` reconstructs from. Gold is guaranteed present.
+    pub pool_ids: Vec<String>,
     /// BM25 engine version (= `ratel-ai-core` crate). Rides every row so the
     /// markdown report (which reads per-row JSONL, not the summary) can surface
     /// it. Mirrors the agent layer's per-cell `ratel_version`.
@@ -252,7 +258,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
     let mut buckets: HashMap<Bucket, BucketAcc> = HashMap::new();
 
     // Phase 1 — evaluate every scenario (the embedding-heavy work) in parallel.
-    let per_scenario: Vec<Vec<(usize, Vec<RetrievalMetrics>)>> =
+    let per_scenario: Vec<Vec<(usize, Vec<String>, Vec<RetrievalMetrics>)>> =
         parallel_map(&scenarios, config.jobs, |scenario| {
             evaluate_scenario(
                 &scenario.candidate_pool,
@@ -275,7 +281,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         let acc = buckets.entry(bucket).or_default();
         acc.scenarios += 1;
 
-        for (&target_size, (actual_pool_size, all_metrics)) in
+        for (&target_size, (actual_pool_size, pool_ids, all_metrics)) in
             config.pool_sizes.iter().zip(per_pool.iter())
         {
             acc.record(target_size, all_metrics);
@@ -291,6 +297,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
                     category: scenario.category.clone(),
                     target_pool_size: target_size,
                     actual_pool_size: *actual_pool_size,
+                    pool_ids: pool_ids.clone(),
                     ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
                     metrics: metrics.clone(),
                 };
@@ -580,7 +587,7 @@ pub(crate) fn evaluate_scenario<T: Identified + Clone>(
     pool_sizes: &[usize],
     top_ks: &[usize],
     evaluate: impl Fn(&[T], &str, &[String], &[usize]) -> Vec<RetrievalMetrics>,
-) -> Vec<(usize, Vec<RetrievalMetrics>)> {
+) -> Vec<(usize, Vec<String>, Vec<RetrievalMetrics>)> {
     let own: HashSet<&str> = scenario_pool.iter().map(|t| t.id()).collect();
     let mut distractors: Vec<T> = universe
         .iter()
@@ -595,8 +602,11 @@ pub(crate) fn evaluate_scenario<T: Identified + Clone>(
         .iter()
         .map(|&size| {
             let pool = build_pool(scenario_pool, &distractors, size);
+            // Capture the full membership (gold-first) before it's reduced to a
+            // count — this is the authoritative pool downstream reuses.
+            let pool_ids: Vec<String> = pool.iter().map(|t| t.id().to_string()).collect();
             let metrics = evaluate(&pool, prompt, gold, top_ks);
-            (pool.len(), metrics)
+            (pool.len(), pool_ids, metrics)
         })
         .collect()
 }

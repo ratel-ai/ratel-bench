@@ -134,7 +134,10 @@ export function buildCandidateSets(
   for (const [scenarioId, rs] of byScenario) {
     const head = rs[0];
     const ids = (k: number) => rs.find((r) => r.k === k)?.retrieved.map((h) => h.id);
-    const fullPool = ids(poolSize);
+    // control-baseline sees the WHOLE pool → use authoritative `pool_ids` (gold-complete),
+    // NOT `retrieved@k=poolSize` (the retriever's ranking, which for BM25 drops zero-score
+    // gold). Fall back to the ranking only for pre-fix files that lack pool_ids.
+    const fullPool = head.pool_ids ?? ids(poolSize);
     const ratel = ids(ratelTopK);
     if (!fullPool || !ratel) continue; // need both k slices to form the A/B
     out.push({

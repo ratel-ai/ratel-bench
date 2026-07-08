@@ -186,7 +186,7 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
 
     // Phase 1 — evaluate every instance (the embedding-heavy work) in parallel.
     // Resolving gold skills is part of the per-instance closure so it stays pure.
-    let per_instance: Vec<Vec<(usize, Vec<crate::retrieval::RetrievalMetrics>)>> =
+    let per_instance: Vec<Vec<(usize, Vec<String>, Vec<crate::retrieval::RetrievalMetrics>)>> =
         parallel_map(&instances, config.jobs, |inst| {
             // Resolve gold skills from the catalog (ingest guarantees presence).
             let gold_specs: Vec<SkillSpec> = inst
@@ -215,7 +215,7 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
         all.scenarios += 1;
         let category = format!("sragents-{}", inst.dataset);
 
-        for (&target_size, (actual_pool_size, all_metrics)) in
+        for (&target_size, (actual_pool_size, pool_ids, all_metrics)) in
             config.pool_sizes.iter().zip(per_pool.iter())
         {
             ds_acc.record(target_size, all_metrics);
@@ -232,6 +232,7 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
                     category: Some(category.clone()),
                     target_pool_size: target_size,
                     actual_pool_size: *actual_pool_size,
+                    pool_ids: pool_ids.clone(),
                     ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
                     metrics: metrics.clone(),
                 };
