@@ -17,6 +17,8 @@
 //   --models 'https://my-host:8000/v1#meta-llama/Llama-3.1-70B-Instruct'
 //   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
@@ -513,6 +515,16 @@ async function runMain(): Promise<void> {
     }
     parsed.output = ephemeralOutputPath();
     cacheSourcePath ??= resolveRepoPath(CANONICAL_AGENT_JSONL);
+  }
+  // Control reuse is ON by default: when writing to a non-canonical file (e.g. a per-method
+  // `agent-0.4.0-sparse.jsonl`), reuse version-independent baseline/oracle from the canonical
+  // `agent.jsonl` in the same directory. A model with no cached controls (new model) just runs
+  // them fresh. `--cache-source` overrides the path; `--force` disables reuse entirely.
+  if (!cacheSourcePath && !parsed.ephemeral) {
+    const canonical = resolveRepoPath(join(dirname(parsed.output), "agent.jsonl"));
+    if (canonical !== resolveRepoPath(parsed.output) && existsSync(canonical)) {
+      cacheSourcePath = canonical;
+    }
   }
   const resolveOpts: ResolveOpts = {
     ollamaBaseURL: parsed.ollamaBaseURL,

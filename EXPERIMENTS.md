@@ -4,17 +4,13 @@
 version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are constant.
 
 ## ⚠️ RULES — always apply (these cost real money / comparability if forgotten)
-1. **`control-baseline` and `control-oracle` are ALWAYS reused from cache — never re-run.**
-   They're retrieval-independent, so re-running them wastes money (control-baseline = full
-   100-tool pool ≈ 8k input tokens per cell).
-   - **BFCL:** separate per-method files + `--cache-source results/raw/bfcl/agent.jsonl` on the
-     `start` command → only `ratel-full` runs live; baseline/oracle pulled from 0.2.0/0.3.0
-     data (`$0`), re-stamped. (Needed because BFCL `ratel-full` collides if methods share a file.)
-   - **SR-Agents:** write all 3 methods to ONE shared file `agent-0.4.0.jsonl` (NO flag) —
-     `sragents-select` auto-reuses controls from that file, and its `ratel-full` doesn't collide.
-     Run **sparse first** (controls computed once for the 0.4.0 pool), then dense/hybrid reuse
-     them. Do NOT write to canonical `agent.jsonl` — SR-Agents controls can't reuse across the
-     0.2.0→0.4.0 pool change, so use a fresh 0.4.0 file.
+1. **`control-baseline` and `control-oracle` are reused from cache automatically — never re-run.**
+   Both `start` and `sragents-select` **default** to reusing version-independent baseline/oracle
+   from the canonical `agent.jsonl` in the OUTPUT file's directory — **no flag needed**. A model
+   with no cached 0.2.0 controls runs them fresh. `--cache-source <path>` overrides; `--force`
+   disables. So writing to `results/raw/bfcl/agent-0.4.0-sparse.jsonl` auto-reuses from
+   `results/raw/bfcl/agent.jsonl` → only `ratel-full` runs live (control-baseline is the
+   expensive arm ≈ 8k input tokens/cell, so this is the big saving).
 2. **SR-Agents LLM eval is ALWAYS 600 scenarios = 100/dataset × 6** — a seeded subset of the
    full 5,400. ALWAYS pin it: `sragents-candidates --scenarios-from results/raw/sragents/candidates.jsonl`.
    Without it, all 5,400 run (9× cost + incomparable set).

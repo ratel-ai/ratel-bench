@@ -17,7 +17,7 @@
 // tokens/cost/latency and appends one cell per (instance, arm, model) to agent.jsonl.
 
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
@@ -485,12 +485,15 @@ async function main(): Promise<void> {
   const { reuse: reuseIndex, current: currentKeys } = force
     ? { reuse: new Map<string, SragentsSelectCell>(), current: new Set<string>() }
     : readControlIndex(outputPath);
-  // --cache-source: also pull version-independent baseline/oracle from a canonical file
-  // (e.g. the 0.2.0 results) so they're reused (re-stamped) instead of re-run. The output
-  // file's own controls take precedence; the cache source only fills gaps.
-  const cacheSource = arg("--cache-source", "");
-  if (cacheSource && !force) {
-    const ext = readControlIndex(resolveRepoPath(cacheSource));
+  // Control reuse is ON by default: pull version-independent baseline/oracle from the canonical
+  // `agent.jsonl` in the output's directory (the 0.2.0 results) so they're reused (re-stamped)
+  // instead of re-run. A model with no cached controls just runs them fresh. The output file's
+  // own controls take precedence; the cache source only fills gaps. `--cache-source` overrides
+  // the path; `--force`/`--fresh` disables reuse.
+  let cachePath = arg("--cache-source", "");
+  cachePath = cachePath ? resolveRepoPath(cachePath) : join(dirname(outputPath), "agent.jsonl");
+  if (cachePath !== outputPath && existsSync(cachePath) && !force) {
+    const ext = readControlIndex(cachePath);
     for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
   }
   const liveTasks: Task[] = [];
