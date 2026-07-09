@@ -31,6 +31,10 @@ export interface BfclRetrievalRow {
   query: string;
   golden_answer: string[];
   retrieved: Array<{ id: string; score: number }>;
+  /** Full pool membership (gold + distractors, gold-first) this cell was ranked over.
+   *  Authoritative pool for the LLM eval's `control-baseline`; unlike `retrieved`, it
+   *  never drops zero-score docs. Optional for back-compat with pre-fix files. */
+  pool_ids?: string[];
   k: number;
   target_pool_size: number;
   pool_size: number;

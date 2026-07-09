@@ -17,7 +17,7 @@
 // tokens/cost/latency and appends one cell per (instance, arm, model) to agent.jsonl.
 
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
@@ -26,6 +26,7 @@ import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { appendJsonl, readJsonl } from "./io.js";
 import { dollarCost } from "./metering.js";
+import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -48,7 +49,13 @@ interface RunnerModel {
   model: LanguageModel;
 }
 
-function resolveModel(modelId: string, ollamaBaseURL: string): RunnerModel {
+function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): RunnerModel {
+  // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
+  const ep = parseCustomEndpoint(modelId);
+  if (ep) {
+    const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
+    return { id: modelId, model: provider.chat(ep.modelName) };
+  }
   if (modelId.startsWith(OLLAMA_PREFIX)) {
     const provider = createOpenAI({ baseURL: ollamaBaseURL, apiKey: "ollama" });
     return { id: modelId, model: provider.chat(modelId.slice(OLLAMA_PREFIX.length)) };
@@ -64,7 +71,8 @@ function resolveModel(modelId: string, ollamaBaseURL: string): RunnerModel {
     return { id: modelId, model: openai(modelId) };
   }
   throw new Error(
-    `unknown model provider for: ${modelId} (expected gpt-*, claude-*, ollama:<tag>)`,
+    `unknown model provider for: ${modelId} ` +
+      `(expected gpt-*, claude-*, ollama:<tag>, or a user-hosted <baseURL>#<model-name> URL)`,
   );
 }
 
@@ -126,7 +134,10 @@ export function buildCandidateSets(
   for (const [scenarioId, rs] of byScenario) {
     const head = rs[0];
     const ids = (k: number) => rs.find((r) => r.k === k)?.retrieved.map((h) => h.id);
-    const fullPool = ids(poolSize);
+    // control-baseline sees the WHOLE pool → use authoritative `pool_ids` (gold-complete),
+    // NOT `retrieved@k=poolSize` (the retriever's ranking, which for BM25 drops zero-score
+    // gold). Fall back to the ranking only for pre-fix files that lack pool_ids.
+    const fullPool = head.pool_ids ?? ids(poolSize);
     const ratel = ids(ratelTopK);
     if (!fullPool || !ratel) continue; // need both k slices to form the A/B
     out.push({
@@ -427,6 +438,8 @@ async function main(): Promise<void> {
   const seed = Number(arg("--seed", "42"));
   const quiet = process.argv.includes("--quiet") || process.argv.includes("-q");
   const ollamaBaseURL = process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL;
+  // Bearer token for user-hosted `<url>#<model>` endpoints (optional).
+  const modelApiKey = arg("--model-api-key", process.env.AWS_BEDROCK_BEARER ?? "");
 
   const rows = readJsonl<SragentsRetrievalRow>(candidatesPath);
   if (rows.length === 0) {
@@ -444,7 +457,9 @@ async function main(): Promise<void> {
     scenarios = stratifiedSample(scenarios, scenarioLimit, seed);
   }
 
-  const resolved = models.map((m) => resolveModel(m, ollamaBaseURL));
+  const resolved = models.map((m) => resolveModel(m, ollamaBaseURL, modelApiKey));
+  // Warm any user-hosted endpoints once before the campaign (no-op for cloud/ollama ids).
+  await warmUpModels(models, modelApiKey);
   const catalog = await loadCatalogMeta(catalogPath);
 
   // Enumerate cells: run × scenario × arm × model.
@@ -473,6 +488,17 @@ async function main(): Promise<void> {
   const { reuse: reuseIndex, current: currentKeys } = force
     ? { reuse: new Map<string, SragentsSelectCell>(), current: new Set<string>() }
     : readControlIndex(outputPath);
+  // Control reuse is ON by default: pull version-independent baseline/oracle from the canonical
+  // `agent.jsonl` in the output's directory (the 0.2.0 results) so they're reused (re-stamped)
+  // instead of re-run. A model with no cached controls just runs them fresh. The output file's
+  // own controls take precedence; the cache source only fills gaps. `--cache-source` overrides
+  // the path; `--force`/`--fresh` disables reuse.
+  let cachePath = arg("--cache-source", "");
+  cachePath = cachePath ? resolveRepoPath(cachePath) : join(dirname(outputPath), "agent.jsonl");
+  if (cachePath !== outputPath && existsSync(cachePath) && !force) {
+    const ext = readControlIndex(cachePath);
+    for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
+  }
   const liveTasks: Task[] = [];
   let reused = 0;
   for (const t of tasks) {

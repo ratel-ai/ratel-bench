@@ -97,6 +97,8 @@ Resumable — re-runs skip cells already in `agent.jsonl` unless `--force`. Pass
 
 `--timeout-ms N` (default 60000) sets the per-cell wall-clock timeout. Cloud models rarely need more, but local Ollama models (especially CPU-bound or large 70B+) can comfortably exceed a minute on a 12-step trace — bump to `300000` (5 min) or higher when you see `run timed out after 60000ms` errors in the trace.
 
+`--retriever bm25|semantic|hybrid` (default `bm25`) picks the retrieval method the Ratel arms use — this is the **0.4.0** knob (sparse / dense / hybrid). Pre-0.4.0 versions don't accept it; their runs are unchanged. Since there is no Rust `ratel-ai-core` 0.4.0, generation runs SDK-side: pin the 0.4.0 SDK, tag each method as its own report layer with `RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`, and set `--retriever`. `control-baseline`/`control-oracle` are retriever-independent and reused from the canonical 0.2.0 cache (see "Cached control runs") — run the *first* method with `--force` to purge any stale/pre-fix cells so a gold-incomplete 0.2.0 pool can't skew the numbers. See [`EXPERIMENTS.md`](../EXPERIMENTS.md) for the full per-method recipe. `bfcl-candidates` and `sragents-candidates` take the same flag; `sragents-select` does not (it reads pre-ranked candidates).
+
 `--pool-sizes` controls the per-scenario tool catalog (gold + distractors pulled from other scenarios). Accepts a comma-separated list (e.g. `--pool-sizes 30,100,180`) — each scenario is evaluated at every requested size, and the report breaks the headline / savings / failure tables down per pool. Pass a single value to skip the sweep. The legacy singular form `--pool-size 180` still works as an alias for one value but rejects commas. The default (180) sits at the MetaTool plugin universe ceiling; smaller values stress retrieval less, larger values are clamped at the universe size. Pool-size-agnostic arms (currently just `control-oracle`) ignore this flag and emit one cell per (scenario, model, run) regardless of how many sizes are listed.
 
 ## Pinned `@ratel-ai/sdk` version
@@ -151,6 +153,27 @@ Flags:
 - `--judge-model MODEL` — pick any model id (cloud or `ollama:*`) for the LLM judge. Defaults to `claude-sonnet-4-6` when `ANTHROPIC_API_KEY` is set, otherwise the LLM judge is disabled and only the programmatic verdict is recorded.
 
 `dollar_cost` is recorded as `0` for `ollama:*` cells — `--dollar-global` therefore never trips on local-only runs. If you mix cloud + local models in one run, the cap still bounds the cloud spend. The model id keeps its `ollama:` prefix in the JSONL row and the report so local vs cloud cells stay distinguishable.
+
+## Remote / user-hosted endpoints
+
+To evaluate a model you host yourself (vLLM, TGI, LM Studio, or an AWS API-Gateway-fronted model) that exposes an **OpenAI-compatible** `/v1` endpoint, embed the URL in the model id as `<baseURL>#<model-name>`. For setting up the AWS API Gateway endpoint (the `qwen3-4b` example below), see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
+
+```bash
+pnpm -F @ratel-ai/benchmark start \
+  --scenarios 50 --runs 1 \
+  --arms control-baseline,ratel-full \
+  --models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b' \
+  --pool-sizes 30 --no-judge \
+  --concurrency 2 \
+  --timeout-ms 120000     # remote/cold models often need more than 60s
+```
+
+- **Auth:** `AWS_BEDROCK_BEARER` is simply the env var the benchmark reads for the endpoint's bearer token — put it in `agent/.env` (gitignored), or override with `--model-api-key <token>`. Unauthenticated endpoints work with no token.
+- **Auto-warm:** before the run, each `<url>#<model>` endpoint is warmed via `POST <baseURL>/warm` and polled until ready, so scale-to-zero gateways don't fail every early cell on the cold start. Endpoints without a `/warm` route are skipped gracefully.
+- **Cost / id:** like `ollama:*`, remote cells record `dollar_cost = 0` (you pay your own infra) and keep the full `<url>#<model>` string as the row/report id.
+- **Same syntax for SR-Agents** — `pnpm -F @ratel-ai/benchmark sragents-select --models '<url>#<model>' …` (see the repo-root README, Scenario 3).
+
+Tool calling and structured output still depend on the model's native capabilities — a small remote model may log zero tool calls (BFCL) or fail strict schema generation (SR-Agents) just as a small local model would.
 
 ## Generate the report only
 

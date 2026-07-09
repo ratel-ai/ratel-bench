@@ -11,7 +11,13 @@
 // SDK's tool loop.
 
 import { invokeToolTool, searchToolsTool, ToolCatalog } from "@ratel-ai/sdk";
-import type { AgentDescriptor, AgentRunInput, Scenario, ToolSpec } from "../../types.js";
+import type {
+  AgentDescriptor,
+  AgentRunInput,
+  RetrievalMethod,
+  Scenario,
+  ToolSpec,
+} from "../../types.js";
 import {
   emptyToolBundle,
   registerDirect,
@@ -32,11 +38,20 @@ export function buildRatelFullBundle(input: {
   scenario: Pick<Scenario, "prompt">;
   pool: ToolSpec[];
   topK: number;
+  /** Retrieval method for both layers. Defaults to bm25 (model-free, no embeddings). */
+  retriever?: RetrievalMethod;
 }): { bundle: ToolBundle; catalog: ToolCatalog } {
-  // 1. Catalog backs both layers: pre-discovery uses it for BM25, and the
-  //    gateway tools call back into the same instance to search/invoke at
-  //    agent runtime.
-  const catalog = new ToolCatalog();
+  // 1. Catalog backs both layers: pre-discovery uses it for retrieval, and the
+  //    gateway tools call back into the same instance to search/invoke at agent
+  //    runtime — so the `method` set here governs pre-discovery AND the gateway.
+  //
+  //    `semantic`/`hybrid` are a 0.4.0+ capability (`ToolCatalog({ method })` +
+  //    `buildEmbeddings()`). `bm25` is the default on every SDK version, so it
+  //    uses the plain constructor — this keeps the 0.2.0 / 0.3.0-rc.1 code paths
+  //    (older SDKs that lack the `method` option and `buildEmbeddings`) working
+  //    exactly as before. Only touch the new API when a non-bm25 method is asked.
+  const method: RetrievalMethod = input.retriever ?? "bm25";
+  const catalog = method === "bm25" ? new ToolCatalog() : new ToolCatalog({ method });
   for (const spec of input.pool) {
     catalog.register({
       id: spec.id,
@@ -47,6 +62,8 @@ export function buildRatelFullBundle(input: {
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
     });
   }
+  // semantic/hybrid rank against an embedding cache built here; 0.4.0+ only.
+  if (method !== "bm25") catalog.buildEmbeddings();
 
   const bundle = emptyToolBundle();
 

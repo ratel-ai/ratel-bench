@@ -8,16 +8,27 @@
 // OpenAI-compatible endpoint (http://localhost:11434/v1 by default). Examples:
 //   --models ollama:qwen3.5,ollama:gemma4
 //   --judge-model ollama:qwen3.5         (cost-free judge)
+//
+// User-hosted models (e.g. vLLM/TGI/LM Studio on EC2, or an AWS API-Gateway-fronted
+// model) that expose an OpenAI-compatible endpoint are addressed by embedding the
+// URL in the model string as `<baseURL>#<model-name>`. Optional bearer token via
+// --model-api-key or AWS_BEDROCK_BEARER env; endpoints are auto-warmed before the run.
+// Examples:
+//   --models 'https://my-host:8000/v1#meta-llama/Llama-3.1-70B-Instruct'
+//   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import type { JudgePromptVariant } from "./judges/llm.js";
+import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
-import type { Arm } from "./types.js";
+import type { Arm, RetrievalMethod } from "./types.js";
 
 loadEnv();
 
@@ -115,11 +126,16 @@ interface ParsedArgs {
   output: string;
   outputExplicit: boolean;
   ephemeral: boolean;
+  /** Reuse version-independent control cells (baseline/oracle) from this canonical file
+   * instead of re-running them. Lets a per-method output file still pull cached controls. */
+  cacheSource?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
   runs: number;
   topK: number;
+  /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
+  retriever: RetrievalMethod;
   poolSizes: number[];
   maxSteps: number;
   timeoutMs: number;
@@ -131,6 +147,8 @@ interface ParsedArgs {
   /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
   judgeModelId?: string;
   ollamaBaseURL: string;
+  /** Optional bearer token for a user-hosted (`<url>#<model>`) endpoint. */
+  modelApiKey?: string;
   seed: number;
   /** Cells in flight at once. See `RunnerConfig.concurrency` for cap semantics. */
   concurrency: number;
@@ -147,6 +165,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     models: ["gpt-5.4-mini", "claude-sonnet-4-6"],
     runs: 1,
     topK: 5,
+    retriever: "bm25",
     poolSizes: [180],
     maxSteps: 12,
     timeoutMs: 60_000,
@@ -155,6 +174,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
     noJudge: false,
     noAst: false,
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    modelApiKey: process.env.AWS_BEDROCK_BEARER,
     seed: 42,
     concurrency: 10,
     logLevel: "normal",
@@ -177,6 +197,9 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
       case "--ephemeral":
         args.ephemeral = true;
         break;
+      case "--cache-source":
+        args.cacheSource = next();
+        break;
       case "--scenarios":
         args.scenarios = Number(next());
         break;
@@ -192,6 +215,14 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
       case "--top-k":
         args.topK = Number(next());
         break;
+      case "--retriever": {
+        const v = next();
+        if (v !== "bm25" && v !== "semantic" && v !== "hybrid") {
+          throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${v}")`);
+        }
+        args.retriever = v;
+        break;
+      }
       case "--pool-size":
         args.poolSizes = [parsePoolSize(flag, next())];
         break;
@@ -222,6 +253,9 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
         break;
+      case "--model-api-key":
+        args.modelApiKey = next();
+        break;
       case "--seed":
         args.seed = Number(next());
         break;
@@ -250,6 +284,8 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
 
 interface ResolveOpts {
   ollamaBaseURL: string;
+  /** Bearer token for user-hosted `<url>#<model>` endpoints (optional). */
+  modelApiKey?: string;
 }
 
 /**
@@ -273,7 +309,27 @@ function resolveOllama(modelTag: string, baseURL: string): RunnerModel {
   return { id: `${OLLAMA_PREFIX}${modelTag}`, model: provider.chat(modelTag) };
 }
 
+/**
+ * Resolve a user-hosted model addressed as `<baseURL>#<model-name>` (e.g. a
+ * vLLM/TGI/LM Studio server on EC2). Reuses the OpenAI-compatible SDK client
+ * pointed at the caller's URL, exactly like {@link resolveOllama}, with
+ * `.chat(...)` to force the legacy `/v1/chat/completions` wire format that
+ * self-hosted servers implement (they rarely speak OpenAI's Responses API).
+ *
+ * The full `<url>#<model>` string is kept as the id so report rows are
+ * unambiguous. Auth is optional: a bearer token from --model-api-key /
+ * AWS_BEDROCK_BEARER when set, else a dummy key (unauthenticated endpoints).
+ */
+function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): RunnerModel {
+  const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: opts.modelApiKey ?? "none" });
+  return { id: raw, model: provider.chat(ep.modelName) };
+}
+
 function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
+  const ep = parseCustomEndpoint(modelId);
+  if (ep) {
+    return resolveCustomEndpoint(modelId, ep, opts);
+  }
   if (modelId.startsWith(OLLAMA_PREFIX)) {
     return resolveOllama(modelId.slice(OLLAMA_PREFIX.length), opts.ollamaBaseURL);
   }
@@ -291,7 +347,8 @@ function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
   }
   throw new Error(
     `unknown model provider for: ${modelId} ` +
-      `(expected gpt-*, claude-*, or ${OLLAMA_PREFIX}<tag>)`,
+      `(expected gpt-*, claude-*, ${OLLAMA_PREFIX}<tag>, or a user-hosted ` +
+      `<baseURL>#<model-name> URL)`,
   );
 }
 
@@ -304,7 +361,10 @@ function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
 function resolveJudge(parsed: ParsedArgs): LanguageModel | undefined {
   if (parsed.noJudge) return undefined;
   if (parsed.judgeModelId) {
-    return resolveModel(parsed.judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model;
+    return resolveModel(parsed.judgeModelId, {
+      ollamaBaseURL: parsed.ollamaBaseURL,
+      modelApiKey: parsed.modelApiKey,
+    }).model;
   }
   if (process.env.ANTHROPIC_API_KEY) return anthropic("claude-sonnet-4-6");
   return undefined;
@@ -332,6 +392,8 @@ interface RejudgeParsedArgs {
   promptVariant: JudgePromptVariant;
   out?: string;
   ollamaBaseURL: string;
+  /** Bearer token for a user-hosted (`<url>#<model>`) judge endpoint (optional). */
+  modelApiKey?: string;
   /** Skip the LLM judge — only recompute the (LLM-free) AST task-completion verdict. */
   noJudge: boolean;
 }
@@ -342,6 +404,7 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
     corpus: "test-data/metatool.jsonl",
     promptVariant: "strict",
     ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    modelApiKey: process.env.AWS_BEDROCK_BEARER,
     noJudge: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -375,6 +438,9 @@ function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
         break;
+      case "--model-api-key":
+        args.modelApiKey = next();
+        break;
       default:
         if (flag.startsWith("-")) {
           throw new Error(`unknown flag for rejudge: ${flag}`);
@@ -406,7 +472,10 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   // `--no-judge`: AST-only re-score — no LLM model resolved or called.
   const judgeModelId = parsed.noJudge ? undefined : (parsed.judgeModelId ?? "claude-sonnet-4-6");
   const judgeModel = judgeModelId
-    ? resolveModel(judgeModelId, { ollamaBaseURL: parsed.ollamaBaseURL }).model
+    ? resolveModel(judgeModelId, {
+        ollamaBaseURL: parsed.ollamaBaseURL,
+        modelApiKey: parsed.modelApiKey,
+      }).model
     : undefined;
 
   const inputPath = resolveRepoPath(parsed.input);
@@ -437,16 +506,34 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
-  let cacheSourcePath: string | undefined;
+  let cacheSourcePath: string | undefined = parsed.cacheSource
+    ? resolveRepoPath(parsed.cacheSource)
+    : undefined;
   if (parsed.ephemeral) {
     if (parsed.outputExplicit) {
       throw new Error("--ephemeral and --output are mutually exclusive");
     }
     parsed.output = ephemeralOutputPath();
-    cacheSourcePath = resolveRepoPath(CANONICAL_AGENT_JSONL);
+    cacheSourcePath ??= resolveRepoPath(CANONICAL_AGENT_JSONL);
   }
-  const resolveOpts: ResolveOpts = { ollamaBaseURL: parsed.ollamaBaseURL };
+  // Control reuse is ON by default: when writing to a non-canonical file (e.g. a per-method
+  // `agent-0.4.0-sparse.jsonl`), reuse version-independent baseline/oracle from the canonical
+  // `agent.jsonl` in the same directory. A model with no cached controls (new model) just runs
+  // them fresh. `--cache-source` overrides the path; `--force` disables reuse entirely.
+  if (!cacheSourcePath && !parsed.ephemeral) {
+    const canonical = resolveRepoPath(join(dirname(parsed.output), "agent.jsonl"));
+    if (canonical !== resolveRepoPath(parsed.output) && existsSync(canonical)) {
+      cacheSourcePath = canonical;
+    }
+  }
+  const resolveOpts: ResolveOpts = {
+    ollamaBaseURL: parsed.ollamaBaseURL,
+    modelApiKey: parsed.modelApiKey,
+  };
   const models = parsed.models.map((m) => resolveModel(m, resolveOpts));
+  // Warm any user-hosted endpoints once so early cells don't burn their timeout on
+  // a cold start (no-op for cloud/ollama model ids).
+  await warmUpModels(parsed.models, parsed.modelApiKey);
   const judgeModel = resolveJudge(parsed);
 
   if (!parsed.noJudge && !judgeModel) {
@@ -464,6 +551,7 @@ async function runMain(): Promise<void> {
     models,
     runsPerCell: parsed.runs,
     topK: parsed.topK,
+    retriever: parsed.retriever,
     poolSizes: parsed.poolSizes,
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,

@@ -38,7 +38,7 @@ Three datasets the arms run against:
 | **ToolRet** | 44k-tool public retrieval corpus, 35 sub-corpora | Apache 2.0 |
 | **BFCL** | Berkeley Function-Calling Leaderboard — measures right function + right arguments, not just tool selection | Apache 2.0 |
 
-Retrieval evals (does BM25 rank correctly?) are deterministic and free. Agent campaign evals (does the full agent do better with Ratel?) require at least one of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+Retrieval evals (does BM25 rank correctly?) are deterministic and free. Agent campaign evals (does the full agent do better with Ratel?) require at least one of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` — or a user-hosted OpenAI-compatible endpoint, which needs no cloud key (see Scenario 3/4).
 
 ## Setup
 
@@ -54,6 +54,8 @@ API keys for the agent campaign (mode c only — place in `.env` at the repo roo
 ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 ```
+
+To benchmark a user-hosted (`<url>#<model>`) endpoint instead, no cloud key is needed; put the endpoint's bearer token in `agent/.env` (gitignored) as `AWS_BEDROCK_BEARER=...` — or pass `--model-api-key`. Unauthenticated endpoints need no token. See Scenario 3/4.
 
 ## Run
 
@@ -85,6 +87,8 @@ There are **two version knobs**, and which one matters depends on the eval:
 
 - **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). Swap it with the `version-set` / `version-reset` bookends below.
 - **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it; you bump it in `agent/package.json` (see Scenario 4).
+
+> **Pre-0.4.0 versions all run the identical experiment above — the commands don't change between them.** 0.4.0 is the first version that lets you **choose the retriever**, so its runs differ only slightly: pin the 0.4.0 SDK, tag the run with a method-suffixed label (`RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`), and add `--retriever bm25|semantic|hybrid`. Everything else — pools, top-k, arms, scenario counts — is unchanged. `control-baseline` and `control-oracle` are retriever-independent, so they're **reused from the canonical 0.2.0 cache** rather than re-run — but purge any stale/pre-fix cached cells (`--force` on the *first* method) so a gold-incomplete or poisoned 0.2.0 pool can't skew the 0.4.0 numbers. See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact per-method commands.
 
 ### The version bookends
 
@@ -222,8 +226,9 @@ pnpm version-reset
 - **The candidate-gen run is separate from Scenario 1.** It writes a *different* file (`candidates.jsonl`, not `retrieval-rows.jsonl`) with *different* slices (`--top-k 10,50 --pool-sizes 50`). The LLM arms need both the `k=10` slice (Ratel's shortlist → `ratel-full`) and the `k=50` slice (full pool → `control-baseline`). A quality-run file (`--top-k 1,3,5`) makes the LLM step **skip every scenario**.
 - "Parallelized" here is the same env-pin trick on the candidate-gen retrieval; the LLM step's own parallelism is `--concurrency`.
 - `sragents-select` — the LLM A/B. Reads `--candidates`, runs three arms (`control-baseline`, `ratel-full`, `control-oracle`) per scenario, writes `results/raw/sragents/agent.jsonl` (**overwritten** — copy aside to keep prior cells). **Version is stamped from the live `Cargo.lock`**, so keep the same pin as the candidate-gen run or the label won't match the retrieval it used.
-  - `--models` — comma-separated; `claude-*`, `gpt-*`, or `ollama:<tag>`. Use a *different* list than Scenario 4 for per-benchmark models.
+  - `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL (see below). Use a *different* list than Scenario 4 for per-benchmark models.
   - `--pool-size 50 --top-k 10` — **must** match the candidate-gen slices.
+  - **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Put the endpoint's bearer token in `agent/.env` as `AWS_BEDROCK_BEARER` (or pass `--model-api-key`); unauthenticated endpoints need no token. The endpoint is auto-warmed (`POST /warm`, polled until ready) before the run. Cells record `$0` cost and keep the full URL as the model id. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
   - `--concurrency 8` — parallel LLM calls. `--dollar-global 5` — hard USD cost cap for the run. `--scenarios 600` — cap; `--runs 1` repeats per cell.
 - summarize/report fold the cells into the task-completion section of `report.json`; the task-completion numbers live in `report.json` / the website.
 
@@ -272,7 +277,8 @@ pnpm version-reset
 - `start` (`agent/src/cli.ts`) — the BFCL agent runner. The `ratel-full` arm builds a live `ToolCatalog` from `@ratel-ai/sdk` and calls `catalog.search()` + the `search_tools` / `invoke_tool` gateway during the agent loop, so **the SDK version is the retriever** (recorded as `ratel_version`).
 - `--corpus test-data/bfcl-all.jsonl` — operates on the corpus directly (no candidates file). `--arms` — the three arms. `--pool-sizes 100` — catalog size per scenario. `--no-judge` — skip the LLM judge (use AST / programmatic verdicts). `--runs 1` — one run per cell.
 - **Normal vs parallelized:** the BFCL agent doesn't use the Rust thread-pool; it's network-latency-bound, so parallelism is just `--concurrency` (raise it to overlap more in-flight API calls — mind provider rate limits).
-- `--models` — set a *different* list than Scenario 3 for per-benchmark models.
+- `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Set a *different* list than Scenario 3 for per-benchmark models.
+- **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Bearer token → `agent/.env` as `AWS_BEDROCK_BEARER` (or `--model-api-key`), unauthenticated endpoints need none; the endpoint is auto-warmed before the run; cells record `$0` and keep the full URL as the model id. Use a longer `--timeout-ms` (e.g. 120000) for cold/remote models. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
 - summarize/report fold the cells into `report.json`. Because both `ratel_version` (SDK) and `ratel_ai_core_version` (core, from the lock) are recorded, the report can refuse to merge layers whose versions disagree — which is why steps 1 and 2 must target the same 0.3.0. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
 
 ---
