@@ -14,10 +14,6 @@
   </p>
 </div>
 
-<div align="center">
-  <img src="./docs/assets/hero.webp" width="960" alt="Ratel benchmark" />
-</div>
-
 ## Introduction
 
 The benchmark compares agent performance with and without Ratel across real tasks, using three arms run in parallel:
