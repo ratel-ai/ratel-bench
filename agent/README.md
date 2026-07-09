@@ -154,19 +154,19 @@ Flags:
 
 ## Remote / user-hosted endpoints
 
-To evaluate a model you host yourself (vLLM, TGI, LM Studio, or an AWS API-Gateway-fronted model) that exposes an **OpenAI-compatible** `/v1` endpoint, embed the URL in the model id as `<baseURL>#<model-name>`:
+To evaluate a model you host yourself (vLLM, TGI, LM Studio, or an AWS API-Gateway-fronted model) that exposes an **OpenAI-compatible** `/v1` endpoint, embed the URL in the model id as `<baseURL>#<model-name>`. For setting up the AWS API Gateway endpoint (the `qwen3-4b` example below), see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
 
 ```bash
 pnpm -F @ratel-ai/benchmark start \
   --scenarios 50 --runs 1 \
   --arms control-baseline,ratel-full \
-  --models 'https://6nea2psszc.execute-api.eu-central-1.amazonaws.com/v1#qwen3-4b' \
+  --models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b' \
   --pool-sizes 30 --no-judge \
   --concurrency 2 \
   --timeout-ms 120000     # remote/cold models often need more than 60s
 ```
 
-- **Auth:** put the bearer token in `agent/.env` as `AWS_BEDROCK_BEARER` (gitignored), or pass `--model-api-key <token>`. Unauthenticated endpoints work with no token.
+- **Auth:** `AWS_BEDROCK_BEARER` is simply the env var the benchmark reads for the endpoint's bearer token — put it in `agent/.env` (gitignored), or override with `--model-api-key <token>`. Unauthenticated endpoints work with no token.
 - **Auto-warm:** before the run, each `<url>#<model>` endpoint is warmed via `POST <baseURL>/warm` and polled until ready, so scale-to-zero gateways don't fail every early cell on the cold start. Endpoints without a `/warm` route are skipped gracefully.
 - **Cost / id:** like `ollama:*`, remote cells record `dollar_cost = 0` (you pay your own infra) and keep the full `<url>#<model>` string as the row/report id.
 - **Same syntax for SR-Agents** — `pnpm -F @ratel-ai/benchmark sragents-select --models '<url>#<model>' …` (see the repo-root README, Scenario 3).

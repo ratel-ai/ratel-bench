@@ -40,7 +40,7 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
 - **Pool rule:** pool = `gold + deterministic distractors`, truncated to pool size; gold
   always present (so recall@pool = 1.0). Mirrors `expandPool` (`agent/src/pool.ts`).
 - **Models:** whatever LLM(s) under test — cloud (`claude-sonnet-4-6`, `gpt-5.4-mini`) or
-  user-hosted via URL (`https://.../v1#qwen3-4b`).
+  user-hosted via URL (`https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b`).
 
 ## Versions & labels
 | Label | Retriever |
@@ -65,7 +65,8 @@ three separate labels (same SDK, different `--retriever`).
 ```bash
 cd /Users/bercaakbayir/Desktop/ratel-ai/ratel-bench
 # user-hosted model + token (token lives in agent/.env as AWS_BEDROCK_BEARER, gitignored)
-M='https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b'
+# gateway setup: https://github.com/ratel-ai/ratel-inference-gateway
+M='https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'
 # 0.4.0 SDK:
 sed -i '' 's#npm:@ratel-ai/sdk@[^"]*#npm:@ratel-ai/sdk@0.4.0#' agent/package.json && pnpm install
 ```
