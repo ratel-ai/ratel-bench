@@ -93,6 +93,25 @@ export interface AgentRunInput {
   pricing?: unknown;
 }
 
+/**
+ * The subset of an `AgentRunInput` an arm needs to pre-build its per-cell tool
+ * surface, independent of the model/run. Passed to `AgentDescriptor.prepare`
+ * (once per unique cell) so expensive, synchronous setup — notably 0.4.0
+ * semantic/hybrid embedding, which is a blocking native call — happens in a
+ * serial pre-pass rather than inside the concurrent metered loop (where it would
+ * inflate other in-flight cells' `wall_ms`).
+ */
+export interface PrewarmInput {
+  scenario: Scenario;
+  /** Expanded pool (gold + distractors) at `poolSize`; empty for agnostic arms. */
+  pool: ToolSpec[];
+  poolSize: number | null;
+  topK: number;
+  retriever: RetrievalMethod;
+  /** Pool seed — part of the cache key so a different-seed pool never reuses a stale bundle. */
+  seed: number;
+}
+
 export interface AgentDescriptor {
   /** Stable arm id; written verbatim to `CellResult.arm`. */
   id: string;
@@ -106,6 +125,14 @@ export interface AgentDescriptor {
    */
   poolSizeAgnostic?: boolean;
   skipForModel?: (modelId: string) => boolean;
+  /**
+   * Optional serial pre-pass, run ONCE with the deduped set of cells this arm
+   * will execute, BEFORE the concurrent metered loop starts. Arms that build
+   * expensive per-cell state (semantic/hybrid embedding) build and cache it here
+   * so the synchronous native work never overlaps — and thus never inflates —
+   * another cell's timed `generate()`. Absent for arms with no such setup.
+   */
+  prepare?: (inputs: PrewarmInput[]) => void | Promise<void>;
   run: (input: AgentRunInput) => Promise<CellResult>;
 }
 

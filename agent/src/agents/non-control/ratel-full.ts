@@ -14,6 +14,7 @@ import { invokeToolTool, searchToolsTool, ToolCatalog } from "@ratel-ai/sdk";
 import type {
   AgentDescriptor,
   AgentRunInput,
+  PrewarmInput,
   RetrievalMethod,
   Scenario,
   ToolSpec,
@@ -27,6 +28,68 @@ import {
 } from "../_shared.js";
 
 const ID = "ratel-full";
+
+// Bundle cache so a cell's tool surface — and, for semantic/hybrid, its
+// registration-time embedding — is built exactly ONCE and reused across every
+// (model, run) that shares the same (scenario, pool, retriever). Populated by
+// `prewarm` in the runner's serial pre-pass; `descriptor.run` reads from it.
+// See `prewarm` for why this must not happen inside the concurrent metered loop.
+const bundleCache = new Map<string, ToolBundle>();
+
+/** Cache key: a bundle is fully determined by scenario + pool + retriever. Seed
+ *  is included because the pool is derived from it, so a different-seed run must
+ *  never reuse a stale bundle. */
+function bundleKey(
+  scenarioId: string,
+  poolSize: number | null,
+  retriever: RetrievalMethod,
+  seed: number,
+): string {
+  return `${scenarioId}::${poolSize}::${retriever}::${seed}`;
+}
+
+/**
+ * Pre-build (and, for semantic/hybrid, embed) each cell's bundle serially,
+ * caching it. `ToolCatalog`'s embedding is a synchronous native (NAPI) call that
+ * blocks the Node event loop; if it ran inside the concurrent agent loop, one
+ * cell's embed would stall every other in-flight cell's `await`ed `generate()`,
+ * inflating their `Date.now()`-based `wall_ms`. Doing it here, off the clock,
+ * keeps `latency_p50_ms` honest — the timed loop then only pays the cheap
+ * query-embed inside `search_tools`. Idempotent: re-prewarming a cached key is a
+ * no-op, so it's safe to call once per campaign.
+ */
+export function prewarm(inputs: PrewarmInput[]): void {
+  for (const input of inputs) {
+    const retriever = input.retriever ?? "bm25";
+    const key = bundleKey(input.scenario.id, input.poolSize, retriever, input.seed);
+    if (bundleCache.has(key)) continue;
+    const { bundle } = buildRatelFullBundle({
+      scenario: input.scenario,
+      pool: input.pool,
+      topK: input.topK,
+      retriever,
+    });
+    bundleCache.set(key, bundle);
+  }
+}
+
+/** Clear the bundle cache. For tests that reuse the module across scenarios. */
+export function resetPrewarmCache(): void {
+  bundleCache.clear();
+}
+
+/** Whether a bundle is already cached for this cell — the lookup `descriptor.run`
+ *  does before falling back to a cold build. Exposed for tests. */
+export function isPrewarmed(cell: {
+  scenario: { id: string };
+  poolSize: number | null;
+  retriever: RetrievalMethod;
+  seed: number;
+}): boolean {
+  return bundleCache.has(
+    bundleKey(cell.scenario.id, cell.poolSize, cell.retriever ?? "bm25", cell.seed),
+  );
+}
 
 /**
  * Construct the catalog + AI SDK tool bundle for one ratel-full cell. Exposed
@@ -96,8 +159,15 @@ export function buildRatelFullBundle(input: {
 export const descriptor: AgentDescriptor = {
   id: ID,
   label: "ratel (full)",
+  // Serial pre-pass: build + embed every cell's bundle before the concurrent
+  // loop, so the blocking native embedding never inflates another cell's timer.
+  prepare: (inputs) => prewarm(inputs),
   run: async (input: AgentRunInput) => {
-    const { bundle } = buildRatelFullBundle(input);
+    // Reuse the prewarmed bundle when present (the production path, so embedding
+    // stayed off the clock); fall back to a cold build otherwise (unit tests /
+    // any caller that skips prepare) — identical tool surface either way.
+    const key = bundleKey(input.scenario.id, input.poolSize, input.retriever, input.seed);
+    const bundle = bundleCache.get(key) ?? buildRatelFullBundle(input).bundle;
     return runMeteredLoop(ID, input, bundle);
   },
 };

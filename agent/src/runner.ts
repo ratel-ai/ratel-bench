@@ -38,6 +38,7 @@ import type {
   AgentDescriptor,
   Arm,
   CellResult,
+  PrewarmInput,
   RetrievalMethod,
   Scenario,
   ToolSpec,
@@ -657,6 +658,45 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   const concurrency = Math.max(1, Math.floor(config.concurrency ?? 1));
   const runCellFn = config.runCell ?? makeRegistryRunCell(registry ?? new Map(), config.judgeModel);
   const logLevel = config.logLevel ?? "normal";
+
+  // Serial prewarm pass: let each arm pre-build expensive per-cell state before
+  // the concurrent metered loop. Semantic/hybrid embedding is a synchronous
+  // native call that blocks the event loop, so building it inside the concurrent
+  // phase stalls other in-flight cells' awaited `generate()` and inflates their
+  // measured `wall_ms`. Running it here, off the clock, keeps latency honest.
+  // Only the production path (registry present, no injected `runCell`) has
+  // descriptors to consult; test runners inject `runCell` and skip this.
+  if (registry && !config.runCell) {
+    for (const arm of config.arms) {
+      const desc = registry.get(arm);
+      if (!desc?.prepare) continue;
+      const seen = new Set<string>();
+      const prewarmInputs: PrewarmInput[] = [];
+      for (const task of liveTasks) {
+        if (task.arm !== arm) continue;
+        const dedupKey = `${task.scenario.id}::${task.poolSize}`;
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        prewarmInputs.push({
+          scenario: task.scenario,
+          pool: task.expandedPool,
+          poolSize: task.poolSize,
+          topK: config.topK,
+          retriever: config.retriever,
+          seed: config.seed,
+        });
+      }
+      if (prewarmInputs.length > 0) {
+        if (logLevel !== "quiet") {
+          console.error(
+            `prewarm: ${arm} building ${prewarmInputs.length} ${config.retriever} ` +
+              `catalog(s) before the timed loop`,
+          );
+        }
+        await desc.prepare(prewarmInputs);
+      }
+    }
+  }
 
   let cellsRun = 0;
   let totalDollars = 0;
