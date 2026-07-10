@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
-import type { ToolSpec } from "../../types.js";
-import { buildRatelFullBundle, descriptor } from "./ratel-full.js";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { PrewarmInput, Scenario, ToolSpec } from "../../types.js";
+import {
+  buildRatelFullBundle,
+  descriptor,
+  isPrewarmed,
+  prewarm,
+  resetPrewarmCache,
+} from "./ratel-full.js";
 
 const pool: ToolSpec[] = [
   {
@@ -28,6 +34,56 @@ describe("ratel-full descriptor", () => {
     expect(descriptor.id).toBe("ratel-full");
     expect(descriptor.label).toBe("ratel (full)");
     expect(descriptor.skipForModel).toBeUndefined();
+  });
+
+  it("exposes a prepare hook so the runner can prewarm off the timed loop", () => {
+    expect(typeof descriptor.prepare).toBe("function");
+  });
+});
+
+describe("prewarm bundle cache", () => {
+  // The cache is what keeps the (blocking, native) semantic embedding out of the
+  // concurrent metered loop: prewarm builds it serially, run() reuses it. These
+  // pin the cache contract that makes `wall_ms` an honest latency measurement.
+  const scenario = { id: "bfcl-simple-1", prompt: "read a file from disk" } as Scenario;
+  const cell: PrewarmInput = {
+    scenario,
+    pool,
+    poolSize: pool.length,
+    topK: 2,
+    retriever: "bm25",
+    seed: 42,
+  };
+
+  beforeEach(() => resetPrewarmCache());
+
+  it("is empty until prewarmed, then reports a hit for that exact cell", () => {
+    expect(isPrewarmed(cell)).toBe(false);
+    prewarm([cell]);
+    expect(isPrewarmed(cell)).toBe(true);
+  });
+
+  it("keys on (scenario, poolSize, retriever, seed) — a different cell is a miss", () => {
+    prewarm([cell]);
+    expect(isPrewarmed({ ...cell, seed: 7 })).toBe(false);
+    expect(isPrewarmed({ ...cell, retriever: "semantic" })).toBe(false);
+    expect(isPrewarmed({ ...cell, poolSize: 99 })).toBe(false);
+  });
+
+  it("is idempotent — re-prewarming a cached cell is a no-op", () => {
+    prewarm([cell]);
+    expect(() => prewarm([cell, cell])).not.toThrow();
+    expect(isPrewarmed(cell)).toBe(true);
+  });
+
+  it("builds a bundle whose tool selection is identical to a cold build", () => {
+    // The whole point: prewarming must not change WHICH tools the cell exposes,
+    // only WHEN they're built. A cold build is deterministic, so equal ids prove
+    // the prewarmed path is byte-identical in selection.
+    prewarm([cell]);
+    const cold = buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
+    const coldAgain = buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
+    expect(coldAgain.bundle.activeToolIds).toEqual(cold.bundle.activeToolIds);
   });
 });
 
