@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-10T08:09:27.391Z",
+  "generated_at": "2026-07-13T14:33:44.018Z",
   "ratel_versions": {
     "0.2.0": {
       "retriever_evaluation": {
@@ -7541,6 +7541,570 @@
                 "recall": 0.8932748538011697,
                 "mean_total_tokens": 2533.9172932330825,
                 "latency_p50_ms": 1365
+              }
+            }
+          }
+        }
+      }
+    },
+    "0.4.0-hybrid": {
+      "retriever_evaluation": {
+        "multiple": {
+          "timestamp": "2026-07-13T08:30:35.202Z",
+          "metrics": [
+            {
+              "pool_size": 30,
+              "k": 1,
+              "n": 200,
+              "mean_precision": 0.965,
+              "median_precision": 1,
+              "mean_recall": 0.965,
+              "median_recall": 1,
+              "mean_mrr": 0.965,
+              "median_mrr": 1,
+              "mean_ndcg": 0.965,
+              "median_ndcg": 1,
+              "accuracy": 0.965,
+              "complete_rate": 0.965,
+              "gold_similarity": {
+                "mean": 0.033326256730704724,
+                "median": 0.03333333507180214,
+                "stddev": 0.000043403565719801914,
+                "coverage": 0.965
+              }
+            },
+            {
+              "pool_size": 30,
+              "k": 3,
+              "n": 200,
+              "mean_precision": 0.333333333333334,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 1,
+              "median_recall": 1,
+              "mean_mrr": 0.9808333333333334,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9857732438392862,
+              "median_ndcg": 1,
+              "accuracy": 1,
+              "complete_rate": 1,
+              "gold_similarity": {
+                "mean": 0.03314362057484686,
+                "median": 0.03333333507180214,
+                "stddev": 0.0016862593915500485,
+                "coverage": 1
+              }
+            },
+            {
+              "pool_size": 30,
+              "k": 5,
+              "n": 200,
+              "mean_precision": 0.20000000000000015,
+              "median_precision": 0.2,
+              "mean_recall": 1,
+              "median_recall": 1,
+              "mean_mrr": 0.9808333333333334,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9857732438392862,
+              "median_ndcg": 1,
+              "accuracy": 1,
+              "complete_rate": 1,
+              "gold_similarity": {
+                "mean": 0.03314362057484686,
+                "median": 0.03333333507180214,
+                "stddev": 0.0016862593915500485,
+                "coverage": 1
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 200,
+              "mean_precision": 0.935,
+              "median_precision": 1,
+              "mean_recall": 0.935,
+              "median_recall": 1,
+              "mean_mrr": 0.935,
+              "median_mrr": 1,
+              "mean_ndcg": 0.935,
+              "median_ndcg": 1,
+              "accuracy": 0.935,
+              "complete_rate": 0.935,
+              "gold_similarity": {
+                "mean": 0.03331297402952444,
+                "median": 0.03333333507180214,
+                "stddev": 0.0000816637428415726,
+                "coverage": 0.935
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 200,
+              "mean_precision": 0.3283333333333341,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.985,
+              "median_recall": 1,
+              "mean_mrr": 0.9591666666666667,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9658918389107154,
+              "median_ndcg": 1,
+              "accuracy": 0.985,
+              "complete_rate": 0.985,
+              "gold_similarity": {
+                "mean": 0.033210165061170076,
+                "median": 0.03333333507180214,
+                "stddev": 0.0012069204095960919,
+                "coverage": 0.985
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 200,
+              "mean_precision": 0.19900000000000012,
+              "median_precision": 0.2,
+              "mean_recall": 0.995,
+              "median_recall": 1,
+              "mean_mrr": 0.9616666666666667,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9701986044914492,
+              "median_ndcg": 1,
+              "accuracy": 0.995,
+              "complete_rate": 0.995,
+              "gold_similarity": {
+                "mean": 0.03311206063433508,
+                "median": 0.03333333507180214,
+                "stddev": 0.0017224498060150807,
+                "coverage": 0.995
+              }
+            }
+          ]
+        },
+        "simple": {
+          "timestamp": "2026-07-13T08:30:35.202Z",
+          "metrics": [
+            {
+              "pool_size": 30,
+              "k": 1,
+              "n": 399,
+              "mean_precision": 0.9699248120300752,
+              "median_precision": 1,
+              "mean_recall": 0.9699248120300752,
+              "median_recall": 1,
+              "mean_mrr": 0.9699248120300752,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9699248120300752,
+              "median_ndcg": 1,
+              "accuracy": 0.9699248120300752,
+              "complete_rate": 0.9699248120300752,
+              "gold_similarity": {
+                "mean": 0.033322767761249567,
+                "median": 0.03333333507180214,
+                "stddev": 0.00005606165950139626,
+                "coverage": 0.9699248120300752
+              }
+            },
+            {
+              "pool_size": 30,
+              "k": 3,
+              "n": 399,
+              "mean_precision": 0.3299916457811179,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.9899749373433584,
+              "median_recall": 1,
+              "mean_mrr": 0.9791144527986633,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9819187431614754,
+              "median_ndcg": 1,
+              "accuracy": 0.9899749373433584,
+              "complete_rate": 0.9899749373433584,
+              "gold_similarity": {
+                "mean": 0.03322964599709722,
+                "median": 0.03333333507180214,
+                "stddev": 0.0011948749658967084,
+                "coverage": 0.9899749373433584
+              }
+            },
+            {
+              "pool_size": 30,
+              "k": 5,
+              "n": 399,
+              "mean_precision": 0.1989974937343373,
+              "median_precision": 0.2,
+              "mean_recall": 0.9949874686716792,
+              "median_recall": 1,
+              "mean_mrr": 0.9803675856307434,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9840775229011918,
+              "median_ndcg": 1,
+              "accuracy": 0.9949874686716792,
+              "complete_rate": 0.9949874686716792,
+              "gold_similarity": {
+                "mean": 0.03318347921243092,
+                "median": 0.03333333507180214,
+                "stddev": 0.0014692856218880366,
+                "coverage": 0.9949874686716792
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 1,
+              "n": 399,
+              "mean_precision": 0.9147869674185464,
+              "median_precision": 1,
+              "mean_recall": 0.9147869674185464,
+              "median_recall": 1,
+              "mean_mrr": 0.9147869674185464,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9147869674185464,
+              "median_ndcg": 1,
+              "accuracy": 0.9147869674185464,
+              "complete_rate": 0.9147869674185464,
+              "gold_similarity": {
+                "mean": 0.03330945360333952,
+                "median": 0.03333333507180214,
+                "stddev": 0.00008903931526169065,
+                "coverage": 0.9147869674185464
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 3,
+              "n": 399,
+              "mean_precision": 0.3274853801169574,
+              "median_precision": 0.3333333333333333,
+              "mean_recall": 0.9824561403508771,
+              "median_recall": 1,
+              "mean_mrr": 0.9469507101086048,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9561688830379539,
+              "median_ndcg": 1,
+              "accuracy": 0.9824561403508771,
+              "complete_rate": 0.9824561403508771,
+              "gold_similarity": {
+                "mean": 0.033274514961759656,
+                "median": 0.03333333507180214,
+                "stddev": 0.00016955540578378068,
+                "coverage": 0.9824561403508771
+              }
+            },
+            {
+              "pool_size": 100,
+              "k": 5,
+              "n": 399,
+              "mean_precision": 0.19799498746867314,
+              "median_precision": 0.2,
+              "mean_recall": 0.9899749373433584,
+              "median_recall": 1,
+              "mean_mrr": 0.948579782790309,
+              "median_mrr": 1,
+              "mean_ndcg": 0.9591873847235239,
+              "median_ndcg": 1,
+              "accuracy": 0.9899749373433584,
+              "complete_rate": 0.9899749373433584,
+              "gold_similarity": {
+                "mean": 0.03321963901855523,
+                "median": 0.03333333507180214,
+                "stddev": 0.0009137540918905652,
+                "coverage": 0.9899749373433584
+              }
+            }
+          ]
+        }
+      },
+      "task_completion": {
+        "claude-haiku-4-5": {
+          "control-baseline": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.655,
+                "selection_accuracy": 0.675,
+                "recall": 0.6695833333333334,
+                "mean_total_tokens": 20682.83,
+                "latency_p50_ms": 4699.5
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.8621553884711779,
+                "selection_accuracy": 0.924812030075188,
+                "recall": 0.898203842940685,
+                "mean_total_tokens": 28073.208020050126,
+                "latency_p50_ms": 5252
+              }
+            }
+          },
+          "control-oracle": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.47,
+                "selection_accuracy": 0.505,
+                "recall": 0.48833333333333345,
+                "mean_total_tokens": 876.3,
+                "latency_p50_ms": 7118.5
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.8972431077694235,
+                "selection_accuracy": 0.949874686716792,
+                "recall": 0.9307852965747704,
+                "mean_total_tokens": 1641.1929824561403,
+                "latency_p50_ms": 4323
+              }
+            }
+          },
+          "ratel-full": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.925,
+                "selection_accuracy": 0.965,
+                "recall": 0.94875,
+                "mean_total_tokens": 3646.255,
+                "latency_p50_ms": 3946
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.9097744360902256,
+                "selection_accuracy": 0.9598997493734336,
+                "recall": 0.9373433583959901,
+                "mean_total_tokens": 3655.937343358396,
+                "latency_p50_ms": 3814
+              }
+            }
+          }
+        },
+        "claude-sonnet-4-6": {
+          "control-baseline": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.915,
+                "selection_accuracy": 0.98,
+                "recall": 0.9520833333333333,
+                "mean_total_tokens": 29159.685,
+                "latency_p50_ms": 8217.5
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.9223057644110275,
+                "selection_accuracy": 0.9799498746867168,
+                "recall": 0.9560568086883878,
+                "mean_total_tokens": 29371.373433583958,
+                "latency_p50_ms": 8952
+              }
+            }
+          },
+          "control-oracle": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.93,
+                "selection_accuracy": 0.985,
+                "recall": 0.95625,
+                "mean_total_tokens": 1811.15,
+                "latency_p50_ms": 8018.5
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.949874686716792,
+                "selection_accuracy": 0.9974937343358395,
+                "recall": 0.9753550543024228,
+                "mean_total_tokens": 1837.3258145363409,
+                "latency_p50_ms": 8301
+              }
+            }
+          },
+          "ratel-full": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.93,
+                "selection_accuracy": 0.97,
+                "recall": 0.95,
+                "mean_total_tokens": 3661.755,
+                "latency_p50_ms": 7900
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.9273182957393483,
+                "selection_accuracy": 0.9724310776942355,
+                "recall": 0.9517543859649122,
+                "mean_total_tokens": 3731.6817042606517,
+                "latency_p50_ms": 7900
+              }
+            }
+          }
+        },
+        "gpt-5.4-mini": {
+          "control-baseline": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.845,
+                "selection_accuracy": 0.975,
+                "recall": 0.9369166666666667,
+                "mean_total_tokens": 14969.85,
+                "latency_p50_ms": 4303
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.849624060150376,
+                "selection_accuracy": 0.9598997493734336,
+                "recall": 0.9261069340016708,
+                "mean_total_tokens": 15024.483709273183,
+                "latency_p50_ms": 4457
+              }
+            }
+          },
+          "control-oracle": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.88,
+                "selection_accuracy": 0.985,
+                "recall": 0.9581666666666666,
+                "mean_total_tokens": 425.64,
+                "latency_p50_ms": 2417
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.8847117794486216,
+                "selection_accuracy": 0.9899749373433584,
+                "recall": 0.9591896407685883,
+                "mean_total_tokens": 433.7468671679198,
+                "latency_p50_ms": 2493
+              }
+            }
+          },
+          "ratel-full": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.835,
+                "selection_accuracy": 0.94,
+                "recall": 0.9135833333333333,
+                "mean_total_tokens": 1692.135,
+                "latency_p50_ms": 3305
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.8471177944862155,
+                "selection_accuracy": 0.9598997493734336,
+                "recall": 0.9245196324143692,
+                "mean_total_tokens": 1660.2431077694237,
+                "latency_p50_ms": 3213
+              }
+            }
+          }
+        },
+        "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b": {
+          "control-baseline": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.905,
+                "selection_accuracy": 0.975,
+                "recall": 0.9485833333333333,
+                "mean_total_tokens": 28027.745,
+                "latency_p50_ms": 3563
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.899749373433584,
+                "selection_accuracy": 0.949874686716792,
+                "recall": 0.9300334168755222,
+                "mean_total_tokens": 28075.4335839599,
+                "latency_p50_ms": 3581
+              }
+            }
+          },
+          "control-oracle": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.955,
+                "selection_accuracy": 0.99,
+                "recall": 0.9766666666666667,
+                "mean_total_tokens": 707.96,
+                "latency_p50_ms": 2314.5
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.9523809523809523,
+                "selection_accuracy": 0.9949874686716792,
+                "recall": 0.9779866332497912,
+                "mean_total_tokens": 716.5914786967419,
+                "latency_p50_ms": 2268
+              }
+            }
+          },
+          "ratel-full": {
+            "multiple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 200,
+                "task_completion_accuracy": 0.855,
+                "selection_accuracy": 0.92,
+                "recall": 0.8958333333333333,
+                "mean_total_tokens": 2537.875,
+                "latency_p50_ms": 1275
+              }
+            },
+            "simple": {
+              "timestamp": "2026-07-13T12:08:04.716Z",
+              "metrics": {
+                "scenarios": 399,
+                "task_completion_accuracy": 0.8621553884711779,
+                "selection_accuracy": 0.9147869674185464,
+                "recall": 0.8888053467000835,
+                "mean_total_tokens": 2540.9924812030076,
+                "latency_p50_ms": 1300
               }
             }
           }
