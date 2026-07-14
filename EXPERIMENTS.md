@@ -97,14 +97,25 @@ pnpm -F @ratel-ai/benchmark bfcl-report
 
 ### SR-Agents
 ```bash
+# --- Reference prep (ONCE, before any method): the --pool-from reference must carry
+#     pool_ids for BOTH pool sizes (50, 100). The SDK looks pool_ids up by `target_pool_size`
+#     and SILENTLY SKIPS any size the reference lacks — a `--pool-sizes 100`-only reference is
+#     why pool-50 retrieval eval was missing for 0.4.0. Same seed/scenarios ⇒ deterministic:
+#     regenerating with 50,100 reproduces the identical 100-pool and just adds the 50-pool.
+cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
+  --instances test-data/sragents.jsonl --skills-catalog test-data/sragents-skills.jsonl \
+  --output results/raw/sragents/candidates.jsonl \
+  --scenarios 600 --top-k 5 --pool-sizes 50,100 --seed 42
+
 # --- Candidate gen (SDK): re-rank the FIXED 0.2.0 pool with the 0.4.0 retriever ---
 # --pool-from reads the canonical pool from the reference's `pool_ids` field (the FULL
-# gold-complete membership — NOT the lossy `retrieved` ranking). Same 100-pool for every
+# gold-complete membership — NOT the lossy `retrieved` ranking). Same 50/100-pool for every
 # version, so control-baseline/oracle stay identical & reusable; only ratel-full's ranking
-# changes. Pins the canonical 600. REQUIRES a pool_ids-aware reference (regenerate the Rust
-# candidates.jsonl first — see "Pre-0.4.0" below; else generation throws "no pool_ids").
+# changes. Pins the canonical 600. REQUIRES a pool_ids-aware reference carrying BOTH 50 & 100
+# (see "Reference prep" above; else pool 50 is silently dropped / generation throws "no pool_ids").
+# Retrieval eval = pools 50,100 (fixed design); LLM eval below stays pool 100 only.
 RATEL_VERSION_LABEL=0.4.0-<m> pnpm -F @ratel-ai/benchmark sragents-candidates \
-  --retriever <method> --pool-sizes 100 --top-k 5 \
+  --retriever <method> --pool-sizes 50,100 --top-k 5 \
   --pool-from results/raw/sragents/candidates.jsonl \
   --output results/raw/sragents/candidates-0.4.0-<m>.jsonl
 
