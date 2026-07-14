@@ -5,12 +5,13 @@
   <p>
     <a href="https://benchmark.ratel.sh">Results</a> •
     <a href="https://github.com/ratel-ai/ratel">Ratel core</a> •
-    <a href="https://discord.gg/hdKpx69NR">Discord</a>
+    <a href="https://discord.gg/75vAPdjYqT">Discord</a>
   </p>
 
   <p>
     <a href="https://github.com/ratel-ai/ratel-bench/stargazers"><img src="https://img.shields.io/github/stars/ratel-ai/ratel-bench?style=social" alt="GitHub stars" /></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license" /></a>
+    <a href="https://discord.gg/75vAPdjYqT"><img src="https://img.shields.io/discord/1478702964003705015?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord" /></a>
   </p>
 </div>
 
