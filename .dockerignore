@@ -1,0 +1,15 @@
+# Slim image copies no repo files (code + test-data come from GitHub + S3 at run
+# time), so keep the build context minimal.
+.git/
+node_modules/
+**/node_modules/
+target/
+fixtures/
+test-data/
+results/
+.version-set-baseline/
+qwen3-8b/
+infra/
+docs/
+**/*.log
+**/.DS_Store

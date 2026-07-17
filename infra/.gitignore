@@ -1,0 +1,12 @@
+# Terraform working files — never commit state or local provider cache.
+# .terraform.lock.hcl IS committed (pins provider versions).
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

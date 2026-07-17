@@ -1,0 +1,190 @@
+# AWS CodeBuild pipeline for ratel-bench (RAT-374).
+#
+# One build == one Ratel version benchmarked end to end at the FIXED EXPERIMENTS.md
+# design: retrieval eval (BFCL + SR-Agents) -> LLM eval (BFCL + SR-Agents) ->
+# summarize -> report -> both report.json to S3. Deterministic stages stay
+# byte-identical to a laptop run; only the LLM provider (Bedrock) differs.
+#
+# The exact cargo/pnpm invocations are kept VISIBLE here (not hidden behind a
+# wrapper) — see EXPERIMENTS.md. version-set / version-reset bookend every run.
+#
+# ── Per-run env overrides (set via `start-build --environment-variables-override`)
+#   RATEL_VERSION_ARGS   version-set selector, e.g. "--crate 0.4.0" | "--tag v0.3.0-rc.1" | "--rev <sha>"
+#   RATEL_EXPECT         resolved version string version-set must assert, e.g. "0.4.0"
+#   RATEL_VERSION_LABEL  stamped on every row (ratel_ai_core_version), e.g. "0.4.0-sparse"
+#   RATEL_SDK_VERSION    @ratel-ai/sdk npm version for the BFCL live-retrieval LLM eval, e.g. "0.4.0"
+#   RATEL_GENERATION     "pre-0.4.0" (Rust retriever) | "0.4.0" (SDK --retriever)
+#   RETRIEVER            0.4.0 only: bm25 | semantic | hybrid
+#   RATEL_MODELS         comma list; default below (Claude via Bedrock + gpt via OpenAI)
+#   DOLLAR_GLOBAL        hard USD cap per run (cloud spend)
+#   REBASELINE_CONTROLS  "true" to run control arms live with --force (one-time Bedrock re-baseline)
+#
+# ── Project-level env (set on the CodeBuild project, non-secret)
+#   RESULTS_BUCKET       s3 bucket mirroring results/  (e.g. ratel-bench-results-340303437758)
+#   SSM_PREFIX           SecureString .env params root (e.g. /ratel/bench)
+#   AWS_REGION           eu-central-1
+#   RATEL_LLM_BACKEND    "bedrock" (routes claude-* through Bedrock; gpt-* stay OpenAI)
+
+version: 0.2
+
+env:
+  variables:
+    RATEL_GENERATION: "0.4.0"
+    RETRIEVER: "bm25"
+    RATEL_MODELS: "claude-sonnet-4-6,claude-haiku-4-5,gpt-5.4-mini"
+    DOLLAR_GLOBAL: "60"
+    REBASELINE_CONTROLS: "false"
+    RATEL_LLM_BACKEND: "bedrock"
+    SSM_PREFIX: "/ratel/bench"
+
+phases:
+  install:
+    commands:
+      # Custom slim image already provides node/pnpm/rust/awscli + the baked
+      # bge-small model; this phase wires up per-run secrets/state and installs deps.
+      - set -euo pipefail
+      - 'echo "Benchmarking ${RATEL_VERSION_LABEL} (${RATEL_VERSION_ARGS}) — generation ${RATEL_GENERATION}, retriever ${RETRIEVER}"'
+      # Keep the cargo registry + git cache inside the source dir so CodeBuild caches it.
+      - export CARGO_HOME="${CODEBUILD_SRC_DIR}/.cargo"
+      - export PATH="/usr/local/cargo/bin:${CARGO_HOME}/bin:${PATH}"
+
+      # 1. Materialize agent/.env from SSM SecureString (free tier; NO Secrets Manager).
+      #    OPENAI_API_KEY is needed for gpt-*; Claude via Bedrock uses the IAM role.
+      - |
+        {
+          echo "OPENAI_API_KEY=$(aws ssm get-parameter --name "${SSM_PREFIX}/OPENAI_API_KEY" --with-decryption --query Parameter.Value --output text)"
+        } > agent/.env
+
+      # 2. git SSH deploy key for the private ratel repo (version-set --tag/--rev).
+      - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+      - aws ssm get-parameter --name "${SSM_PREFIX}/RATEL_DEPLOY_KEY" --with-decryption --query Parameter.Value --output text > ~/.ssh/id_ed25519
+      - chmod 600 ~/.ssh/id_ed25519
+      - ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+      - export GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+
+      # 3. Pull prior raw cells + caches (canonical agent.jsonl control arms live here)
+      #    and the normalized corpora (test-data/ is gitignored, so it lives in S3).
+      - aws s3 sync "s3://${RESULTS_BUCKET}/raw" results/raw
+      - aws s3 sync "s3://${RESULTS_BUCKET}/test-data" test-data
+
+      # 4. Install JS deps (base). pre_build re-installs after the SDK bump.
+      - pnpm install --frozen-lockfile
+
+  pre_build:
+    commands:
+      - set -euo pipefail
+      # Pin the Ratel version under test. version-reset first is idempotent safety
+      # (clears any stale .version-set-baseline/ from an aborted prior build).
+      - pnpm version-reset || true
+      - pnpm version-set ${RATEL_VERSION_ARGS} --expect "${RATEL_EXPECT}"
+      # BFCL LLM eval retrieves LIVE through @ratel-ai/sdk, so pin the matching SDK.
+      - |
+        if [ -n "${RATEL_SDK_VERSION:-}" ]; then
+          sed -i "s#npm:@ratel-ai/sdk@[^\"]*#npm:@ratel-ai/sdk@${RATEL_SDK_VERSION}#" agent/package.json
+          pnpm install --frozen-lockfile=false
+        fi
+
+  build:
+    commands:
+      - set -euo pipefail
+      - 'FORCE_FLAG=""; [ "${REBASELINE_CONTROLS}" = "true" ] && FORCE_FLAG="--force"'
+
+      # ─────────────────────────── BFCL ───────────────────────────
+      # Retrieval eval (pools 30,100 × k 1,3,5 × seed 42).
+      - |
+        if [ "${RATEL_GENERATION}" = "0.4.0" ]; then
+          RATEL_VERSION_LABEL="${RATEL_VERSION_LABEL}" pnpm -F @ratel-ai/benchmark bfcl-candidates \
+            --retriever "${RETRIEVER}" --pool-sizes 30,100 \
+            --output "results/raw/bfcl/retrieval-${RATEL_VERSION_LABEL}.jsonl"
+        else
+          cargo run -p ratel-benchmark-retrieval --release -- retrieval \
+            --corpus test-data/bfcl-all.jsonl \
+            --output results/raw/bfcl/retrieval-rows.jsonl \
+            --scenarios 600 --top-k 1,3,5 --pool-sizes 30,100 --seed 42
+        fi
+
+      # LLM eval (pool 100, top 5, 3 arms; controls reused from cache — only ratel-full runs live).
+      - |
+        RATEL_VERSION_LABEL="${RATEL_VERSION_LABEL}" pnpm -F @ratel-ai/benchmark start \
+          --corpus test-data/bfcl-all.jsonl \
+          --output "results/raw/bfcl/agent-${RATEL_VERSION_LABEL}.jsonl" \
+          --cache-source results/raw/bfcl/agent.jsonl \
+          --arms control-baseline,control-oracle,ratel-full \
+          --models "${RATEL_MODELS}" \
+          $( [ "${RATEL_GENERATION}" = "0.4.0" ] && echo --retriever "${RETRIEVER}" ) \
+          --pool-sizes 100 --top-k 5 --runs 1 --no-judge \
+          --concurrency 4 --timeout-ms 180000 --dollar-global "${DOLLAR_GLOBAL}" ${FORCE_FLAG}
+
+      # ─────────────────────────── SR-Agents ───────────────────────────
+      # Candidate reference (pool_ids for BOTH 50 & 100) — deterministic, seed 42.
+      - |
+        cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
+          --instances test-data/sragents.jsonl --skills-catalog test-data/sragents-skills.jsonl \
+          --output results/raw/sragents/candidates.jsonl \
+          --scenarios 600 --top-k 5 --pool-sizes 50,100 --seed 42
+
+      # Retrieval-eval candidates (per-version ranking of the fixed pool).
+      - |
+        if [ "${RATEL_GENERATION}" = "0.4.0" ]; then
+          RATEL_VERSION_LABEL="${RATEL_VERSION_LABEL}" pnpm -F @ratel-ai/benchmark sragents-candidates \
+            --retriever "${RETRIEVER}" --pool-sizes 50,100 --top-k 5 \
+            --pool-from results/raw/sragents/candidates.jsonl \
+            --output "results/raw/sragents/candidates-${RATEL_VERSION_LABEL}.jsonl"
+          SR_RETRIEVAL_ROWS="results/raw/sragents/candidates-${RATEL_VERSION_LABEL}.jsonl"
+          SR_CANDIDATES="results/raw/sragents/candidates-${RATEL_VERSION_LABEL}.jsonl"
+        else
+          SR_RETRIEVAL_ROWS="results/raw/sragents/candidates.jsonl"
+          SR_CANDIDATES="results/raw/sragents/candidates.jsonl"
+        fi
+
+      # LLM eval (pool 100, top 5, 3 arms). Controls retriever-independent → reused.
+      - |
+        RATEL_VERSION_LABEL="${RATEL_VERSION_LABEL}" pnpm -F @ratel-ai/benchmark sragents-select \
+          --candidates "${SR_CANDIDATES}" \
+          --catalog test-data/sragents-skills.jsonl \
+          --cache-source results/raw/sragents/agent.jsonl \
+          --output "results/raw/sragents/agent-${RATEL_VERSION_LABEL}.jsonl" \
+          --arms control-baseline,control-oracle,ratel-full \
+          --models "${RATEL_MODELS}" \
+          --pool-size 100 --top-k 5 --scenarios 600 \
+          --concurrency 8 --dollar-global "${DOLLAR_GLOBAL}" ${FORCE_FLAG}
+
+  post_build:
+    commands:
+      - set -euo pipefail
+      # Summarize (pure transforms) + report -> report.json ×2.
+      - |
+        if [ "${RATEL_GENERATION}" = "0.4.0" ]; then
+          pnpm -F @ratel-ai/benchmark bfcl-summarize \
+            --retrieval-rows "results/raw/bfcl/retrieval-${RATEL_VERSION_LABEL}.jsonl" \
+            --agent "results/raw/bfcl/agent-${RATEL_VERSION_LABEL}.jsonl" --corpus test-data/bfcl-all.jsonl
+        else
+          pnpm -F @ratel-ai/benchmark bfcl-summarize \
+            --retrieval-rows results/raw/bfcl/retrieval-rows.jsonl \
+            --agent "results/raw/bfcl/agent-${RATEL_VERSION_LABEL}.jsonl" --corpus test-data/bfcl-all.jsonl
+        fi
+      - pnpm -F @ratel-ai/benchmark bfcl-report
+      - pnpm -F @ratel-ai/benchmark sragents-summarize --retrieval-rows "${SR_RETRIEVAL_ROWS}" --agent "results/raw/sragents/agent-${RATEL_VERSION_LABEL}.jsonl"
+      - pnpm -F @ratel-ai/benchmark sragents-report
+
+      # Restore the committed baseline so the tree/image is clean for the next run.
+      - pnpm version-reset || true
+
+      # Push refreshed raw cells/caches + both reports back to S3 (the persistent state).
+      - aws s3 sync results/ "s3://${RESULTS_BUCKET}/"
+
+artifacts:
+  files:
+    - results/reports/bfcl/report.json
+    - results/reports/sragents/report.json
+  name: ratel-bench-reports
+
+# Local build cache — cargo registry/target + pnpm store — so repeat runs skip
+# recompiling the world. Best-effort (per-host); the authoritative result state
+# lives in S3 (synced in install/post_build).
+cache:
+  paths:
+    - ".cargo/**/*"
+    - "target/**/*"
+    - "node_modules/**/*"
+    - "agent/node_modules/**/*"
