@@ -10,7 +10,8 @@
 // `catalog.search` for pre-discovery → wire gateway tools → drive the AI
 // SDK's tool loop.
 
-import { invokeToolTool, searchToolsTool, ToolCatalog } from "@ratel-ai/sdk";
+import type { ToolCatalog } from "@ratel-ai/sdk";
+import { buildToolCatalog, gatewayTools } from "../../sdk/adapter.js";
 import type {
   AgentDescriptor,
   AgentRunInput,
@@ -58,12 +59,12 @@ function bundleKey(
  * query-embed inside `search_tools`. Idempotent: re-prewarming a cached key is a
  * no-op, so it's safe to call once per campaign.
  */
-export function prewarm(inputs: PrewarmInput[]): void {
+export async function prewarm(inputs: PrewarmInput[]): Promise<void> {
   for (const input of inputs) {
     const retriever = input.retriever ?? "bm25";
     const key = bundleKey(input.scenario.id, input.poolSize, retriever, input.seed);
     if (bundleCache.has(key)) continue;
-    const { bundle } = buildRatelFullBundle({
+    const { bundle } = await buildRatelFullBundle({
       scenario: input.scenario,
       pool: input.pool,
       topK: input.topK,
@@ -97,36 +98,35 @@ export function isPrewarmed(cell: {
  * load-bearing piece of this arm — is unit-testable without spinning up an
  * agent loop. The `descriptor.run` below is then a thin wrapper.
  */
-export function buildRatelFullBundle(input: {
+export async function buildRatelFullBundle(input: {
   scenario: Pick<Scenario, "prompt">;
   pool: ToolSpec[];
   topK: number;
   /** Retrieval method for both layers. Defaults to bm25 (model-free, no embeddings). */
   retriever?: RetrievalMethod;
-}): { bundle: ToolBundle; catalog: ToolCatalog } {
+}): Promise<{ bundle: ToolBundle; catalog: ToolCatalog }> {
   // 1. Catalog backs both layers: pre-discovery uses it for retrieval, and the
   //    gateway tools call back into the same instance to search/invoke at agent
   //    runtime — so the `method` set here governs pre-discovery AND the gateway.
   //
-  //    `semantic`/`hybrid` are a 0.4.0+ capability (`ToolCatalog({ method })` +
-  //    `buildEmbeddings()`). `bm25` is the default on every SDK version, so it
-  //    uses the plain constructor — this keeps the 0.2.0 / 0.3.0-rc.1 code paths
-  //    (older SDKs that lack the `method` option and `buildEmbeddings`) working
-  //    exactly as before. Only touch the new API when a non-bm25 method is asked.
+  //    Which SDK dialect builds it — sync `register` + `buildEmbeddings` below
+  //    0.5.0, awaited `register` + `searchAsync` from 0.5.0 — is decided by
+  //    `sdk/adapter.ts` from the installed SDK's own surface. The pre-0.5.0
+  //    branch there is a verbatim copy of what this function used to do, so the
+  //    0.2.0 / 0.3.0-rc.1 / 0.4.0 layers are unaffected.
   const method: RetrievalMethod = input.retriever ?? "bm25";
-  const catalog = method === "bm25" ? new ToolCatalog() : new ToolCatalog({ method });
-  for (const spec of input.pool) {
-    catalog.register({
+  const { catalog, search } = await buildToolCatalog({
+    method,
+    tools: input.pool.map((spec) => ({
       id: spec.id,
       name: spec.name,
       description: spec.description,
       inputSchema: spec.input_schema,
       outputSchema: spec.output_schema ?? {},
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
-    });
-  }
-  // semantic/hybrid rank against an embedding cache built here; 0.4.0+ only.
-  if (method !== "bm25") catalog.buildEmbeddings();
+    })),
+  });
+  const { searchToolsTool, invokeToolTool } = await gatewayTools();
 
   const bundle = emptyToolBundle();
 
@@ -140,7 +140,7 @@ export function buildRatelFullBundle(input: {
   // 3. Pre-discovery: BM25 top-K of the prompt, registered as direct tools.
   //    Cheap context-window win when retrieval gets it right; the gateway
   //    above is the safety net when it doesn't.
-  for (const hit of catalog.search(input.scenario.prompt, input.topK)) {
+  for (const hit of await search(input.scenario.prompt, input.topK)) {
     const exec = catalog.getExecutable(hit.toolId);
     if (!exec) continue;
     const spec: ToolSpec = {
@@ -167,7 +167,7 @@ export const descriptor: AgentDescriptor = {
     // stayed off the clock); fall back to a cold build otherwise (unit tests /
     // any caller that skips prepare) — identical tool surface either way.
     const key = bundleKey(input.scenario.id, input.poolSize, input.retriever, input.seed);
-    const bundle = bundleCache.get(key) ?? buildRatelFullBundle(input).bundle;
+    const bundle = bundleCache.get(key) ?? (await buildRatelFullBundle(input)).bundle;
     return runMeteredLoop(ID, input, bundle);
   },
 };

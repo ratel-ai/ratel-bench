@@ -26,9 +26,11 @@
 import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
-import { SkillCatalog } from "@ratel-ai/sdk";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
+import { buildSkillCatalog } from "./sdk/adapter.js";
+import { parseEmbedding } from "./sdk/embedding.js";
+import { selectVersion } from "./sdk/resolve.js";
 import type { RetrievalMethod } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -126,6 +128,9 @@ async function main(): Promise<void> {
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
     throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
   }
+  // Select the SDK before anything loads it — see the note in bfcl-candidates.
+  selectVersion(arg("--sdk-version", ""));
+  const embedding = parseEmbedding(arg("--embedding", ""));
   const topK = Number(arg("--top-k", "5"));
   // Pool sizes to emit. SR-Agents retrieval eval uses {50,100}; the LLM eval reads only
   // pool 100 from the same file (`--pool-size` kept as a single-value alias). Each pool
@@ -238,12 +243,11 @@ async function main(): Promise<void> {
       const poolIds = pool.map((s) => s.id);
       const kValues = [...new Set([1, 3, 5, topK, poolSize])].filter((k) => k <= poolSize);
 
-      const catalog = method === "bm25" ? new SkillCatalog() : new SkillCatalog({ method });
-      for (const s of pool) catalog.register(s);
-      if (method !== "bm25") catalog.buildEmbeddings();
-      const hits = catalog
-        .search(sc.prompt, poolSize)
-        .map((h) => ({ id: h.skillId, score: h.score }));
+      const { search } = await buildSkillCatalog({ method, embedding, skills: pool });
+      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
+        id: h.skillId,
+        score: h.score,
+      }));
 
       for (const k of kValues) {
         lines.push(

@@ -25,20 +25,20 @@ describe("ratel-discovery-tool descriptor", () => {
 });
 
 describe("buildRatelDiscoveryToolBundle", () => {
-  it("exposes only the search_tools / invoke_tool gateway, no direct tools", () => {
+  it("exposes only the search_tools / invoke_tool gateway, no direct tools", async () => {
     // The arm's whole point is "agent finds tools on its own"; if direct
     // tools leak in, we're measuring the wrong thing. Both gateway tools
     // count toward `activeToolIds` (the catalog column reflects what the
     // agent actually saw, gateway included).
-    const { bundle } = buildRatelDiscoveryToolBundle({ pool });
+    const { bundle } = await buildRatelDiscoveryToolBundle({ pool });
     expect(Object.keys(bundle.tools).sort()).toEqual(["invoke_tool", "search_tools"]);
     expect(bundle.activeToolIds.sort()).toEqual(["invoke_tool", "search_tools"]);
   });
 
-  it("backs the gateway with the full pool", () => {
+  it("backs the gateway with the full pool", async () => {
     // The agent has to be able to find every tool via the gateway; the
     // catalog must therefore hold the full pool, not a subset.
-    const { catalog } = buildRatelDiscoveryToolBundle({ pool });
+    const { catalog } = await buildRatelDiscoveryToolBundle({ pool });
     expect(catalog.has("fs.read_file")).toBe(true);
     expect(catalog.has("mail.send")).toBe(true);
   });

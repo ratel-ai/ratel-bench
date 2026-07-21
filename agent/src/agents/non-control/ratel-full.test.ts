@@ -57,32 +57,34 @@ describe("prewarm bundle cache", () => {
 
   beforeEach(() => resetPrewarmCache());
 
-  it("is empty until prewarmed, then reports a hit for that exact cell", () => {
+  it("is empty until prewarmed, then reports a hit for that exact cell", async () => {
     expect(isPrewarmed(cell)).toBe(false);
-    prewarm([cell]);
+    await prewarm([cell]);
     expect(isPrewarmed(cell)).toBe(true);
   });
 
-  it("keys on (scenario, poolSize, retriever, seed) — a different cell is a miss", () => {
-    prewarm([cell]);
+  it("keys on (scenario, poolSize, retriever, seed) — a different cell is a miss", async () => {
+    await prewarm([cell]);
     expect(isPrewarmed({ ...cell, seed: 7 })).toBe(false);
     expect(isPrewarmed({ ...cell, retriever: "semantic" })).toBe(false);
     expect(isPrewarmed({ ...cell, poolSize: 99 })).toBe(false);
   });
 
-  it("is idempotent — re-prewarming a cached cell is a no-op", () => {
-    prewarm([cell]);
-    expect(() => prewarm([cell, cell])).not.toThrow();
+  it("is idempotent — re-prewarming a cached cell is a no-op", async () => {
+    await prewarm([cell]);
+    // Re-prewarming must neither throw nor rebuild — a rejected promise fails
+    // the test on its own, so awaiting is the assertion.
+    await prewarm([cell, cell]);
     expect(isPrewarmed(cell)).toBe(true);
   });
 
-  it("builds a bundle whose tool selection is identical to a cold build", () => {
+  it("builds a bundle whose tool selection is identical to a cold build", async () => {
     // The whole point: prewarming must not change WHICH tools the cell exposes,
     // only WHEN they're built. A cold build is deterministic, so equal ids prove
     // the prewarmed path is byte-identical in selection.
-    prewarm([cell]);
-    const cold = buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
-    const coldAgain = buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
+    await prewarm([cell]);
+    const cold = await buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
+    const coldAgain = await buildRatelFullBundle({ scenario, pool, topK: 2, retriever: "bm25" });
     expect(coldAgain.bundle.activeToolIds).toEqual(cold.bundle.activeToolIds);
   });
 });
@@ -93,8 +95,8 @@ describe("buildRatelFullBundle", () => {
   // best moves up front, AND the search/invoke gateway is exposed so the
   // model can recover when pre-discovery missed. Each assertion below pins
   // one half of that contract.
-  it("registers both gateway tools (search_tools + invoke_tool) — fallback path", () => {
-    const { bundle } = buildRatelFullBundle({
+  it("registers both gateway tools (search_tools + invoke_tool) — fallback path", async () => {
+    const { bundle } = await buildRatelFullBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 2,
@@ -103,8 +105,8 @@ describe("buildRatelFullBundle", () => {
     expect(bundle.tools.invoke_tool).toBeDefined();
   });
 
-  it("registers BM25 top-K of the user prompt as direct tools — pre-discovery path", () => {
-    const { bundle } = buildRatelFullBundle({
+  it("registers BM25 top-K of the user prompt as direct tools — pre-discovery path", async () => {
+    const { bundle } = await buildRatelFullBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 2,
@@ -123,11 +125,11 @@ describe("buildRatelFullBundle", () => {
     expect(directIds.length).toBeLessThanOrEqual(2);
   });
 
-  it("backs the gateway with the full pool, not just top-K", () => {
+  it("backs the gateway with the full pool, not just top-K", async () => {
     // Pre-discovery and gateway must coexist: top-K becomes direct tools,
     // but the gateway can still surface every other tool in the pool when
     // pre-discovery missed. The catalog therefore holds the *full* pool.
-    const { catalog } = buildRatelFullBundle({
+    const { catalog } = await buildRatelFullBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 1,
@@ -137,7 +139,7 @@ describe("buildRatelFullBundle", () => {
     expect(catalog.has("mail.send")).toBe(true);
   });
 
-  it("normalizes empty input schemas at the AI SDK boundary", () => {
+  it("normalizes empty input schemas at the AI SDK boundary", async () => {
     // MetaTool tools ship with `input_schema: {}` — Anthropic's API rejects
     // tools whose input_schema is missing `type: "object"`. The ratel arm,
     // like control, has to normalize at the provider seam.
@@ -147,7 +149,7 @@ describe("buildRatelFullBundle", () => {
       description: "Finance plugin.",
       input_schema: {},
     };
-    const { bundle } = buildRatelFullBundle({
+    const { bundle } = await buildRatelFullBundle({
       scenario: { prompt: "FinanceTool" },
       pool: [noSchema],
       topK: 1,
