@@ -19,10 +19,10 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { ToolCatalog } from "@ratel-ai/sdk";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
+import { buildToolCatalog } from "./sdk/adapter.js";
 import type { RetrievalMethod, Scenario } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -114,21 +114,21 @@ async function main(): Promise<void> {
     const category = bfclCategory(sc);
     for (const poolSize of poolSizes) {
       const pool = expandPool(sc, universe, poolSize, seed);
-      const catalog = method === "bm25" ? new ToolCatalog() : new ToolCatalog({ method });
-      for (const t of pool) {
-        catalog.register({
+      const { search } = await buildToolCatalog({
+        method,
+        tools: pool.map((t) => ({
           id: t.id,
           name: t.name,
           description: t.description,
           inputSchema: t.input_schema,
           outputSchema: t.output_schema ?? {},
           execute: async () => ({}),
-        });
-      }
-      if (method !== "bm25") catalog.buildEmbeddings();
-      const hits = catalog
-        .search(sc.prompt, poolSize)
-        .map((h) => ({ id: h.toolId, score: h.score }));
+        })),
+      });
+      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
+        id: h.toolId,
+        score: h.score,
+      }));
 
       for (const k of kSlices) {
         if (k > poolSize) continue;

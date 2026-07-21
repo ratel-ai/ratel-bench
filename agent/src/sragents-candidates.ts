@@ -26,9 +26,9 @@
 import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
-import { SkillCatalog } from "@ratel-ai/sdk";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
+import { buildSkillCatalog } from "./sdk/adapter.js";
 import type { RetrievalMethod } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -238,12 +238,11 @@ async function main(): Promise<void> {
       const poolIds = pool.map((s) => s.id);
       const kValues = [...new Set([1, 3, 5, topK, poolSize])].filter((k) => k <= poolSize);
 
-      const catalog = method === "bm25" ? new SkillCatalog() : new SkillCatalog({ method });
-      for (const s of pool) catalog.register(s);
-      if (method !== "bm25") catalog.buildEmbeddings();
-      const hits = catalog
-        .search(sc.prompt, poolSize)
-        .map((h) => ({ id: h.skillId, score: h.score }));
+      const { search } = await buildSkillCatalog({ method, skills: pool });
+      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
+        id: h.skillId,
+        score: h.score,
+      }));
 
       for (const k of kValues) {
         lines.push(

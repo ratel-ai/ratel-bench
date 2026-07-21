@@ -8,7 +8,8 @@
 // gateway is dead weight in this regime; if it lags, the gateway is doing
 // real work for borderline retrievals.
 
-import { ToolCatalog } from "@ratel-ai/sdk";
+import type { ToolCatalog } from "@ratel-ai/sdk";
+import { buildToolCatalog } from "../../sdk/adapter.js";
 import type { AgentDescriptor, AgentRunInput, Scenario, ToolSpec } from "../../types.js";
 import { emptyToolBundle, registerDirect, runMeteredLoop, type ToolBundle } from "../_shared.js";
 
@@ -18,27 +19,29 @@ const ID = "ratel-pre-discovery";
  * Construct the AI SDK tool bundle for one ratel-pre-discovery cell. Exposed
  * for unit testing; `descriptor.run` is a thin wrapper around it.
  */
-export function buildRatelPreDiscoveryBundle(input: {
+export async function buildRatelPreDiscoveryBundle(input: {
   scenario: Pick<Scenario, "prompt">;
   pool: ToolSpec[];
   topK: number;
-}): { bundle: ToolBundle; catalog: ToolCatalog } {
-  const catalog = new ToolCatalog();
-  for (const spec of input.pool) {
-    catalog.register({
+}): Promise<{ bundle: ToolBundle; catalog: ToolCatalog }> {
+  // bm25 only — this ablation never varies the retriever. It still routes
+  // through the adapter because 0.5.0's `register` is asynchronous for every
+  // method, bm25 included.
+  const { catalog, search } = await buildToolCatalog({
+    tools: input.pool.map((spec) => ({
       id: spec.id,
       name: spec.name,
       description: spec.description,
       inputSchema: spec.input_schema,
       outputSchema: spec.output_schema ?? {},
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
-    });
-  }
+    })),
+  });
 
   // BM25 top-K only — no gateway, so the agent can't reach beyond what we
   // pre-fetched. This is the "is pre-discovery alone enough?" probe.
   const bundle = emptyToolBundle();
-  for (const hit of catalog.search(input.scenario.prompt, input.topK)) {
+  for (const hit of await search(input.scenario.prompt, input.topK)) {
     const exec = catalog.getExecutable(hit.toolId);
     if (!exec) continue;
     const spec: ToolSpec = {
@@ -58,7 +61,7 @@ export const descriptor: AgentDescriptor = {
   id: ID,
   label: "ratel (pre-discovery only)",
   run: async (input: AgentRunInput) => {
-    const { bundle } = buildRatelPreDiscoveryBundle(input);
+    const { bundle } = await buildRatelPreDiscoveryBundle(input);
     return runMeteredLoop(ID, input, bundle);
   },
 };

@@ -8,7 +8,8 @@
 // turns, more search calls, lower selection accuracy), pre-discovery is
 // where the headline savings actually come from.
 
-import { invokeToolTool, searchToolsTool, ToolCatalog } from "@ratel-ai/sdk";
+import type { ToolCatalog } from "@ratel-ai/sdk";
+import { buildToolCatalog, gatewayTools } from "../../sdk/adapter.js";
 import type { AgentDescriptor, AgentRunInput, ToolSpec } from "../../types.js";
 import { emptyToolBundle, registerGateway, runMeteredLoop, type ToolBundle } from "../_shared.js";
 
@@ -18,21 +19,23 @@ const ID = "ratel-discovery-tool";
  * Construct the AI SDK tool bundle for one ratel-discovery-tool cell. Exposed
  * for unit testing; `descriptor.run` is a thin wrapper around it.
  */
-export function buildRatelDiscoveryToolBundle(input: { pool: ToolSpec[] }): {
+export async function buildRatelDiscoveryToolBundle(input: { pool: ToolSpec[] }): Promise<{
   bundle: ToolBundle;
   catalog: ToolCatalog;
-} {
-  const catalog = new ToolCatalog();
-  for (const spec of input.pool) {
-    catalog.register({
+}> {
+  // bm25 only — see the note in ratel-pre-discovery.ts on why this still goes
+  // through the adapter.
+  const { catalog } = await buildToolCatalog({
+    tools: input.pool.map((spec) => ({
       id: spec.id,
       name: spec.name,
       description: spec.description,
       inputSchema: spec.input_schema,
       outputSchema: spec.output_schema ?? {},
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
-    });
-  }
+    })),
+  });
+  const { searchToolsTool, invokeToolTool } = await gatewayTools();
 
   // Gateway only — no pre-fetched direct tools. The agent has to call
   // `search_tools` to find anything; this is the "BM25 quality + agent
@@ -48,7 +51,7 @@ export const descriptor: AgentDescriptor = {
   id: ID,
   label: "ratel (discovery-tool only)",
   run: async (input: AgentRunInput) => {
-    const { bundle } = buildRatelDiscoveryToolBundle(input);
+    const { bundle } = await buildRatelDiscoveryToolBundle(input);
     return runMeteredLoop(ID, input, bundle);
   },
 };

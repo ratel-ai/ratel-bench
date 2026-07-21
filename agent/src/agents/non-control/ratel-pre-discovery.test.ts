@@ -25,8 +25,8 @@ describe("ratel-pre-discovery descriptor", () => {
 });
 
 describe("buildRatelPreDiscoveryBundle", () => {
-  it("registers BM25 top-K of the prompt as direct tools", () => {
-    const { bundle } = buildRatelPreDiscoveryBundle({
+  it("registers BM25 top-K of the prompt as direct tools", async () => {
+    const { bundle } = await buildRatelPreDiscoveryBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 1,
@@ -34,11 +34,11 @@ describe("buildRatelPreDiscoveryBundle", () => {
     expect(bundle.activeToolIds).toContain("fs.read_file");
   });
 
-  it("does NOT expose the search_tools / invoke_tool gateway — that's the full arm's job", () => {
+  it("does NOT expose the search_tools / invoke_tool gateway — that's the full arm's job", async () => {
     // The whole point of this arm is the ablation: only BM25 pre-fetch, no
     // gateway. If the gateway leaks in, the comparison against ratel-full
     // becomes meaningless.
-    const { bundle } = buildRatelPreDiscoveryBundle({
+    const { bundle } = await buildRatelPreDiscoveryBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 1,
@@ -47,8 +47,8 @@ describe("buildRatelPreDiscoveryBundle", () => {
     expect(bundle.tools.invoke_tool).toBeUndefined();
   });
 
-  it("respects topK — never registers more than topK direct tools", () => {
-    const { bundle } = buildRatelPreDiscoveryBundle({
+  it("respects topK — never registers more than topK direct tools", async () => {
+    const { bundle } = await buildRatelPreDiscoveryBundle({
       scenario: { prompt: "read a file from disk" },
       pool,
       topK: 1,
