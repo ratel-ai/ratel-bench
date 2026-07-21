@@ -23,6 +23,8 @@ import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import { buildToolCatalog } from "./sdk/adapter.js";
+import { parseEmbedding } from "./sdk/embedding.js";
+import { selectVersion } from "./sdk/resolve.js";
 import type { RetrievalMethod, Scenario } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -89,6 +91,11 @@ async function main(): Promise<void> {
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
     throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
   }
+  // SDK selection must happen before the first catalog build — `select()` throws
+  // once a module is loaded, so this is deliberately the earliest statement that
+  // touches the SDK layer.
+  selectVersion(arg("--sdk-version", ""));
+  const embedding = parseEmbedding(arg("--embedding", ""));
   const poolSizes = parsePoolSizes(arg("--pool-sizes", arg("--pool-size", "30,100")));
   const seed = Number(arg("--seed", "42"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all
@@ -116,6 +123,7 @@ async function main(): Promise<void> {
       const pool = expandPool(sc, universe, poolSize, seed);
       const { search } = await buildToolCatalog({
         method,
+        embedding,
         tools: pool.map((t) => ({
           id: t.id,
           name: t.name,

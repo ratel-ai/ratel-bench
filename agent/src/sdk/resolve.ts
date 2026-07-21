@@ -43,6 +43,36 @@ export function sdkSpecifier(): string {
 }
 
 /**
+ * Resolve a `--sdk-version` argument to a module specifier and select it.
+ *
+ * Versions are installed side by side as npm aliases (`@ratel-ai/sdk-0.5.0` →
+ * `npm:@ratel-ai/sdk@0.5.0`), so one checkout can benchmark several releases
+ * without reinstalling. `""` and `"local"` both mean the plain `@ratel-ai/sdk`
+ * dependency — which is also what a `pnpm link`ed working copy of Ratel resolves
+ * to, so an unreleased build is benchmarkable without adding an alias.
+ *
+ * Fails loudly on an unknown version: a silent fallback to the default SDK would
+ * stamp rows with a version the run never actually exercised.
+ */
+export function selectVersion(version: string): void {
+  if (!version || version === "local") {
+    select(DEFAULT_SPECIFIER);
+    return;
+  }
+  const spec = `@ratel-ai/sdk-${version}`;
+  try {
+    requirePkg.resolve(`${spec}/package.json`);
+  } catch {
+    throw new Error(
+      `--sdk-version ${version}: no alias "${spec}" installed. Add it to agent/package.json ` +
+        `as "${spec}": "npm:@ratel-ai/sdk@${version}" and run pnpm install, or pass ` +
+        `--sdk-version local to use the default @ratel-ai/sdk dependency.`,
+    );
+  }
+  select(spec);
+}
+
+/**
  * Version of the selected SDK, read from its own `package.json`. Synchronous by
  * design: it is the `ratel_version` row dimension, and rows are built in hot
  * paths that shouldn't await a lookup this cheap.
