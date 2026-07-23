@@ -25,7 +25,13 @@ import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import { bedrockEnabled, bedrockModel } from "./bedrock.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
-import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import {
+  type CustomEndpoint,
+  parseCustomEndpoint,
+  parseModelList,
+  warmUpModels,
+} from "./model-endpoint.js";
+import { resolveWellKnownEndpoint } from "./model-resolve.js";
 import { resolveRepoPath } from "./paths.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
@@ -208,7 +214,7 @@ function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
         args.arms = parseArms(next(), knownArms);
         break;
       case "--models":
-        args.models = next().split(",");
+        args.models = parseModelList(next());
         break;
       case "--runs":
         args.runs = Number(next());
@@ -329,6 +335,10 @@ function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpt
 function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
   const ep = parseCustomEndpoint(modelId);
   if (ep) {
+    // Known provider hosts route natively (friendly id, native wire format);
+    // anything else is a generic OpenAI-compatible endpoint.
+    const known = resolveWellKnownEndpoint(ep);
+    if (known) return known;
     return resolveCustomEndpoint(modelId, ep, opts);
   }
   if (modelId.startsWith(OLLAMA_PREFIX)) {

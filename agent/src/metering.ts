@@ -89,6 +89,54 @@ export const DEFAULT_PRICING: PricingTable = {
   },
 };
 
+/** Parse the RATEL_PRICING_JSON env extension: a PricingTable-shaped JSON
+ *  object merged over DEFAULT_PRICING, so a new model's rates can be supplied
+ *  per run (e.g. on the CodeBuild project) without a code change. Empty/{} →
+ *  no-op: behavior without the var is identical to DEFAULT_PRICING. */
+function envPricing(): PricingTable {
+  const raw = process.env.RATEL_PRICING_JSON?.trim();
+  if (!raw || raw === "{}") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`RATEL_PRICING_JSON is not valid JSON: ${(err as Error).message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`RATEL_PRICING_JSON must be a JSON object of {"model-id": {inputPer1M, …}}`);
+  }
+  for (const [model, price] of Object.entries(parsed)) {
+    for (const field of ["inputPer1M", "outputPer1M", "cachedInputPer1M", "cacheCreationPer1M"]) {
+      if (typeof (price as Record<string, unknown>)?.[field] !== "number") {
+        throw new Error(`RATEL_PRICING_JSON["${model}"].${field} must be a number (USD per 1M)`);
+      }
+    }
+  }
+  return parsed as PricingTable;
+}
+
+/** Effective table: defaults + per-run env extension. */
+export const PRICING: PricingTable = { ...DEFAULT_PRICING, ...envPricing() };
+
+/**
+ * Find the price for a model id, resolving endpoint-addressed models
+ * (`<baseURL>#<model-name>`) by their `#` fragment: the raw fragment first,
+ * then with provider decoration stripped (Bedrock inference-profile region
+ * prefix `eu.anthropic.`, version suffix `-v1:0`, date suffix `-20251001`) so
+ * e.g. `…#eu.anthropic.claude-sonnet-4-6` finds "claude-sonnet-4-6".
+ */
+function lookupPrice(modelId: string, pricing: PricingTable): ModelPrice | undefined {
+  const direct = pricing[modelId];
+  if (direct || !modelId.includes("#")) return direct;
+  const fragment = modelId.slice(modelId.indexOf("#") + 1);
+  if (pricing[fragment]) return pricing[fragment];
+  const undecorated = fragment
+    .replace(/^(?:eu|us|apac|global)\.anthropic\./, "")
+    .replace(/-v\d+:\d+$/, "")
+    .replace(/-\d{8}$/, "");
+  return pricing[undecorated];
+}
+
 export function dollarCost(
   modelId: string,
   tokens: {
@@ -97,9 +145,9 @@ export function dollarCost(
     cachedInput: number;
     cacheCreation: number;
   },
-  pricing: PricingTable = DEFAULT_PRICING,
+  pricing: PricingTable = PRICING,
 ): number {
-  const price = pricing[modelId];
+  const price = lookupPrice(modelId, pricing);
   // Unknown models (incl. `ollama:*` local runs) intentionally return $0 — the
   // caller can spot a stale price table by cross-referencing raw tokens with
   // expected provider rates. For local runs the $0 is real, not stale.
@@ -147,7 +195,7 @@ const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
 export async function meter(
   ctx: MeterContext,
   generate: () => Promise<AgentLikeResult>,
-  pricing: PricingTable = DEFAULT_PRICING,
+  pricing: PricingTable = PRICING,
 ): Promise<{ cell: CellResult; raw: AgentLikeResult | null }> {
   const startedAt = Date.now();
   let raw: AgentLikeResult | null = null;

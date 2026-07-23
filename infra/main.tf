@@ -225,6 +225,7 @@ resource "aws_codebuild_project" "bench" {
       name  = "REBASELINE_CONTROLS"
       value = "false" # "true" once: re-baseline control arms live on Bedrock (--force)
     }
+
   }
 
   cache {
@@ -257,6 +258,30 @@ resource "aws_ssm_parameter" "openai_api_key" {
 
 resource "aws_ssm_parameter" "ratel_deploy_key" {
   name  = "${var.ssm_prefix}/RATEL_DEPLOY_KEY"
+  type  = "SecureString"
+  value = "PLACEHOLDER-set-via-put-parameter"
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# Optional: only needed for runs with RATEL_LLM_BACKEND=anthropic (claude-* via
+# the Anthropic API instead of Bedrock). The buildspec skips it while it still
+# holds the placeholder.
+resource "aws_ssm_parameter" "anthropic_api_key" {
+  name  = "${var.ssm_prefix}/ANTHROPIC_API_KEY"
+  type  = "SecureString"
+  value = "PLACEHOLDER-set-via-put-parameter"
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# Optional: bearer token for endpoint-link models in RATEL_MODELS
+# (`<baseURL>#<model>`), e.g. a Bedrock API key. The buildspec exports it as
+# AWS_BEDROCK_BEARER; skipped while it still holds the placeholder.
+resource "aws_ssm_parameter" "model_api_key" {
+  name  = "${var.ssm_prefix}/MODEL_API_KEY"
   type  = "SecureString"
   value = "PLACEHOLDER-set-via-put-parameter"
   lifecycle {

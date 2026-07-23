@@ -28,6 +28,28 @@
 # ratel-full). Changing those would fork the benchmark — edit the buildspec
 # commands deliberately if the design itself ever changes.
 #
+# ── Models — every entry in RATEL_MODELS is an ENDPOINT LINK
+# (`<baseURL>#<model-name>`); adding a model = appending one link. NO code
+# changes. Formats: JSON dict {"models": ["<link>", …]} (default below) or a
+# plain comma list (model names like "claude-sonnet-4-6" also still work).
+# Links per provider:
+#   Bedrock:    https://bedrock-runtime.<region>.amazonaws.com/openai/v1#<inference-profile-id>
+#   Anthropic:  https://api.anthropic.com/v1#<model-name>
+#   OpenAI:     https://api.openai.com/v1#<model-name>
+#   Self-hosted (e.g. qwen3-4b via ratel-inference-gateway):
+#               https://<gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b
+# Provider hosts route through their NATIVE APIs (Bedrock: IAM role, no key;
+# Anthropic/OpenAI: their SSM keys) with the friendly model id on every row —
+# identical behavior to name-addressed models. Self-hosted links use the
+# generic OpenAI-compatible client with the bearer from the SSM SecureString
+# ${SSM_PREFIX}/MODEL_API_KEY (set once: aws ssm put-parameter --overwrite),
+# and are auto-warmed (POST /warm) before the run.
+# Cost column: known models are priced automatically (Bedrock profile
+# decoration stripped); genuinely-new models read $0 unless priced via
+# RATEL_PRICING_JSON. Accuracy metrics are unaffected either way.
+# NOTE: a new model has no cached control arms — its first run executes all
+# three arms live (~3-4x its ratel-full cost, bounded by DOLLAR_GLOBAL).
+#
 # ── Project-level env (set on the CodeBuild project, non-secret)
 #   RESULTS_BUCKET       s3 bucket mirroring results/  (e.g. ratel-bench-results-340303437758)
 #   SSM_PREFIX           SecureString .env params root (e.g. /ratel/bench)
@@ -45,11 +67,14 @@ env:
     RATEL_VERSION_LABEL: "auto" # auto/empty → derived in install (see header)
     RATEL_GENERATION: "0.4.0"
     RETRIEVER: "bm25"
-    RATEL_MODELS: "claude-sonnet-4-6,claude-haiku-4-5,gpt-5.4-mini"
+    RATEL_MODELS: '{"models":["https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1#eu.anthropic.claude-sonnet-4-6","https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1#eu.anthropic.claude-haiku-4-5-20251001-v1:0","https://api.openai.com/v1#gpt-5.4-mini"]}'
     DOLLAR_GLOBAL: "60"
     REBASELINE_CONTROLS: "false"
     RATEL_LLM_BACKEND: "bedrock"
     SSM_PREFIX: "/ratel/bench"
+    # Zero-code new-model support (see "Adding a new model" in the header):
+    BEDROCK_PROFILE_MAP: "{}" # advanced: extra claude-* → native Bedrock profile ids (JSON)
+    RATEL_PRICING_JSON: "{}" # advanced: price genuinely-new models (JSON)
 
 phases:
   install:
@@ -79,9 +104,20 @@ phases:
 
       # 1. Materialize agent/.env from SSM SecureString (free tier; NO Secrets Manager).
       #    OPENAI_API_KEY is needed for gpt-*; Claude via Bedrock uses the IAM role.
+      #    ANTHROPIC_API_KEY is optional — set it in SSM only if you want runs with
+      #    RATEL_LLM_BACKEND=anthropic (claude-* via the Anthropic API instead of Bedrock).
       - |
         {
           echo "OPENAI_API_KEY=$(aws ssm get-parameter --name "${SSM_PREFIX}/OPENAI_API_KEY" --with-decryption --query Parameter.Value --output text)"
+          AK="$(aws ssm get-parameter --name "${SSM_PREFIX}/ANTHROPIC_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)"
+          if [ -n "${AK}" ] && [ "${AK}" != "PLACEHOLDER-set-via-put-parameter" ]; then
+            echo "ANTHROPIC_API_KEY=${AK}"
+          fi
+          # Bearer for endpoint-link models in RATEL_MODELS (<baseURL>#<model>).
+          MK="$(aws ssm get-parameter --name "${SSM_PREFIX}/MODEL_API_KEY" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)"
+          if [ -n "${MK}" ] && [ "${MK}" != "PLACEHOLDER-set-via-put-parameter" ]; then
+            echo "AWS_BEDROCK_BEARER=${MK}"
+          fi
         } > agent/.env
 
       # 2. git SSH deploy key for the private ratel repo (version-set --tag/--rev).

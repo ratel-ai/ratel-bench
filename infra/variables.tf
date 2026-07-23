@@ -47,9 +47,9 @@ variable "ssm_prefix" {
 }
 
 variable "default_models" {
-  description = "Default RATEL_MODELS for a run (Claude via Bedrock + gpt via OpenAI)."
+  description = "Default RATEL_MODELS for a run: endpoint links (Claude via Bedrock + gpt via OpenAI). Add a model by appending its link — see the buildspec header."
   type        = string
-  default     = "claude-sonnet-4-6,claude-haiku-4-5,gpt-5.4-mini"
+  default     = "{\"models\":[\"https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1#eu.anthropic.claude-sonnet-4-6\",\"https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1#eu.anthropic.claude-haiku-4-5-20251001-v1:0\",\"https://api.openai.com/v1#gpt-5.4-mini\"]}"
 }
 
 variable "dollar_global_default" {

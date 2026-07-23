@@ -27,7 +27,8 @@ import { z } from "zod";
 import { bedrockEnabled, bedrockModel } from "./bedrock.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { dollarCost } from "./metering.js";
-import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import { parseCustomEndpoint, parseModelList, warmUpModels } from "./model-endpoint.js";
+import { resolveWellKnownEndpoint } from "./model-resolve.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -54,6 +55,9 @@ function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: stri
   // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
   const ep = parseCustomEndpoint(modelId);
   if (ep) {
+    // Known provider hosts route natively (friendly id, native wire format).
+    const known = resolveWellKnownEndpoint(ep);
+    if (known) return known;
     const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
     return { id: modelId, model: provider.chat(ep.modelName) };
   }
@@ -434,7 +438,7 @@ async function main(): Promise<void> {
   const catalogPath = resolveRepoPath(arg("--catalog", "test-data/sragents-skills.jsonl"));
   const outputPath = resolveRepoPath(arg("--output", "results/raw/sragents/agent.jsonl"));
   const arms = arg("--arms", ALL_ARMS.join(",")).split(",") as SragentsArm[];
-  const models = arg("--models", "gpt-5.4-mini").split(",");
+  const models = parseModelList(arg("--models", "gpt-5.4-mini"));
   const poolSize = Number(arg("--pool-size", "50"));
   const ratelTopK = Number(arg("--top-k", "10"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all

@@ -33,6 +33,41 @@ export function parseCustomEndpoint(modelId: string): CustomEndpoint | null {
   return { baseURL, modelName };
 }
 
+/**
+ * Parse a `--models` value into the model-id list. Two formats:
+ *   - comma list (legacy): "claude-sonnet-4-6,gpt-5.4-mini"
+ *   - JSON dict:           {"models": ["claude-sonnet-4-6",
+ *                                      "https://api.openai.com/v1#gpt-5.4-mini"]}
+ * Entries are either provider-prefixed names (gpt-*, claude-*, ollama:*) or
+ * `<baseURL>#<model-name>` endpoint links — both formats accept both kinds.
+ */
+export function parseModelList(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) {
+    return trimmed
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    throw new Error(`--models JSON is invalid: ${(err as Error).message}`);
+  }
+  const models = (parsed as { models?: unknown }).models;
+  if (
+    !Array.isArray(models) ||
+    models.length === 0 ||
+    models.some((m) => typeof m !== "string" || !m.trim())
+  ) {
+    throw new Error(
+      `--models JSON must be {"models": ["<model-or-endpoint>", …]} with at least one entry`,
+    );
+  }
+  return (models as string[]).map((m) => m.trim());
+}
+
 /** Resolve the `POST /warm` URL from a `/v1`-style base URL (trailing slash tolerant). */
 function warmUrl(baseURL: string): string {
   return `${baseURL.replace(/\/+$/, "")}/warm`;
@@ -58,11 +93,25 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * and skipped, so generic OpenAI-compatible servers with no `/warm` route (vLLM,
  * TGI, LM Studio) still run normally. Endpoints are deduped by `baseURL|model`.
  */
+/** Hosts routed through native provider APIs (see model-resolve.ts) — they have
+ *  no `/warm` route and never cold-start, so warm-up skips them. */
+const NATIVE_PROVIDER_HOST =
+  /^(?:api\.openai\.com|api\.anthropic\.com|bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com)$/;
+
+function isNativeProviderEndpoint(baseURL: string): boolean {
+  try {
+    return NATIVE_PROVIDER_HOST.test(new URL(baseURL).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export async function warmUpModels(rawModelIds: string[], apiKey?: string): Promise<void> {
   const seen = new Set<string>();
   for (const id of rawModelIds) {
     const ep = parseCustomEndpoint(id);
     if (!ep) continue;
+    if (isNativeProviderEndpoint(ep.baseURL)) continue;
     const key = `${ep.baseURL}|${ep.modelName}`;
     if (seen.has(key)) continue;
     seen.add(key);
