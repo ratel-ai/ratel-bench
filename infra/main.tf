@@ -193,6 +193,38 @@ resource "aws_codebuild_project" "bench" {
       name  = "DOLLAR_GLOBAL"
       value = var.dollar_global_default
     }
+
+    # Per-run knobs, surfaced at project level so the console's "Start build
+    # with overrides" page shows them pre-filled (buildspec env.variables are
+    # invisible there). Values mirror the buildspec defaults = latest release.
+    environment_variable {
+      name  = "RETRIEVER"
+      value = "bm25" # 0.4.0 generation only: bm25 | semantic | hybrid
+    }
+    environment_variable {
+      name  = "RATEL_VERSION_ARGS"
+      value = "--crate 0.4.0"
+    }
+    environment_variable {
+      name  = "RATEL_EXPECT"
+      value = "0.4.0"
+    }
+    environment_variable {
+      name  = "RATEL_SDK_VERSION"
+      value = "0.4.0"
+    }
+    environment_variable {
+      name  = "RATEL_GENERATION"
+      value = "0.4.0" # "pre-0.4.0" for versions before the SDK --retriever era
+    }
+    environment_variable {
+      name  = "RATEL_VERSION_LABEL"
+      value = "auto" # "auto" → derived from RATEL_EXPECT + RETRIEVER in the buildspec
+    }
+    environment_variable {
+      name  = "REBASELINE_CONTROLS"
+      value = "false" # "true" once: re-baseline control arms live on Bedrock (--force)
+    }
   }
 
   cache {

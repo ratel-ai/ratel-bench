@@ -13,7 +13,7 @@
 # latest release (0.4.0, bm25). Override only what differs for another version:
 #   RATEL_VERSION_ARGS   version-set selector, e.g. "--crate 0.4.0" | "--tag v0.3.0-rc.1" | "--rev <sha>"
 #   RATEL_EXPECT         resolved version string version-set must assert, e.g. "0.4.0"
-#   RATEL_VERSION_LABEL  stamped on every row (ratel_ai_core_version); empty → derived as
+#   RATEL_VERSION_LABEL  stamped on every row (ratel_ai_core_version); "auto"/empty → derived as
 #                        <RATEL_EXPECT>-<sparse|dense|hybrid> (0.4.0 gen) or <RATEL_EXPECT> (pre-0.4.0)
 #   RATEL_SDK_VERSION    @ratel-ai/sdk npm version for the BFCL live-retrieval LLM eval, e.g. "0.4.0"
 #   RATEL_GENERATION     "pre-0.4.0" (Rust retriever) | "0.4.0" (SDK --retriever)
@@ -42,7 +42,7 @@ env:
     RATEL_VERSION_ARGS: "--crate 0.4.0"
     RATEL_EXPECT: "0.4.0"
     RATEL_SDK_VERSION: "0.4.0"
-    RATEL_VERSION_LABEL: "" # empty → derived in install (see header)
+    RATEL_VERSION_LABEL: "auto" # auto/empty → derived in install (see header)
     RATEL_GENERATION: "0.4.0"
     RETRIEVER: "bm25"
     RATEL_MODELS: "claude-sonnet-4-6,claude-haiku-4-5,gpt-5.4-mini"
@@ -60,7 +60,7 @@ phases:
       # Derive the row label when not overridden: 0.4.0-gen appends the retriever
       # family (bm25→sparse, semantic→dense, hybrid→hybrid); pre-0.4.0 is bare.
       - |
-        if [ -z "${RATEL_VERSION_LABEL}" ]; then
+        if [ -z "${RATEL_VERSION_LABEL}" ] || [ "${RATEL_VERSION_LABEL}" = "auto" ]; then
           if [ "${RATEL_GENERATION}" = "0.4.0" ]; then
             case "${RETRIEVER}" in
               bm25)     RATEL_VERSION_LABEL="${RATEL_EXPECT}-sparse" ;;
