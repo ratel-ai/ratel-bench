@@ -19,10 +19,12 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { ToolCatalog } from "@ratel-ai/sdk";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
+import { buildToolCatalog } from "./sdk/adapter.js";
+import { parseEmbedding } from "./sdk/embedding.js";
+import { selectVersion } from "./sdk/resolve.js";
 import type { RetrievalMethod, Scenario } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -89,6 +91,11 @@ async function main(): Promise<void> {
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
     throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
   }
+  // SDK selection must happen before the first catalog build — `select()` throws
+  // once a module is loaded, so this is deliberately the earliest statement that
+  // touches the SDK layer.
+  selectVersion(arg("--sdk-version", ""));
+  const embedding = parseEmbedding(arg("--embedding", ""));
   const poolSizes = parsePoolSizes(arg("--pool-sizes", arg("--pool-size", "30,100")));
   const seed = Number(arg("--seed", "42"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all
@@ -114,21 +121,22 @@ async function main(): Promise<void> {
     const category = bfclCategory(sc);
     for (const poolSize of poolSizes) {
       const pool = expandPool(sc, universe, poolSize, seed);
-      const catalog = method === "bm25" ? new ToolCatalog() : new ToolCatalog({ method });
-      for (const t of pool) {
-        catalog.register({
+      const { search } = await buildToolCatalog({
+        method,
+        embedding,
+        tools: pool.map((t) => ({
           id: t.id,
           name: t.name,
           description: t.description,
           inputSchema: t.input_schema,
           outputSchema: t.output_schema ?? {},
           execute: async () => ({}),
-        });
-      }
-      if (method !== "bm25") catalog.buildEmbeddings();
-      const hits = catalog
-        .search(sc.prompt, poolSize)
-        .map((h) => ({ id: h.toolId, score: h.score }));
+        })),
+      });
+      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
+        id: h.toolId,
+        score: h.score,
+      }));
 
       for (const k of kSlices) {
         if (k > poolSize) continue;
