@@ -154,10 +154,11 @@ resource "aws_codebuild_project" "bench" {
     location        = var.github_repo_url
     git_clone_depth = 1
     buildspec       = "buildspec.yml"
-    auth {
-      type     = "CODECONNECTIONS"
-      resource = aws_codestarconnections_connection.github.arn
-    }
+    # Auth comes from the account-level CodeBuild source credential, which is the
+    # CodeConnections connection imported via:
+    #   aws codebuild import-source-credentials --server-type GITHUB \
+    #     --auth-type CODECONNECTIONS --token <connection-arn>
+    # (An inline auth{} block here is rejected with OAuthProviderException.)
   }
 
   source_version = "RAT-374/aws-architecture" # default branch to build; override per run
