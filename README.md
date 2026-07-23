@@ -80,6 +80,30 @@ pnpm -F @ratel-ai/benchmark start
 
 Output lands in `results/REPORT.md`. Re-runs skip already-recorded cells unless `--force` is passed. Full flag reference: [`agent/README.md`](agent/README.md) and [`retrieval/README.md`](retrieval/README.md).
 
+## Run on AWS
+
+The same pipeline runs as a single **AWS CodeBuild** job (zero idle cost): one
+build benchmarks one Ratel version end-to-end at the fixed
+[EXPERIMENTS.md](EXPERIMENTS.md) design and pushes both `report.json` files to
+S3. Claude arms route through **Amazon Bedrock** (IAM-role auth, no API key);
+gpt stays on OpenAI; deterministic stages are byte-identical to a laptop run.
+
+```bash
+# benchmark the latest release, all defaults:
+aws codebuild start-build --profile ratel-bench --region eu-central-1 --project-name ratel-bench
+
+# switch retriever:
+aws codebuild start-build --profile ratel-bench --region eu-central-1 --project-name ratel-bench \
+  --environment-variables-override name=RETRIEVER,value=semantic
+```
+
+Or in the console: CodeBuild → `ratel-bench` → *Start build* (all variables are
+pre-filled with defaults). Watch live logs on the build page; pull results with
+`aws s3 sync` and publish them via git as usual. Full guide — access, triggers,
+model links, secrets, re-baseline, troubleshooting:
+[`docs/aws-runbook.md`](docs/aws-runbook.md). Infrastructure:
+[`infra/`](infra/) (Terraform).
+
 ## Benchmarking a specific Ratel version
 
 Every retrieval row and agent cell is **stamped with the Ratel version it was produced under**, so reports compare versions side by side. **BFCL benchmarks _tools_** (function definitions — right function + right arguments); **SR-Agents benchmarks _skills_** (authored skills from the ~26k-skill catalog).
@@ -287,12 +311,15 @@ pnpm version-reset
 ## Repo layout
 
 ```
-retrieval/    # Rust crate — BM25 retrieval eval (modes a, b, d)
-agent/        # TypeScript — MetaTool agent campaign + report (mode c)
-fixtures/     # Raw upstream downloads (gitignored)
-test-data/    # Normalized JSONL from ingest (gitignored)
-results/      # Outputs + REPORT.md (gitignored)
-docs/         # ADRs
+retrieval/     # Rust crate — BM25 retrieval eval (modes a, b, d)
+agent/         # TypeScript — MetaTool agent campaign + report (mode c)
+fixtures/      # Raw upstream downloads (gitignored)
+test-data/     # Normalized JSONL from ingest (gitignored; mirrored in S3 for AWS runs)
+results/       # Outputs + REPORT.md (reports + canonical caches tracked; raw gitignored)
+docs/          # ADRs + AWS runbook
+buildspec.yml  # AWS CodeBuild pipeline (exact EXPERIMENTS.md commands)
+Dockerfile     # Slim arm64 toolchain image for CodeBuild (no repo code baked)
+infra/         # Terraform for the AWS pipeline (benchmarks account)
 ```
 
 ## The Ratel project

@@ -149,3 +149,20 @@ pnpm -F @ratel-ai/benchmark sragents-report
 - `$0` cost for local/user-hosted models; cap only bounds cloud spend.
 - semantic/hybrid embed ~pool-size vectors per scenario (fast at pool ≤100); bm25 has no embeddings.
 - Separate `agent-<label>.jsonl` per method avoids resume-cache collisions; `cat … >> agent.jsonl` to merge for the report.
+
+## Running on AWS
+
+`buildspec.yml` encodes this exact design as one CodeBuild job per (version,
+retriever): the same commands, the same fixed variables (pools/top-k/scenarios/
+seed/arms are **hardcoded in the buildspec**, not overridable per run), the same
+`version-set`/`version-reset` bookends, and Rule 1 unchanged (`--cache-source`
+against the canonical `agent.jsonl` pulled from S3 — only `ratel-full` runs
+live). Trigger, access, and model configuration: [docs/aws-runbook.md](docs/aws-runbook.md).
+
+The only execution difference: **Claude arms run via Amazon Bedrock**
+(`eu.anthropic.*` inference profiles, IAM-role auth) instead of the Anthropic
+API. Deterministic stages are byte-identical; Claude task-completion numbers
+shift slightly across serving stacks, so before publishing Bedrock-era numbers
+the control caches must be re-baselined once on Bedrock
+(`REBASELINE_CONTROLS=true` ⇒ `--force`) — Bedrock-era and Anthropic-API-era
+Claude control cells are not mix-and-match comparable.

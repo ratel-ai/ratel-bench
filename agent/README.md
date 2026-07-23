@@ -175,6 +175,22 @@ pnpm -F @ratel-ai/benchmark start \
 
 Tool calling and structured output still depend on the model's native capabilities — a small remote model may log zero tool calls (BFCL) or fail strict schema generation (SR-Agents) just as a small local model would.
 
+## Endpoint-link models & Amazon Bedrock
+
+`--models` also accepts a JSON dict of links (the format AWS runs use — see [docs/aws-runbook.md](../docs/aws-runbook.md)):
+
+```bash
+--models '{"models":["https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1#eu.anthropic.claude-sonnet-4-6","https://api.openai.com/v1#gpt-5.4-mini"]}'
+```
+
+**Well-known provider hosts route natively** (not through the generic OpenAI-compat client), with the friendly model id stamped on rows so pricing/report keys are backend-independent:
+
+- `bedrock-runtime.<region>.amazonaws.com` → native Bedrock via the AWS credential chain (`AWS_PROFILE`/instance role — **no API key**); the `#fragment` is the inference-profile id, decoration stripped for the row id (`eu.anthropic.claude-sonnet-4-6` → `claude-sonnet-4-6`)
+- `api.anthropic.com` → `@ai-sdk/anthropic` with `ANTHROPIC_API_KEY`
+- `api.openai.com` → `@ai-sdk/openai` with `OPENAI_API_KEY`
+
+Alternatively, `RATEL_LLM_BACKEND=bedrock` in the env routes every *name-addressed* `claude-*` model through Bedrock (mapping in `src/bedrock.ts`, extendable via the `BEDROCK_PROFILE_MAP` env var). Unset, `claude-*` uses the Anthropic API — laptop behavior unchanged. Extra pricing entries for new models: `RATEL_PRICING_JSON` env var (`{"<model>":{"inputPer1M":…,"outputPer1M":…,"cachedInputPer1M":…,"cacheCreationPer1M":…}}`).
+
 ## Generate the report only
 
 ```bash

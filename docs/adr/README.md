@@ -11,3 +11,4 @@ The ADRs are not edited to reflect the new layout because they document *decisio
 - [0007-benchmark-corpus-not-snapshotted.md](0007-benchmark-corpus-not-snapshotted.md) — corpus is ingested locally; no committed snapshot, no MetaTool sampling
 - [0008-skill-retrieval-eval-mode.md](0008-skill-retrieval-eval-mode.md) — skill retrieval evaluated separately on an authored skill corpus (SR-Agents) via `SkillRegistry`
 - [0009-bfcl-evaluation-and-export.md](0009-bfcl-evaluation-and-export.md) — BFCL function-calling eval + reproducible per-row / append-only summary / rebuildable multi-version report
+- [0010-aws-codebuild-pipeline.md](0010-aws-codebuild-pipeline.md) — cloud execution on AWS CodeBuild + Bedrock, zero idle cost, no behavior change
