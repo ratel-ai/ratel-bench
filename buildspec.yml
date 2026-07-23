@@ -9,15 +9,24 @@
 # wrapper) — see EXPERIMENTS.md. version-set / version-reset bookend every run.
 #
 # ── Per-run env overrides (set via `start-build --environment-variables-override`)
+# EVERY variable has a default (below) — a plain "Start build" benchmarks the
+# latest release (0.4.0, bm25). Override only what differs for another version:
 #   RATEL_VERSION_ARGS   version-set selector, e.g. "--crate 0.4.0" | "--tag v0.3.0-rc.1" | "--rev <sha>"
 #   RATEL_EXPECT         resolved version string version-set must assert, e.g. "0.4.0"
-#   RATEL_VERSION_LABEL  stamped on every row (ratel_ai_core_version), e.g. "0.4.0-sparse"
+#   RATEL_VERSION_LABEL  stamped on every row (ratel_ai_core_version); empty → derived as
+#                        <RATEL_EXPECT>-<sparse|dense|hybrid> (0.4.0 gen) or <RATEL_EXPECT> (pre-0.4.0)
 #   RATEL_SDK_VERSION    @ratel-ai/sdk npm version for the BFCL live-retrieval LLM eval, e.g. "0.4.0"
 #   RATEL_GENERATION     "pre-0.4.0" (Rust retriever) | "0.4.0" (SDK --retriever)
 #   RETRIEVER            0.4.0 only: bm25 | semantic | hybrid
 #   RATEL_MODELS         comma list; default below (Claude via Bedrock + gpt via OpenAI)
 #   DOLLAR_GLOBAL        hard USD cap per run (cloud spend)
 #   REBASELINE_CONTROLS  "true" to run control arms live with --force (one-time Bedrock re-baseline)
+#
+# NOT variables (fixed experiment design, EXPERIMENTS.md — identical every run):
+# pool sizes (BFCL 30,100 / SR-Agents 50,100; LLM eval 100), top-k (1,3,5; LLM
+# eval 5), scenarios (600), seed (42), arms (control-baseline,control-oracle,
+# ratel-full). Changing those would fork the benchmark — edit the buildspec
+# commands deliberately if the design itself ever changes.
 #
 # ── Project-level env (set on the CodeBuild project, non-secret)
 #   RESULTS_BUCKET       s3 bucket mirroring results/  (e.g. ratel-bench-results-340303437758)
@@ -29,6 +38,11 @@ version: 0.2
 
 env:
   variables:
+    # Version under test — defaults benchmark the latest published release.
+    RATEL_VERSION_ARGS: "--crate 0.4.0"
+    RATEL_EXPECT: "0.4.0"
+    RATEL_SDK_VERSION: "0.4.0"
+    RATEL_VERSION_LABEL: "" # empty → derived in install (see header)
     RATEL_GENERATION: "0.4.0"
     RETRIEVER: "bm25"
     RATEL_MODELS: "claude-sonnet-4-6,claude-haiku-4-5,gpt-5.4-mini"
@@ -43,6 +57,21 @@ phases:
       # Custom slim image already provides node/pnpm/rust/awscli + the baked
       # bge-small model; this phase wires up per-run secrets/state and installs deps.
       - set -euo pipefail
+      # Derive the row label when not overridden: 0.4.0-gen appends the retriever
+      # family (bm25→sparse, semantic→dense, hybrid→hybrid); pre-0.4.0 is bare.
+      - |
+        if [ -z "${RATEL_VERSION_LABEL}" ]; then
+          if [ "${RATEL_GENERATION}" = "0.4.0" ]; then
+            case "${RETRIEVER}" in
+              bm25)     RATEL_VERSION_LABEL="${RATEL_EXPECT}-sparse" ;;
+              semantic) RATEL_VERSION_LABEL="${RATEL_EXPECT}-dense" ;;
+              *)        RATEL_VERSION_LABEL="${RATEL_EXPECT}-${RETRIEVER}" ;;
+            esac
+          else
+            RATEL_VERSION_LABEL="${RATEL_EXPECT}"
+          fi
+        fi
+        export RATEL_VERSION_LABEL
       - 'echo "Benchmarking ${RATEL_VERSION_LABEL} (${RATEL_VERSION_ARGS}) — generation ${RATEL_GENERATION}, retriever ${RETRIEVER}"'
       # Keep the cargo registry + git cache inside the source dir so CodeBuild caches it.
       - export CARGO_HOME="${CODEBUILD_SRC_DIR}/.cargo"

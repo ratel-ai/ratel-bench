@@ -23,6 +23,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
+import { bedrockEnabled, bedrockModel } from "./bedrock.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
@@ -334,6 +335,11 @@ function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
     return resolveOllama(modelId.slice(OLLAMA_PREFIX.length), opts.ollamaBaseURL);
   }
   if (modelId.startsWith("claude")) {
+    // RATEL_LLM_BACKEND=bedrock (CodeBuild) routes Claude through Bedrock with
+    // IAM-role auth; the id stays the friendly name so pricing/report keys match.
+    if (bedrockEnabled()) {
+      return { id: modelId, model: bedrockModel(modelId) };
+    }
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY (set in .env or shell)`);
     }

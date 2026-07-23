@@ -24,6 +24,7 @@ import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, type LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
+import { bedrockEnabled, bedrockModel } from "./bedrock.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { dollarCost } from "./metering.js";
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
@@ -61,6 +62,11 @@ function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: stri
     return { id: modelId, model: provider.chat(modelId.slice(OLLAMA_PREFIX.length)) };
   }
   if (modelId.startsWith("claude")) {
+    // RATEL_LLM_BACKEND=bedrock (CodeBuild) routes Claude through Bedrock with
+    // IAM-role auth; the id stays the friendly name so pricing/report keys match.
+    if (bedrockEnabled()) {
+      return { id: modelId, model: bedrockModel(modelId) };
+    }
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY`);
     }
