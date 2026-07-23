@@ -8,7 +8,6 @@ fixtures/
 test-data/
 results/
 .version-set-baseline/
-qwen3-8b/
 infra/
 docs/
 **/*.log
