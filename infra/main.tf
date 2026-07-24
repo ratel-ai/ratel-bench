@@ -225,7 +225,10 @@ resource "aws_codebuild_project" "bench" {
       name  = "REBASELINE_CONTROLS"
       value = "false" # "true" once: re-baseline control arms live on Bedrock (--force)
     }
-
+    environment_variable {
+      name  = "RUN_STAGE"
+      value = "both" # both | retrieval (free, no LLM) | llm (reuse S3 retrieval rows)
+    }
   }
 
   cache {
