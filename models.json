@@ -1,0 +1,17 @@
+{
+  "run": [
+    {
+      "id": "claude-sonnet-4-6",
+      "bedrockProfile": "eu.anthropic.claude-sonnet-4-6"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+    },
+    { "id": "gpt-5.4-mini" },
+    {
+      "id": "qwen3-4b",
+      "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
+    }
+  ]
+}

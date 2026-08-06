@@ -46,48 +46,16 @@ export interface ModelPrice {
 export type PricingTable = Record<string, ModelPrice>;
 
 /**
- * Default price table for v0.1.1 reporting. List prices as of mid-2026; update
- * when models change. Costs are estimates — the JSONL row keeps raw tokens, so
- * a stale price table is recoverable downstream.
+ * Price table — intentionally empty. Pricing was removed so that adding a model
+ * (in models.json) never requires hand-entering per-model prices in a second
+ * place. With no entries every model resolves to $0 in {@link dollarCost}, so
+ * every row's `dollar_cost` is 0. The JSONL row still keeps raw token counts, so
+ * cost can always be reconstructed downstream from published provider rates.
+ *
+ * Consequence: the `--dollar-global` cap no longer bounds spend (it accumulates
+ * $0), and report cost columns render as $0. Runs are bounded by scenario count.
  */
-export const DEFAULT_PRICING: PricingTable = {
-  "gpt-5.4-mini": {
-    inputPer1M: 0.4,
-    outputPer1M: 1.6,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 0,
-  },
-  "gpt-5-mini": {
-    inputPer1M: 0.4,
-    outputPer1M: 1.6,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 0,
-  },
-  "claude-sonnet-4-6": {
-    inputPer1M: 3.0,
-    outputPer1M: 15.0,
-    cachedInputPer1M: 0.3,
-    cacheCreationPer1M: 3.75,
-  },
-  "claude-opus-4-6": {
-    inputPer1M: 5.0,
-    outputPer1M: 25.0,
-    cachedInputPer1M: 0.5,
-    cacheCreationPer1M: 6.25,
-  },
-  "claude-opus-4-7": {
-    inputPer1M: 5.0,
-    outputPer1M: 25.0,
-    cachedInputPer1M: 0.5,
-    cacheCreationPer1M: 6.25,
-  },
-  "claude-haiku-4-5": {
-    inputPer1M: 1.0,
-    outputPer1M: 5.0,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 1.25,
-  },
-};
+export const DEFAULT_PRICING: PricingTable = {};
 
 export function dollarCost(
   modelId: string,
