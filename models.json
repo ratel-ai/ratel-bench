@@ -37,6 +37,18 @@
       }
     },
     {
+      "id": "claude-opus-4-8",
+      "bedrockProfile": "eu.anthropic.claude-opus-4-8",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 5.0,
+          "outputPer1M": 25.0,
+          "cachedInputPer1M": 0.5,
+          "cacheCreationPer1M": 6.25
+        }
+      }
+    },
+    {
       "id": "gpt-5.4-mini",
       "pricing": {
         "openai": {
