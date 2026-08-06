@@ -2,13 +2,51 @@
   "run": [
     {
       "id": "claude-sonnet-4-6",
-      "bedrockProfile": "eu.anthropic.claude-sonnet-4-6"
+      "bedrockProfile": "eu.anthropic.claude-sonnet-4-6",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        },
+        "anthropic": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        }
+      }
     },
     {
       "id": "claude-haiku-4-5",
-      "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+      "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 1.0,
+          "outputPer1M": 5.0,
+          "cachedInputPer1M": 0.1,
+          "cacheCreationPer1M": 1.25
+        },
+        "anthropic": {
+          "inputPer1M": 1.0,
+          "outputPer1M": 5.0,
+          "cachedInputPer1M": 0.1,
+          "cacheCreationPer1M": 1.25
+        }
+      }
     },
-    { "id": "gpt-5.4-mini" },
+    {
+      "id": "gpt-5.4-mini",
+      "pricing": {
+        "openai": {
+          "inputPer1M": 0.75,
+          "outputPer1M": 4.5,
+          "cachedInputPer1M": 0.075,
+          "cacheCreationPer1M": 0
+        }
+      }
+    },
     {
       "id": "qwen3-4b",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
