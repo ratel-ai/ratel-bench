@@ -26,6 +26,7 @@ import { config as loadEnv } from "dotenv";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
+import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
 import type { Arm, RetrievalMethod } from "./types.js";
@@ -556,6 +557,9 @@ async function runMain(): Promise<void> {
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,
     dollarGlobalCap: parsed.dollarGlobal,
+    // Per-model rates from models.json (backend-aware). Empty when unpriced →
+    // $0 rows, and the dollar cap simply doesn't bound the run.
+    pricing: loadModelPricing(),
     force: parsed.force,
     judgeModel,
     noAst: parsed.noAst,

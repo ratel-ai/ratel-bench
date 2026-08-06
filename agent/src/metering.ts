@@ -46,14 +46,11 @@ export interface ModelPrice {
 export type PricingTable = Record<string, ModelPrice>;
 
 /**
- * Price table — intentionally empty. Pricing was removed so that adding a model
- * (in models.json) never requires hand-entering per-model prices in a second
- * place. With no entries every model resolves to $0 in {@link dollarCost}, so
- * every row's `dollar_cost` is 0. The JSONL row still keeps raw token counts, so
- * cost can always be reconstructed downstream from published provider rates.
- *
- * Consequence: the `--dollar-global` cap no longer bounds spend (it accumulates
- * $0), and report cost columns render as $0. Runs are bounded by scenario count.
+ * Fallback price table — intentionally empty. Real rates live on each model's
+ * entry in models.json (backend-keyed) and are loaded at runtime into
+ * `RunnerConfig.pricing` by {@link file://./pricing.ts} — see `loadModelPricing`.
+ * That keeps a model defined in one place and lets an unpriced model run fine at
+ * $0. This empty default only applies when no pricing table is passed at all.
  */
 export const DEFAULT_PRICING: PricingTable = {};
 

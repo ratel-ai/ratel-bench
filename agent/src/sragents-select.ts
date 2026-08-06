@@ -26,6 +26,11 @@ import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { appendJsonl, readJsonl } from "./io.js";
 import { dollarCost } from "./metering.js";
+import { loadModelPricing } from "./pricing.js";
+
+// Per-model rates from models.json (backend-aware, read once). Empty when
+// unpriced → $0 cells and the dollar cap simply doesn't bound the run.
+const PRICING = loadModelPricing();
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
@@ -314,7 +319,7 @@ async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
       output_tokens: output,
       total_tokens: usage?.totalTokens ?? input + output,
       // generateObject's usage doesn't surface cache-creation tokens separately.
-      dollar_cost: dollarCost(args.model.id, { input, output, cachedInput, cacheCreation: 0 }),
+      dollar_cost: dollarCost(args.model.id, { input, output, cachedInput, cacheCreation: 0 }, PRICING),
       wall_ms: Date.now() - startedAt,
     };
   } catch (err) {

@@ -3,10 +3,10 @@
 // per cell.
 //
 // Resumable: skips cells already present in the output JSONL unless `force` is
-// set. A global dollar cap (`dollarGlobalCap`) still exists, but pricing has
-// been removed (metering.ts `DEFAULT_PRICING` is empty) so every cell reports
-// `dollar_cost=0` and the cap no longer fires — runs are bounded by scenario
-// count instead.
+// set. A global dollar cap (`dollarGlobalCap`) bounds total spend using
+// per-model rates from models.json (via `config.pricing`); a model left unpriced
+// reports `dollar_cost=0` and simply isn't bounded by the cap — scenario count
+// still bounds it.
 //
 // Each arm is an `AgentDescriptor` defined in its own file under `agents/`;
 // the runner doesn't know how to build tools — it only knows how to schedule

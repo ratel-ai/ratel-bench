@@ -72,8 +72,8 @@ describe("summarize", () => {
 });
 
 describe("dollarCost", () => {
-  // DEFAULT_PRICING is intentionally empty (pricing removed), so every model —
-  // known model ids included — resolves to $0.
+  // DEFAULT_PRICING is an empty fallback (real rates live in models.json), so
+  // against it every model — known ids included — resolves to $0.
   it("returns 0 for every model against the (empty) default table", () => {
     const cost = dollarCost(
       "gpt-5.4-mini",
@@ -163,7 +163,8 @@ describe("meter", () => {
     expect(cell.tool_calls_total).toBe(3);
     expect(cell.gateway_calls).toBe(1);
     expect(cell.error).toBeNull();
-    // Pricing removed → dollar_cost is always 0 (DEFAULT_PRICING is empty).
+    // meter() here passes no pricing table → empty DEFAULT_PRICING fallback → $0.
+    // (Real runs pass config.pricing from models.json.)
     expect(cell.dollar_cost).toBe(0);
     expect(cell.wall_ms).toBeGreaterThanOrEqual(0);
     expect(cell.programmatic_verdict).toBe("n/a");
