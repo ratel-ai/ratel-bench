@@ -7,6 +7,12 @@ target/
 .env.local
 .env.*.local
 
+# Terraform — this repo has no infra; guard against a stray `terraform init`
+# leaving a provider cache/state behind (real infra lives in ratel-bench-aws).
+.terraform/
+*.tfstate
+*.tfstate.*
+
 # IDE
 .idea/
 .vscode/
