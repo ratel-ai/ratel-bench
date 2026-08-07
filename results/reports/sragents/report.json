@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-07T13:13:26.033Z",
+  "generated_at": "2026-08-07T13:49:00.054Z",
   "ratel_versions": {
     "0.2.0": {
       "retriever_evaluation": {
@@ -10558,7 +10558,7 @@
     "0.4.0-sparse": {
       "retriever_evaluation": {
         "bigcodebench": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -10731,7 +10731,7 @@
           ]
         },
         "champ": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -10904,7 +10904,7 @@
           ]
         },
         "logicbench": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -11077,7 +11077,7 @@
           ]
         },
         "medcalcbench": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -11250,7 +11250,7 @@
           ]
         },
         "theoremqa": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -11423,7 +11423,7 @@
           ]
         },
         "toolqa": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -11596,7 +11596,7 @@
           ]
         },
         "all": {
-          "timestamp": "2026-07-14T08:27:38.839Z",
+          "timestamp": "2026-08-07T13:45:25.987Z",
           "metrics": [
             {
               "pool_size": 50,
@@ -12806,6 +12806,266 @@
                 "precision": 0.5540277777777777,
                 "mean_total_tokens": 780.8833333333333,
                 "latency_p50_ms": 317
+              }
+            }
+          }
+        },
+        "gpt-5.6-luna": {
+          "control-baseline": {
+            "bigcodebench": {
+              "timestamp": "2026-08-07T13:45:33.931Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.85,
+                "selection_accuracy": 1,
+                "recall": 0.9446666666666667,
+                "precision": 0.9688333333333334,
+                "mean_total_tokens": 6376.53,
+                "latency_p50_ms": 2613
+              }
+            },
+            "champ": {
+              "timestamp": "2026-08-07T13:45:33.934Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.5,
+                "selection_accuracy": 0.93,
+                "recall": 0.7000000000000002,
+                "precision": 0.92,
+                "mean_total_tokens": 6417.04,
+                "latency_p50_ms": 3132.5
+              }
+            },
+            "logicbench": {
+              "timestamp": "2026-08-07T13:45:33.937Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.97,
+                "selection_accuracy": 0.97,
+                "recall": 0.97,
+                "precision": 0.97,
+                "mean_total_tokens": 6323.27,
+                "latency_p50_ms": 2392
+              }
+            },
+            "medcalcbench": {
+              "timestamp": "2026-08-07T13:45:33.939Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 1,
+                "selection_accuracy": 1,
+                "recall": 1,
+                "precision": 0.995,
+                "mean_total_tokens": 6810.42,
+                "latency_p50_ms": 1802
+              }
+            },
+            "theoremqa": {
+              "timestamp": "2026-08-07T13:45:33.942Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.97,
+                "selection_accuracy": 0.97,
+                "recall": 0.97,
+                "precision": 0.965,
+                "mean_total_tokens": 6177.2,
+                "latency_p50_ms": 1943.5
+              }
+            },
+            "toolqa": {
+              "timestamp": "2026-08-07T13:45:33.945Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.96,
+                "selection_accuracy": 0.96,
+                "recall": 0.96,
+                "precision": 0.955,
+                "mean_total_tokens": 6193.76,
+                "latency_p50_ms": 2168
+              }
+            },
+            "all": {
+              "timestamp": "2026-08-07T13:45:33.945Z",
+              "metrics": {
+                "scenarios": 600,
+                "task_completion_accuracy": 0.875,
+                "selection_accuracy": 0.9716666666666667,
+                "recall": 0.9241111111111112,
+                "precision": 0.9623055555555555,
+                "mean_total_tokens": 6383.036666666667,
+                "latency_p50_ms": 2188.5
+              }
+            }
+          },
+          "control-oracle": {
+            "bigcodebench": {
+              "timestamp": "2026-08-07T13:45:33.931Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.87,
+                "selection_accuracy": 1,
+                "recall": 0.9533333333333335,
+                "precision": 1,
+                "mean_total_tokens": 521.23,
+                "latency_p50_ms": 2207.5
+              }
+            },
+            "champ": {
+              "timestamp": "2026-08-07T13:45:33.934Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.57,
+                "selection_accuracy": 0.94,
+                "recall": 0.7616666666666667,
+                "precision": 0.94,
+                "mean_total_tokens": 638.71,
+                "latency_p50_ms": 3080
+              }
+            },
+            "logicbench": {
+              "timestamp": "2026-08-07T13:45:33.937Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.96,
+                "selection_accuracy": 0.96,
+                "recall": 0.96,
+                "precision": 0.96,
+                "mean_total_tokens": 386.27,
+                "latency_p50_ms": 1910.5
+              }
+            },
+            "medcalcbench": {
+              "timestamp": "2026-08-07T13:45:33.940Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 1,
+                "selection_accuracy": 1,
+                "recall": 1,
+                "precision": 1,
+                "mean_total_tokens": 868.89,
+                "latency_p50_ms": 1570.5
+              }
+            },
+            "theoremqa": {
+              "timestamp": "2026-08-07T13:45:33.942Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.98,
+                "selection_accuracy": 0.98,
+                "recall": 0.98,
+                "precision": 0.98,
+                "mean_total_tokens": 273.29,
+                "latency_p50_ms": 1629.5
+              }
+            },
+            "toolqa": {
+              "timestamp": "2026-08-07T13:45:33.945Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 1,
+                "selection_accuracy": 1,
+                "recall": 1,
+                "precision": 1,
+                "mean_total_tokens": 250.38,
+                "latency_p50_ms": 1561.5
+              }
+            },
+            "all": {
+              "timestamp": "2026-08-07T13:45:33.945Z",
+              "metrics": {
+                "scenarios": 600,
+                "task_completion_accuracy": 0.8966666666666666,
+                "selection_accuracy": 0.98,
+                "recall": 0.9425,
+                "precision": 0.98,
+                "mean_total_tokens": 489.795,
+                "latency_p50_ms": 1814.5
+              }
+            }
+          },
+          "ratel-full": {
+            "bigcodebench": {
+              "timestamp": "2026-08-07T13:46:10.213Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.34,
+                "selection_accuracy": 0.96,
+                "recall": 0.6799999999999997,
+                "precision": 0.945,
+                "mean_total_tokens": 716.37,
+                "latency_p50_ms": 2623.5
+              }
+            },
+            "champ": {
+              "timestamp": "2026-08-07T13:46:52.926Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.23,
+                "selection_accuracy": 0.56,
+                "recall": 0.38333333333333336,
+                "precision": 0.56,
+                "mean_total_tokens": 700.11,
+                "latency_p50_ms": 2446
+              }
+            },
+            "logicbench": {
+              "timestamp": "2026-08-07T13:47:30.453Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.39,
+                "selection_accuracy": 0.39,
+                "recall": 0.39,
+                "precision": 0.39,
+                "mean_total_tokens": 670.6,
+                "latency_p50_ms": 2256
+              }
+            },
+            "medcalcbench": {
+              "timestamp": "2026-08-07T13:47:59.328Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.94,
+                "selection_accuracy": 0.94,
+                "recall": 0.94,
+                "precision": 0.94,
+                "mean_total_tokens": 1220.5,
+                "latency_p50_ms": 2115
+              }
+            },
+            "theoremqa": {
+              "timestamp": "2026-08-07T13:48:27.237Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.87,
+                "selection_accuracy": 0.87,
+                "recall": 0.87,
+                "precision": 0.87,
+                "mean_total_tokens": 582.9,
+                "latency_p50_ms": 1951
+              }
+            },
+            "toolqa": {
+              "timestamp": "2026-08-07T13:48:54.184Z",
+              "metrics": {
+                "scenarios": 100,
+                "task_completion_accuracy": 0.77,
+                "selection_accuracy": 0.77,
+                "recall": 0.77,
+                "precision": 0.765,
+                "mean_total_tokens": 463.19,
+                "latency_p50_ms": 1941.5
+              }
+            },
+            "all": {
+              "timestamp": "2026-08-07T13:48:54.184Z",
+              "metrics": {
+                "scenarios": 600,
+                "task_completion_accuracy": 0.59,
+                "selection_accuracy": 0.7483333333333333,
+                "recall": 0.672222222222222,
+                "precision": 0.745,
+                "mean_total_tokens": 725.6116666666667,
+                "latency_p50_ms": 2207
               }
             }
           }
