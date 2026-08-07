@@ -49,12 +49,35 @@
       }
     },
     {
+      "id": "claude-fable-5",
+      "bedrockProfile": "global.anthropic.claude-fable-5",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 10.0,
+          "outputPer1M": 50.0,
+          "cachedInputPer1M": 1.0,
+          "cacheCreationPer1M": 12.5
+        }
+      }
+    },
+    {
       "id": "gpt-5.4-mini",
       "pricing": {
         "openai": {
           "inputPer1M": 0.75,
           "outputPer1M": 4.5,
           "cachedInputPer1M": 0.075,
+          "cacheCreationPer1M": 0
+        }
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "pricing": {
+        "openai": {
+          "inputPer1M": 0.2,
+          "outputPer1M": 1.2,
+          "cachedInputPer1M": 0.02,
           "cacheCreationPer1M": 0
         }
       }
