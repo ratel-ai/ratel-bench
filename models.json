@@ -78,7 +78,7 @@
           "inputPer1M": 0.2,
           "outputPer1M": 1.2,
           "cachedInputPer1M": 0.02,
-          "cacheCreationPer1M": 0
+          "cacheCreationPer1M": 0.25
         }
       }
     },
