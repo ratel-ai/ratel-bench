@@ -41,10 +41,10 @@
       "bedrockProfile": "eu.anthropic.claude-opus-4-8",
       "pricing": {
         "bedrock": {
-          "inputPer1M": 5.0,
-          "outputPer1M": 25.0,
-          "cachedInputPer1M": 0.5,
-          "cacheCreationPer1M": 6.25
+          "inputPer1M": 5.5,
+          "outputPer1M": 27.5,
+          "cachedInputPer1M": 0.55,
+          "cacheCreationPer1M": 6.875
         }
       }
     },
