@@ -39,20 +39,34 @@
     {
       "id": "claude-opus-4-8",
       "bedrockProfile": "eu.anthropic.claude-opus-4-8",
+      "anthropicEndpoint": "https://api.anthropic.com/v1",
       "pricing": {
         "bedrock": {
           "inputPer1M": 5.5,
           "outputPer1M": 27.5,
           "cachedInputPer1M": 0.55,
           "cacheCreationPer1M": 6.875
+        },
+        "anthropic": {
+          "inputPer1M": 5.0,
+          "outputPer1M": 25.0,
+          "cachedInputPer1M": 0.5,
+          "cacheCreationPer1M": 6.25
         }
       }
     },
     {
       "id": "claude-fable-5",
       "bedrockProfile": "global.anthropic.claude-fable-5",
+      "anthropicEndpoint": "https://api.anthropic.com/v1",
       "pricing": {
         "bedrock": {
+          "inputPer1M": 10.0,
+          "outputPer1M": 50.0,
+          "cachedInputPer1M": 1.0,
+          "cacheCreationPer1M": 12.5
+        },
+        "anthropic": {
           "inputPer1M": 10.0,
           "outputPer1M": 50.0,
           "cachedInputPer1M": 1.0,
