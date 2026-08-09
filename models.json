@@ -99,6 +99,10 @@
     {
       "id": "qwen3-4b",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
+    },
+    {
+      "id": "mistral-7b-instruct",
+      "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct"
     }
   ]
 }
