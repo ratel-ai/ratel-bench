@@ -46,48 +46,13 @@ export interface ModelPrice {
 export type PricingTable = Record<string, ModelPrice>;
 
 /**
- * Default price table for v0.1.1 reporting. List prices as of mid-2026; update
- * when models change. Costs are estimates — the JSONL row keeps raw tokens, so
- * a stale price table is recoverable downstream.
+ * Fallback price table — intentionally empty. Real rates live on each model's
+ * entry in models.json (backend-keyed) and are loaded at runtime into
+ * `RunnerConfig.pricing` by {@link file://./pricing.ts} — see `loadModelPricing`.
+ * That keeps a model defined in one place and lets an unpriced model run fine at
+ * $0. This empty default only applies when no pricing table is passed at all.
  */
-export const DEFAULT_PRICING: PricingTable = {
-  "gpt-5.4-mini": {
-    inputPer1M: 0.4,
-    outputPer1M: 1.6,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 0,
-  },
-  "gpt-5-mini": {
-    inputPer1M: 0.4,
-    outputPer1M: 1.6,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 0,
-  },
-  "claude-sonnet-4-6": {
-    inputPer1M: 3.0,
-    outputPer1M: 15.0,
-    cachedInputPer1M: 0.3,
-    cacheCreationPer1M: 3.75,
-  },
-  "claude-opus-4-6": {
-    inputPer1M: 5.0,
-    outputPer1M: 25.0,
-    cachedInputPer1M: 0.5,
-    cacheCreationPer1M: 6.25,
-  },
-  "claude-opus-4-7": {
-    inputPer1M: 5.0,
-    outputPer1M: 25.0,
-    cachedInputPer1M: 0.5,
-    cacheCreationPer1M: 6.25,
-  },
-  "claude-haiku-4-5": {
-    inputPer1M: 1.0,
-    outputPer1M: 5.0,
-    cachedInputPer1M: 0.1,
-    cacheCreationPer1M: 1.25,
-  },
-};
+export const DEFAULT_PRICING: PricingTable = {};
 
 export function dollarCost(
   modelId: string,

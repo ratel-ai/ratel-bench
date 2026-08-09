@@ -3,8 +3,10 @@
 // per cell.
 //
 // Resumable: skips cells already present in the output JSONL unless `force` is
-// set. A global dollar cap bounds total spend so a misconfigured catalog
-// can't burn through the budget.
+// set. A global dollar cap (`dollarGlobalCap`) bounds total spend using
+// per-model rates from models.json (via `config.pricing`); a model left unpriced
+// reports `dollar_cost=0` and simply isn't bounded by the cap — scenario count
+// still bounds it.
 //
 // Each arm is an `AgentDescriptor` defined in its own file under `agents/`;
 // the runner doesn't know how to build tools — it only knows how to schedule
@@ -56,7 +58,7 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
 const CACHEABLE_ARMS: ReadonlySet<Arm> = new Set(["control-baseline", "control-oracle"]);
 
 export interface RunnerModel {
-  /** Stable id used in the JSONL row (e.g. "gpt-5.4-mini"). Must match the pricing table. */
+  /** Stable id used in the JSONL row (e.g. "gpt-5.4-mini"). */
   id: string;
   /** AI SDK model instance. */
   model: LanguageModel;

@@ -1,0 +1,108 @@
+{
+  "run": [
+    {
+      "id": "claude-sonnet-4-6",
+      "bedrockProfile": "eu.anthropic.claude-sonnet-4-6",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        },
+        "anthropic": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        }
+      }
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 1.0,
+          "outputPer1M": 5.0,
+          "cachedInputPer1M": 0.1,
+          "cacheCreationPer1M": 1.25
+        },
+        "anthropic": {
+          "inputPer1M": 1.0,
+          "outputPer1M": 5.0,
+          "cachedInputPer1M": 0.1,
+          "cacheCreationPer1M": 1.25
+        }
+      }
+    },
+    {
+      "id": "claude-opus-4-8",
+      "bedrockProfile": "eu.anthropic.claude-opus-4-8",
+      "anthropicEndpoint": "https://api.anthropic.com/v1",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 5.5,
+          "outputPer1M": 27.5,
+          "cachedInputPer1M": 0.55,
+          "cacheCreationPer1M": 6.875
+        },
+        "anthropic": {
+          "inputPer1M": 5.0,
+          "outputPer1M": 25.0,
+          "cachedInputPer1M": 0.5,
+          "cacheCreationPer1M": 6.25
+        }
+      }
+    },
+    {
+      "id": "claude-fable-5",
+      "bedrockProfile": "global.anthropic.claude-fable-5",
+      "anthropicEndpoint": "https://api.anthropic.com/v1",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 10.0,
+          "outputPer1M": 50.0,
+          "cachedInputPer1M": 1.0,
+          "cacheCreationPer1M": 12.5
+        },
+        "anthropic": {
+          "inputPer1M": 10.0,
+          "outputPer1M": 50.0,
+          "cachedInputPer1M": 1.0,
+          "cacheCreationPer1M": 12.5
+        }
+      }
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "pricing": {
+        "openai": {
+          "inputPer1M": 0.75,
+          "outputPer1M": 4.5,
+          "cachedInputPer1M": 0.075,
+          "cacheCreationPer1M": 0
+        }
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "pricing": {
+        "openai": {
+          "inputPer1M": 0.2,
+          "outputPer1M": 1.2,
+          "cachedInputPer1M": 0.02,
+          "cacheCreationPer1M": 0.25
+        }
+      }
+    },
+    {
+      "id": "qwen3-4b",
+      "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
+    },
+    {
+      "id": "mistral-7b-instruct",
+      "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct"
+    }
+  ]
+}
