@@ -1,0 +1,27 @@
+name: Notify ratel-websites
+
+# When new benchmark results land on main, tell ratel-websites to refresh the
+# benchmark site. That repo's sync-benchmark.yml re-pulls these reports, commits
+# apps/benchmark/data/*, and the resulting push redeploys only the benchmark
+# Vercel project. Path-filtered to the reports the site actually consumes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "results/reports/bfcl/report.json"
+      - "results/reports/sragents/report.json"
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger benchmark redeploy in ratel-websites
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ secrets.RATEL_WEBSITES_DISPATCH_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/ratel-ai/ratel-websites/dispatches \
+            -d '{"event_type":"bench-updated"}'
