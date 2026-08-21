@@ -347,3 +347,61 @@ export function runClaude(o: RunClaudeOpts): Promise<RunClaudeOutcome> {
 export function readTranscript(path: string | null): string {
   return path && existsSync(path) ? readFileSync(path, "utf8") : "";
 }
+
+export interface TurnUsage {
+  turn: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
+/** Per-assistant-turn usage from the transcript. Gives context OCCUPANCY over
+ *  time — first-turn prefix size and the peak — which the final result envelope
+ *  cannot provide because it reports only run totals. */
+export function turnUsagesFromTranscript(text: string): TurnUsage[] {
+  const out: TurnUsage[] = [];
+  let turn = 0;
+  for (const line of text.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    let rec: Record<string, unknown>;
+    try {
+      rec = JSON.parse(s);
+    } catch {
+      continue;
+    }
+    const msg = (rec.message ?? rec) as Record<string, unknown>;
+    if (msg?.role !== "assistant") continue;
+    turn++;
+    const u = (msg.usage ?? {}) as Record<string, number>;
+    if (!Object.keys(u).length) continue;
+    out.push({
+      turn,
+      input_tokens: u.input_tokens ?? 0,
+      output_tokens: u.output_tokens ?? 0,
+      cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+    });
+  }
+  return out;
+}
+
+/** Prompt size for a turn = everything the model read: uncached input plus both
+ *  cache buckets. This is context occupancy, NOT billed cost. */
+export function promptTokens(u: TurnUsage): number {
+  return u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+}
+
+/** Claude Code emits a compaction marker when it summarizes history to stay
+ *  inside the window. On a 200K model with 79-195 tool schemas this actually
+ *  fires, and it is the mechanism behind any solve-rate degradation. */
+export function countCompactions(text: string): number {
+  let n = 0;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    if (/"(isCompactSummary|compact_summary)"\s*:\s*true/.test(line)) n++;
+    else if (/"subtype"\s*:\s*"compact_boundary"/.test(line)) n++;
+  }
+  return n;
+}
