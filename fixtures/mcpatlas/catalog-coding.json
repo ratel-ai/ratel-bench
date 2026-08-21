@@ -1,0 +1,170 @@
+{
+  "scope": "coding",
+  "servers": [
+    {
+      "server": "airtable",
+      "tool_ids": [
+        "airtable/get_record",
+        "airtable/list_bases",
+        "airtable/list_records",
+        "airtable/list_tables",
+        "airtable/search_records"
+      ],
+      "tool_count": 5,
+      "required_env": [
+        "AIRTABLE_API_KEY"
+      ]
+    },
+    {
+      "server": "cli-mcp-server",
+      "tool_ids": [
+        "cli-mcp-server/run_command",
+        "cli-mcp-server/show_security_rules"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "context7",
+      "tool_ids": [
+        "context7/get-library-docs",
+        "context7/resolve-library-id"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "desktop-commander",
+      "tool_ids": [
+        "desktop-commander/get_config",
+        "desktop-commander/get_file_info",
+        "desktop-commander/get_usage_stats",
+        "desktop-commander/give_feedback_to_desktop_commander",
+        "desktop-commander/interact_with_process",
+        "desktop-commander/list_directory",
+        "desktop-commander/read_file",
+        "desktop-commander/read_multiple_files",
+        "desktop-commander/read_process_output",
+        "desktop-commander/search_code",
+        "desktop-commander/search_files",
+        "desktop-commander/start_process"
+      ],
+      "tool_count": 12,
+      "required_env": []
+    },
+    {
+      "server": "e2b-server",
+      "tool_ids": [
+        "e2b-server/run_code"
+      ],
+      "tool_count": 1,
+      "required_env": [
+        "E2B_API_KEY"
+      ]
+    },
+    {
+      "server": "filesystem",
+      "tool_ids": [
+        "filesystem/directory_tree",
+        "filesystem/get_file_info",
+        "filesystem/list_allowed_directories",
+        "filesystem/list_directory",
+        "filesystem/list_directory_with_sizes",
+        "filesystem/read_file",
+        "filesystem/read_media_file",
+        "filesystem/read_multiple_files",
+        "filesystem/read_text_file",
+        "filesystem/search_files"
+      ],
+      "tool_count": 10,
+      "required_env": []
+    },
+    {
+      "server": "git",
+      "tool_ids": [
+        "git/git_diff",
+        "git/git_diff_staged",
+        "git/git_diff_unstaged",
+        "git/git_log",
+        "git/git_show",
+        "git/git_status"
+      ],
+      "tool_count": 6,
+      "required_env": []
+    },
+    {
+      "server": "github",
+      "tool_ids": [
+        "github/add_issue_comment",
+        "github/create_issue",
+        "github/create_or_update_file",
+        "github/create_repository",
+        "github/get_commit",
+        "github/get_file_contents",
+        "github/get_issue",
+        "github/get_issue_comments",
+        "github/get_pull_request",
+        "github/get_pull_request_comments",
+        "github/get_pull_request_files",
+        "github/get_pull_request_review_comments",
+        "github/get_pull_request_status",
+        "github/get_repository",
+        "github/get_tag",
+        "github/list_branches",
+        "github/list_commits",
+        "github/list_issues",
+        "github/list_pull_requests",
+        "github/list_tags",
+        "github/push_files",
+        "github/search_code",
+        "github/search_issues",
+        "github/search_repositories",
+        "github/search_users",
+        "github/update_issue"
+      ],
+      "tool_count": 26,
+      "required_env": [
+        "GITHUB_TOKEN"
+      ]
+    },
+    {
+      "server": "mcp-code-executor",
+      "tool_ids": [
+        "mcp-code-executor/check_installed_packages",
+        "mcp-code-executor/execute_code",
+        "mcp-code-executor/get_environment_config",
+        "mcp-code-executor/read_code_file"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "mcp-server-code-runner",
+      "tool_ids": [
+        "mcp-server-code-runner/run-code"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "mongodb",
+      "tool_ids": [
+        "mongodb/aggregate",
+        "mongodb/collection-indexes",
+        "mongodb/collection-schema",
+        "mongodb/collection-storage-size",
+        "mongodb/count",
+        "mongodb/db-stats",
+        "mongodb/explain",
+        "mongodb/find",
+        "mongodb/list-collections",
+        "mongodb/list-databases"
+      ],
+      "tool_count": 10,
+      "required_env": []
+    }
+  ],
+  "server_count": 11,
+  "tool_count": 79,
+  "catalog_sha256": "f0df5370196381a0e8d37de572a4297000269ba7c26c588f9a37d64f98640d0b"
+}

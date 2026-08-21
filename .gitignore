@@ -57,7 +57,18 @@ CLAUDE.local.md
 !/results/reports/sragents/
 /results/reports/sragents/*
 !/results/reports/sragents/report.json
-fixtures/
+!/results/reports/mcpatlas/
+/results/reports/mcpatlas/*
+!/results/reports/mcpatlas/report.json
+fixtures/*
+# The mcpatlas experiment DEFINITION is version-controlled: the pinned task list
+# and the catalog manifests are what make a run reproducible. The raw dataset
+# rows they are derived from are not (56MB, and re-downloadable).
+!fixtures/mcpatlas/
+fixtures/mcpatlas/*
+!fixtures/mcpatlas/tasks-coding-v1.json
+!fixtures/mcpatlas/catalog-coding.json
+!fixtures/mcpatlas/catalog-full.json
 test-data/
 agent/results/
 .ratel

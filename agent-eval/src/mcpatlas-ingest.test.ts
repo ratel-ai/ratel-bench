@@ -1,0 +1,223 @@
+import { describe, expect, it } from "vitest";
+import {
+  goldCallsFrom,
+  goldCoverage,
+  goldServers,
+  parseListField,
+  type RawAtlasRow,
+  selectCodingTasks,
+  taskListHash,
+  toolNamesFrom,
+  toolsByServerFrom,
+  toTask,
+} from "./mcpatlas-ingest.js";
+import { buildCatalogManifest, CODING_SERVERS } from "./mcpatlas-servers.js";
+import type { McpAtlasTask } from "./mcpatlas-types.js";
+
+const SERVERS = [...CODING_SERVERS, "weather", "wikipedia"];
+
+function trajectory(calls: Array<[string, Record<string, unknown>]>, withResults = true): string {
+  const msgs: unknown[] = [];
+  for (const [name, args] of calls) {
+    msgs.push({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ function: { name, arguments: JSON.stringify(args) } }],
+    });
+    if (withResults) msgs.push({ role: "tool", content: `result of ${name}` });
+  }
+  return JSON.stringify(msgs);
+}
+
+function row(over: Partial<RawAtlasRow> = {}): RawAtlasRow {
+  return {
+    TASK: "aaaa1111",
+    PROMPT: "do the thing",
+    ENABLED_TOOLS: JSON.stringify(["github_search_repositories", "weather_get"]),
+    GTFA_CLAIMS: JSON.stringify(["the answer is 7"]),
+    TRAJECTORY: trajectory([["github_search_repositories", { q: "x" }]]),
+    ...over,
+  };
+}
+
+function task(over: Partial<McpAtlasTask> = {}): McpAtlasTask {
+  return {
+    id: "mcpatlas-t",
+    task_id: "t",
+    prompt: "p",
+    enabled_tool_ids: [],
+    gold_tool_ids: [],
+    gold_servers: [],
+    gold_calls: [],
+    claims: [],
+    ...over,
+  };
+}
+
+describe("parseListField — the Python-repr trap", () => {
+  it("parses JSON lists", () => {
+    expect(parseListField('["a","b"]')).toEqual(["a", "b"]);
+  });
+
+  it("parses Python reprs, which is how 55 tasks first looked like 53", () => {
+    expect(parseListField("['a', 'b']")).toEqual(["a", "b"]);
+    expect(parseListField("[True, False, None]")).toEqual([true, false, null]);
+  });
+
+  it("returns empty for junk rather than throwing", () => {
+    expect(parseListField("not a list")).toEqual([]);
+    expect(parseListField(undefined)).toEqual([]);
+    expect(parseListField("")).toEqual([]);
+  });
+
+  it("passes through real arrays", () => {
+    expect(parseListField([1, 2])).toEqual([1, 2]);
+  });
+});
+
+describe("toolNamesFrom — mixed string/object entries", () => {
+  it("reads plain strings", () => {
+    expect(toolNamesFrom('["github_a","git_b"]')).toEqual(["github_a", "git_b"]);
+  });
+
+  it("reads object entries — the other half of the 53-vs-55 bug", () => {
+    expect(toolNamesFrom([{ name: "github_a" }, "git_b", { toolId: "filesystem_c" }])).toEqual([
+      "github_a",
+      "git_b",
+      "filesystem_c",
+    ]);
+  });
+
+  it("skips entries with no resolvable name", () => {
+    expect(toolNamesFrom([{ nope: 1 }, 42, null])).toEqual([]);
+  });
+});
+
+describe("goldCallsFrom", () => {
+  it("extracts calls in order with parsed args", () => {
+    const calls = goldCallsFrom(
+      trajectory([
+        ["github_search_repositories", { q: "x" }],
+        ["git_status", { path: "." }],
+      ]),
+      SERVERS,
+    );
+    expect(calls.map((c) => c.tool_id)).toEqual(["github/search_repositories", "git/status"]);
+    expect(calls[0].args).toEqual({ q: "x" });
+    expect(calls[0].step).toBe(0);
+    expect(calls[1].step).toBe(1);
+  });
+
+  it("captures the recorded upstream output that followed each call", () => {
+    const calls = goldCallsFrom(trajectory([["git_status", {}]]), SERVERS);
+    expect(calls[0].recorded_output_excerpt).toContain("result of git_status");
+  });
+
+  it("tolerates a missing tool result", () => {
+    const calls = goldCallsFrom(trajectory([["git_status", {}]], false), SERVERS);
+    expect(calls[0].recorded_output_excerpt).toBe("");
+  });
+
+  it("drops calls to unknown servers rather than inventing ids", () => {
+    expect(goldCallsFrom(trajectory([["mystery_tool", {}]]), SERVERS)).toEqual([]);
+  });
+
+  it("survives unparseable arguments", () => {
+    const t = JSON.stringify([
+      { role: "assistant", tool_calls: [{ function: { name: "git_status", arguments: "{bad" } }] },
+    ]);
+    expect(goldCallsFrom(t, SERVERS)[0].args).toEqual({ _raw: "{bad" });
+  });
+
+  it("derives distinct servers", () => {
+    const calls = goldCallsFrom(
+      trajectory([
+        ["git_status", {}],
+        ["git_log", {}],
+        ["github_x", {}],
+      ]),
+      SERVERS,
+    );
+    expect(goldServers(calls)).toEqual(["git", "github"]);
+  });
+});
+
+describe("selectCodingTasks — 'only', not 'touches'", () => {
+  it("keeps tasks whose gold servers are all coding servers", () => {
+    const t = toTask(row(), SERVERS);
+    expect(selectCodingTasks([t])).toHaveLength(1);
+  });
+
+  it("REJECTS a task that merely touches a coding server", () => {
+    // github used as a data source alongside a web lookup: 248 of 303 such tasks
+    // exist, and selecting on 'touches' would trade a coding benchmark for a
+    // general one.
+    const mixed = toTask(
+      row({
+        TRAJECTORY: trajectory([
+          ["github_search_repositories", {}],
+          ["wikipedia_search", {}],
+        ]),
+      }),
+      SERVERS,
+    );
+    expect(selectCodingTasks([mixed])).toHaveLength(0);
+  });
+
+  it("rejects tasks with no gold calls at all", () => {
+    const empty = toTask(row({ TRAJECTORY: "[]" }), SERVERS);
+    expect(selectCodingTasks([empty])).toHaveLength(0);
+  });
+
+  it("is deterministically ordered by task id", () => {
+    const a = toTask(row({ TASK: "bbb" }), SERVERS);
+    const b = toTask(row({ TASK: "aaa" }), SERVERS);
+    expect(selectCodingTasks([a, b]).map((t) => t.task_id)).toEqual(["aaa", "bbb"]);
+  });
+});
+
+describe("taskListHash", () => {
+  it("is order-independent", () => {
+    const a = task({ task_id: "a" });
+    const b = task({ task_id: "b" });
+    expect(taskListHash([a, b])).toBe(taskListHash([b, a]));
+  });
+
+  it("changes when the corpus changes", () => {
+    expect(taskListHash([task({ task_id: "a" })])).not.toBe(
+      taskListHash([task({ task_id: "a" }), task({ task_id: "b" })]),
+    );
+  });
+});
+
+describe("goldCoverage — the gate that stops a poisoned run", () => {
+  const catalog = buildCatalogManifest("coding", {
+    github: ["github/search_repositories"],
+    git: ["git/status"],
+  });
+
+  it("passes when every gold tool is in the catalog", () => {
+    const t = task({ gold_tool_ids: ["github/search_repositories"] });
+    expect(goldCoverage([t], catalog)).toEqual({ total: 1, covered: 1, uncovered: [] });
+  });
+
+  it("names the tasks and the exact tools that would be unreachable", () => {
+    const t = task({ task_id: "x", gold_tool_ids: ["github/search_repositories", "mongodb/find"] });
+    const cov = goldCoverage([t], catalog);
+    expect(cov.covered).toBe(0);
+    expect(cov.uncovered).toEqual([{ task_id: "x", missing: ["mongodb/find"] }]);
+  });
+});
+
+describe("toolsByServerFrom", () => {
+  it("builds the tool universe grouped by server, deduped and sorted", () => {
+    const rows = [
+      row({ ENABLED_TOOLS: JSON.stringify(["github_b", "github_a", "git_c"]) }),
+      row({ ENABLED_TOOLS: JSON.stringify(["github_a"]) }),
+    ];
+    expect(toolsByServerFrom(rows, SERVERS)).toEqual({
+      github: ["github/a", "github/b"],
+      git: ["git/c"],
+    });
+  });
+});
