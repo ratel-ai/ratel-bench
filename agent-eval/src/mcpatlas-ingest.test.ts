@@ -4,6 +4,7 @@ import {
   goldCoverage,
   goldServers,
   parseListField,
+  parsePythonLiteral,
   type RawAtlasRow,
   selectCodingTasks,
   taskListHash,
@@ -54,14 +55,64 @@ function task(over: Partial<McpAtlasTask> = {}): McpAtlasTask {
   };
 }
 
+describe("parsePythonLiteral", () => {
+  it("reads single-quoted lists", () => {
+    expect(parsePythonLiteral("['a', 'b']")).toEqual(["a", "b"]);
+  });
+
+  it("keeps apostrophes inside claims — 123 of 500 rows have one", () => {
+    // A quote-swap regex corrupts this and silently drops the claim, which would
+    // understate task success with no visible failure.
+    expect(parsePythonLiteral('["the user\'s local repository"]')).toEqual([
+      "the user's local repository",
+    ]);
+  });
+
+  it("handles escaped quotes in single-quoted strings", () => {
+    expect(parsePythonLiteral("['it\\'s fine']")).toEqual(["it's fine"]);
+  });
+
+  it("handles embedded double quotes", () => {
+    expect(parsePythonLiteral("['titled \"New fart\"']")).toEqual(['titled "New fart"']);
+  });
+
+  it("reads Python scalars", () => {
+    expect(parsePythonLiteral("[True, False, None, 3, -2.5]")).toEqual([
+      true,
+      false,
+      null,
+      3,
+      -2.5,
+    ]);
+  });
+
+  it("reads nested structures and tuples", () => {
+    expect(parsePythonLiteral("[{'a': [1, 2]}, ('x', 'y')]")).toEqual([{ a: [1, 2] }, ["x", "y"]]);
+  });
+
+  it("handles empty containers and trailing commas", () => {
+    expect(parsePythonLiteral("[]")).toEqual([]);
+    expect(parsePythonLiteral("['a',]")).toEqual(["a"]);
+  });
+
+  it("throws on malformed input rather than returning something wrong", () => {
+    expect(() => parsePythonLiteral("['unterminated")).toThrow();
+    expect(() => parsePythonLiteral("[1] junk")).toThrow();
+  });
+});
+
 describe("parseListField — the Python-repr trap", () => {
   it("parses JSON lists", () => {
     expect(parseListField('["a","b"]')).toEqual(["a", "b"]);
   });
 
-  it("parses Python reprs, which is how 55 tasks first looked like 53", () => {
+  it("parses Python reprs — 489 of 500 GTFA_CLAIMS are encoded this way", () => {
     expect(parseListField("['a', 'b']")).toEqual(["a", "b"]);
     expect(parseListField("[True, False, None]")).toEqual([true, false, null]);
+  });
+
+  it("does not lose apostrophe-bearing claims", () => {
+    expect(parseListField("[\"the user's repo\", 'plain']")).toEqual(["the user's repo", "plain"]);
   });
 
   it("returns empty for junk rather than throwing", () => {

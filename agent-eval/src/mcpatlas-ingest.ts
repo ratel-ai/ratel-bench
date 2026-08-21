@@ -38,10 +38,150 @@ export interface RawAtlasRow {
 }
 
 /**
- * MCP-Atlas ships some list-valued columns as Python reprs rather than JSON, and
- * some ENABLED_TOOLS entries as objects rather than strings. Both are silent
- * traps: a JSON-only parser reports those rows as empty, which is how a 55-task
- * set first looked like 53.
+ * Parse a Python literal (the `repr()` of a list/dict/str/number/bool/None).
+ *
+ * MCP-Atlas ships `GTFA_CLAIMS` this way for 489 of 500 rows — only 10 are strict
+ * JSON. A naive quote-swap regex corrupts any claim containing an apostrophe
+ * ("the user's local repository"), which is 123 of the 500 rows, and silently
+ * drops their claims. Since claims ARE the task-success ground truth, losing them
+ * would understate success without any visible failure. Hence a real tokenizer.
+ *
+ * Returns `undefined` for input that is not a parseable literal, so callers can
+ * distinguish "no claims" from "could not read the claims".
+ */
+export function parsePythonLiteral(src: string): unknown {
+  let i = 0;
+
+  const ws = (): void => {
+    while (i < src.length && /\s/.test(src[i])) i++;
+  };
+
+  const readString = (): string => {
+    const quote = src[i++];
+    let out = "";
+    while (i < src.length) {
+      const c = src[i];
+      if (c === "\\") {
+        const next = src[i + 1];
+        const escapes: Record<string, string> = {
+          n: "\n",
+          t: "\t",
+          r: "\r",
+          "\\": "\\",
+          "'": "'",
+          '"': '"',
+          "0": "\0",
+        };
+        out += escapes[next] ?? next;
+        i += 2;
+        continue;
+      }
+      if (c === quote) {
+        i++;
+        return out;
+      }
+      out += c;
+      i++;
+    }
+    throw new Error("unterminated string");
+  };
+
+  const value = (): unknown => {
+    ws();
+    const c = src[i];
+    if (c === undefined) throw new Error("unexpected end");
+    if (c === "'" || c === '"') return readString();
+    if (c === "[" || c === "(") {
+      const close = c === "[" ? "]" : ")";
+      i++;
+      const arr: unknown[] = [];
+      ws();
+      if (src[i] === close) {
+        i++;
+        return arr;
+      }
+      for (;;) {
+        arr.push(value());
+        ws();
+        if (src[i] === ",") {
+          i++;
+          ws();
+          if (src[i] === close) {
+            i++;
+            return arr;
+          }
+          continue;
+        }
+        if (src[i] === close) {
+          i++;
+          return arr;
+        }
+        throw new Error(`expected , or ${close}`);
+      }
+    }
+    if (c === "{") {
+      i++;
+      const obj: Record<string, unknown> = {};
+      ws();
+      if (src[i] === "}") {
+        i++;
+        return obj;
+      }
+      for (;;) {
+        ws();
+        const k = value();
+        ws();
+        if (src[i] !== ":") throw new Error("expected :");
+        i++;
+        obj[String(k)] = value();
+        ws();
+        if (src[i] === ",") {
+          i++;
+          ws();
+          if (src[i] === "}") {
+            i++;
+            return obj;
+          }
+          continue;
+        }
+        if (src[i] === "}") {
+          i++;
+          return obj;
+        }
+        throw new Error("expected , or }");
+      }
+    }
+    const literals: Array<[string, unknown]> = [
+      ["True", true],
+      ["False", false],
+      ["None", null],
+    ];
+    for (const [word, val] of literals) {
+      if (src.startsWith(word, i)) {
+        i += word.length;
+        return val;
+      }
+    }
+    const num = /^-?\d+(\.\d+)?([eE][+-]?\d+)?/.exec(src.slice(i));
+    if (num) {
+      i += num[0].length;
+      return Number(num[0]);
+    }
+    throw new Error(`unexpected token at ${i}: ${src.slice(i, i + 12)}`);
+  };
+
+  const out = value();
+  ws();
+  if (i !== src.length) throw new Error("trailing content");
+  return out;
+}
+
+/**
+ * Read a list-valued column. MCP-Atlas mixes encodings across fields:
+ * `ENABLED_TOOLS` and `TRAJECTORY` are JSON, `GTFA_CLAIMS` is a Python repr, and
+ * some `ENABLED_TOOLS` entries are objects rather than strings. Each of those is
+ * a silent trap — a JSON-only parser reports the affected rows as empty, which is
+ * how a 55-task set first looked like 53.
  */
 export function parseListField(v: unknown): unknown[] {
   if (Array.isArray(v)) return v;
@@ -52,14 +192,8 @@ export function parseListField(v: unknown): unknown[] {
     const p = JSON.parse(s);
     return Array.isArray(p) ? p : [];
   } catch {
-    // Python repr: single-quoted strings, True/False/None.
     try {
-      const jsonish = s
-        .replace(/(?<![\\])'/g, '"')
-        .replace(/\bTrue\b/g, "true")
-        .replace(/\bFalse\b/g, "false")
-        .replace(/\bNone\b/g, "null");
-      const p = JSON.parse(jsonish);
+      const p = parsePythonLiteral(s);
       return Array.isArray(p) ? p : [];
     } catch {
       return [];
