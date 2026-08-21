@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyWorkload,
   goldCallsFrom,
   goldCoverage,
   goldServers,
@@ -49,6 +50,7 @@ function task(over: Partial<McpAtlasTask> = {}): McpAtlasTask {
     enabled_tool_ids: [],
     gold_tool_ids: [],
     gold_servers: [],
+    workload: "analysis",
     gold_calls: [],
     claims: [],
     ...over,
@@ -270,5 +272,36 @@ describe("toolsByServerFrom", () => {
       github: ["github/a", "github/b"],
       git: ["git/c"],
     });
+  });
+});
+
+describe("classifyWorkload — what a task is about, not which servers it uses", () => {
+  // MCP-Atlas labels tasks by servers touched, so its "Coding" bucket counts a
+  // CSV average computed with a code executor. Measured split on the 55-task
+  // set: 22 version-control, 17 analysis, 16 database.
+  it("treats any git/github involvement as version control", () => {
+    expect(classifyWorkload(["git"])).toBe("version-control");
+    expect(classifyWorkload(["github", "filesystem"])).toBe("version-control");
+  });
+
+  it("version control wins over a database the task also touches", () => {
+    expect(classifyWorkload(["github", "mongodb"])).toBe("version-control");
+  });
+
+  it("classifies store analytics as database", () => {
+    expect(classifyWorkload(["mongodb"])).toBe("database");
+    expect(classifyWorkload(["airtable", "e2b-server"])).toBe("database");
+  });
+
+  it("classifies shell/exec/file work as analysis, not coding", () => {
+    // "average the revenue column of my local CSV" uses a code executor as a
+    // calculator; calling that a coding task is the over-claim this guards.
+    expect(classifyWorkload(["cli-mcp-server", "mcp-code-executor"])).toBe("analysis");
+    expect(classifyWorkload(["filesystem", "mcp-code-executor"])).toBe("analysis");
+    expect(classifyWorkload(["desktop-commander", "e2b-server"])).toBe("analysis");
+  });
+
+  it("is total — every task gets a workload", () => {
+    expect(classifyWorkload([])).toBe("analysis");
   });
 });

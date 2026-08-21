@@ -21,6 +21,19 @@ export type McpAtlasScope = "coding" | "full";
  *  (`github__search_repositories`). Normalized form is `<server>/<tool>`. */
 export type CanonicalToolId = string;
 
+/**
+ * What a task is about, independent of which servers it happens to use.
+ *
+ *   version-control  git / github — repo inspection, commit history, issues
+ *   database         mongodb / airtable — store analytics
+ *   analysis         shell, code execution and files used to compute over a CSV
+ *
+ * The distinction matters because the benchmark's headline must not over-claim:
+ * this is a developer-TOOL workload, not a software-engineering workload. Only
+ * ~22 of 55 tasks are software-shaped.
+ */
+export type McpAtlasWorkload = "version-control" | "database" | "analysis";
+
 /** k-slices evaluated for every search event. Fixed by the experiment design. */
 export const MCPATLAS_KS = [1, 3, 5] as const;
 export type McpAtlasK = (typeof MCPATLAS_KS)[number];
@@ -52,6 +65,13 @@ export interface McpAtlasTask {
   gold_tool_ids: CanonicalToolId[];
   /** Servers those gold tools belong to. */
   gold_servers: string[];
+  /** What the task is actually ABOUT, which is not what its servers imply.
+   *  MCP-Atlas labels tasks by the servers they touch, so a "coding" task is
+   *  often a CSV analysis that uses a code executor as a calculator. Measured on
+   *  the 55-task set: 22 version-control, 17 analysis, 16 database. Carried as a
+   *  row dimension so success is always readable per workload rather than
+   *  averaged into one misleading number. */
+  workload: McpAtlasWorkload;
   /** Full gold call sequence, with the recorded upstream output per step. */
   gold_calls: Array<{
     step: number;

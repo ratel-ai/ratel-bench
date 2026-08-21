@@ -20,6 +20,7 @@ import type {
   McpAtlasCatalogManifest,
   McpAtlasScope,
   McpAtlasTask,
+  McpAtlasWorkload,
 } from "./mcpatlas-types.js";
 
 /** Expected size of the coding task set. A drift here means the dataset moved and
@@ -270,6 +271,27 @@ export function goldCallsFrom(
   return calls;
 }
 
+/** Servers by workload. Version control is checked first because a task that
+ *  touches git or github is doing repository work whatever else it also uses. */
+const VCS_SERVERS = ["git", "github"];
+const DB_SERVERS = ["mongodb", "airtable"];
+
+/**
+ * Classify what a task is ABOUT, which MCP-Atlas does not record.
+ *
+ * Its own "Coding" bucket labels tasks by the servers they touch, so a task that
+ * runs a Python snippet to average a column of a CSV counts as coding. On the
+ * 55-task set that yields 22 version-control, 17 analysis and 16 database — so
+ * roughly a third is software-shaped and the rest is developer TOOLS applied to
+ * data work. Recording this stops the headline from over-claiming and lets
+ * success be read per workload instead of averaged into one number.
+ */
+export function classifyWorkload(servers: readonly string[]): McpAtlasWorkload {
+  if (servers.some((s) => VCS_SERVERS.includes(s))) return "version-control";
+  if (servers.some((s) => DB_SERVERS.includes(s))) return "database";
+  return "analysis";
+}
+
 /** Distinct servers a task's gold trajectory touches. */
 export function goldServers(calls: GoldCall[]): string[] {
   return [...new Set(calls.map((c) => c.tool_id.split("/")[0]))].sort();
@@ -319,6 +341,7 @@ export function toTask(row: RawAtlasRow, knownServers: readonly string[]): McpAt
     enabled_tool_ids: [...new Set(enabled_tool_ids)].sort(),
     gold_tool_ids,
     gold_servers: goldServers(gold_calls),
+    workload: classifyWorkload(goldServers(gold_calls)),
     gold_calls,
     claims: parseListField(row.GTFA_CLAIMS).filter((c): c is string => typeof c === "string"),
   };
@@ -475,9 +498,18 @@ export function main(): void {
     );
   }
 
+  const byWorkload = tasks.reduce<Record<string, number>>((acc, t) => {
+    acc[t.workload] = (acc[t.workload] ?? 0) + 1;
+    return acc;
+  }, {});
+
   console.log(
     [
       `tasks           ${tasks.length}`,
+      `  workload      ${Object.entries(byWorkload)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k} ${v}`)
+        .join(", ")}`,
       `task_list_hash  ${hash.slice(0, 16)}`,
       `tool universe   ${universe} across ${servers.length} servers`,
       `unservable      ${UNSERVABLE_SERVERS.filter((s) => servers.includes(s)).join(", ") || "none"}`,
