@@ -57,6 +57,37 @@ importers:
         specifier: ^4.1.5
         version: 4.1.5(@opentelemetry/api@1.9.1)(@types/node@24.12.3)(vite@8.0.11(@types/node@24.12.3)(esbuild@0.27.7)(tsx@4.21.0))
 
+  agent-eval:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^2.0.0
+        version: 2.0.79(zod@3.25.76)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
+      ai:
+        specifier: ^6.0.0
+        version: 6.0.177(zod@3.25.76)
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+    devDependencies:
+      '@biomejs/biome':
+        specifier: ^2.4.13
+        version: 2.4.15
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.12.3
+      tsx:
+        specifier: ^4.20.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.5
+        version: 4.1.5(@opentelemetry/api@1.9.1)(@types/node@24.12.3)(vite@8.0.11(@types/node@24.12.3)(esbuild@0.27.7)(tsx@4.21.0))
+
 packages:
 
   '@ai-sdk/anthropic@2.0.79':
