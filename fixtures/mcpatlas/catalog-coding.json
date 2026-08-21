@@ -161,7 +161,9 @@
         "mongodb/list-databases"
       ],
       "tool_count": 10,
-      "required_env": []
+      "required_env": [
+        "MONGODB_CONNECTION_STRING"
+      ]
     }
   ],
   "server_count": 11,

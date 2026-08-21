@@ -42,6 +42,12 @@ export const SERVER_REQUIRED_ENV: Record<string, string[]> = {
   github: ["GITHUB_TOKEN"],
   airtable: ["AIRTABLE_API_KEY"],
   "e2b-server": ["E2B_API_KEY"],
+  // Not visible in mcp_server_template.json — that file shows no `env` block for
+  // mongodb — but the sandbox's own env.template requires it: the server talks to
+  // YOUR Atlas cluster, seeded from data_exports/mongo_dump_video_game_store.
+  // Missing it costs 10 tools and 11 tasks, and the failure would surface only
+  // once cells started running.
+  mongodb: ["MONGODB_CONNECTION_STRING"],
 };
 
 /** What ratel-local exposes here. `get_skill_content` needs a non-empty skill
