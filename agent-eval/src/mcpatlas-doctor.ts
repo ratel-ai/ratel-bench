@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import type { AtlasTool } from "./atlas-mcp-shim.js";
 import { EXPECTED_CODING_TOOLS, EXPECTED_TASK_COUNT } from "./mcpatlas-ingest.js";
-import { catalogHash, missingEnv, normalizeToolId } from "./mcpatlas-servers.js";
+import { catalogHash, missingEnv, normalizeToolId, requiredEnv } from "./mcpatlas-servers.js";
 import type { McpAtlasCatalogManifest, McpAtlasScope } from "./mcpatlas-types.js";
 
 export type Severity = "blocking" | "warning";
@@ -62,6 +62,21 @@ export interface DoctorOptions {
   probes: DoctorProbes;
   /** Skip the Docker checks when the caller manages the sandbox itself. */
   requireDocker?: boolean;
+}
+
+/**
+ * An unfilled credential slot.
+ *
+ * Presence is not enough: the committed `.env` template ships `GITHUB_TOKEN=...`
+ * and the AWS side ships `PLACEHOLDER-set-via-put-parameter` until someone runs
+ * put-parameter. Both pass a presence check and then fail on the first API call,
+ * halfway through a campaign — which is the failure this stage exists to move
+ * forward in time.
+ */
+export function isPlaceholder(value: string | undefined): boolean {
+  if (!value) return true;
+  const v = value.trim();
+  return v === "" || /^\.{2,}$/.test(v) || /^PLACEHOLDER/i.test(v) || /^(x{3,}|<.*>)$/i.test(v);
 }
 
 function ok(name: string, detail: string, severity: Severity = "blocking"): CheckResult {
@@ -196,14 +211,22 @@ export async function runChecks(o: DoctorOptions): Promise<{
   );
 
   // ── credentials ────────────────────────────────────────────────────────────
+  const required = requiredEnv(o.manifest);
   const missing = missingEnv(o.manifest, p.env);
+  const placeholders = required.filter((k) => !missing.includes(k) && isPlaceholder(p.env[k]));
   results.push(
-    missing.length === 0
-      ? ok("credentials", "all required env vars present")
+    missing.length === 0 && placeholders.length === 0
+      ? ok("credentials", `${required.length} required var(s) set`)
       : fail(
           "credentials",
-          `missing ${missing.join(", ")}`,
-          "export them, or on AWS set the matching SSM SecureString parameters",
+          [
+            missing.length ? `missing ${missing.join(", ")}` : "",
+            placeholders.length ? `placeholder value in ${placeholders.join(", ")}` : "",
+          ]
+            .filter(Boolean)
+            .join("; "),
+          "put real values in agent-eval/.env, or on AWS via " +
+            "`aws ssm put-parameter --type SecureString --overwrite`",
         ),
   );
 
@@ -421,7 +444,24 @@ function arg(name: string, fallback: string): string {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
+/**
+ * Load `agent-eval/.env`, mirroring how `agent/src/cli.ts` loads `agent/.env`.
+ *
+ * Only the CLI entrypoint does this — `runChecks` takes `env` as an argument, so
+ * the check table stays pure and a test never picks up whatever happens to be in
+ * the developer's shell.
+ *
+ * On AWS these same names come from SSM SecureString instead; nothing here reads
+ * a file in that path.
+ */
+async function loadLocalEnv(): Promise<void> {
+  const { config } = await import("dotenv");
+  const here = new URL("..", import.meta.url).pathname;
+  config({ path: `${here}.env`, quiet: true });
+}
+
 export async function main(): Promise<void> {
+  await loadLocalEnv();
   const scope = arg("--scope", "coding") as McpAtlasScope;
   const fixtures = arg("--fixtures", "fixtures/mcpatlas");
   const corpus = arg("--corpus", "test-data/mcpatlas-coding.jsonl");

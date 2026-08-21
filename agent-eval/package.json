@@ -20,6 +20,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ai": "^6.0.0",
     "@ai-sdk/anthropic": "^2.0.0",
+    "dotenv": "^16.4.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {

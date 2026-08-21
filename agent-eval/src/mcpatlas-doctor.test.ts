@@ -6,6 +6,7 @@ import {
   type DoctorProbes,
   doctorExitCode,
   formatResults,
+  isPlaceholder,
   runChecks,
 } from "./mcpatlas-doctor.js";
 import { buildCatalogManifest } from "./mcpatlas-servers.js";
@@ -213,6 +214,54 @@ describe("runChecks", () => {
     const { results } = await runChecks(opts({ probes: probes({ ratelLocal: async () => null }) }));
     expect(by(results, "ratel-local")?.ok).toBe(false);
     expect(doctorExitCode(results)).toBe(1);
+  });
+});
+
+describe("isPlaceholder — presence is not enough", () => {
+  it("rejects the shapes an unfilled slot actually takes", () => {
+    // agent-eval/.env ships GITHUB_TOKEN=... ; AWS SSM ships
+    // PLACEHOLDER-set-via-put-parameter. Both would pass a presence check and
+    // then fail on the first API call, mid-campaign.
+    for (const v of [
+      undefined,
+      "",
+      "   ",
+      "...",
+      "....",
+      "PLACEHOLDER-set-via-put-parameter",
+      "xxxx",
+      "<your-token>",
+    ]) {
+      expect(isPlaceholder(v)).toBe(true);
+    }
+  });
+
+  it("accepts a real-looking value", () => {
+    for (const v of ["ghp_abc123", "keyABC.def", "e2b_9f3c"]) {
+      expect(isPlaceholder(v)).toBe(false);
+    }
+  });
+});
+
+describe("credentials check", () => {
+  it("fails on a placeholder even though the var is present", async () => {
+    const { results } = await runChecks(
+      opts({
+        probes: probes({
+          env: { GITHUB_TOKEN: "...", AIRTABLE_API_KEY: "real", E2B_API_KEY: "real" },
+        }),
+      }),
+    );
+    const c = by(results, "credentials");
+    expect(c?.ok).toBe(false);
+    expect(c?.detail).toContain("placeholder value in GITHUB_TOKEN");
+  });
+
+  it("distinguishes missing from placeholder in one message", async () => {
+    const { results } = await runChecks(opts({ probes: probes({ env: { GITHUB_TOKEN: "..." } }) }));
+    const d = by(results, "credentials")?.detail ?? "";
+    expect(d).toContain("missing AIRTABLE_API_KEY, E2B_API_KEY");
+    expect(d).toContain("placeholder value in GITHUB_TOKEN");
   });
 });
 
