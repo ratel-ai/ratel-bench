@@ -206,6 +206,10 @@ export interface CellContext {
   catalog_tool_ids: readonly CanonicalToolId[];
   eval_ks: readonly number[];
   per_call_timeout_ms?: number;
+  model: string;
+  ratel_version_label: string;
+  ratel_local_version: string;
+  ratel_sdk_version: string | null;
 }
 
 export function buildToolCallRows(
@@ -230,6 +234,10 @@ export function buildToolCallRows(
     task_id: ctx.task.task_id,
     arm: ctx.arm,
     catalog_scope: ctx.catalog_scope,
+    model: ctx.model,
+    ratel_version_label: ctx.ratel_version_label,
+    ratel_local_version: ctx.ratel_local_version,
+    ratel_sdk_version: ctx.ratel_sdk_version,
   };
   const rows: McpAtlasToolCallRow[] = calls.map((c, i) => {
     const span = spanFor.get(c.tool_id)?.shift();
@@ -305,6 +313,10 @@ export function buildSearchEventRows(
       task_id: ctx.task.task_id,
       arm: "ratel",
       catalog_scope: ctx.catalog_scope,
+      model: ctx.model,
+      ratel_version_label: ctx.ratel_version_label,
+      ratel_local_version: ctx.ratel_local_version,
+      ratel_sdk_version: ctx.ratel_sdk_version,
       search_index: i,
       query: e.query,
       origin: e.origin,
@@ -370,6 +382,7 @@ export function buildRetrievalRows(
         run_type: "mcpatlas_retrieval",
         run_id: ctx.run_id,
         generated_at: ctx.generated_at,
+        model: ctx.model,
         ratel_version_label: ratelVersionLabel,
         ratel_local_version: ratelLocalVersion,
         retriever_method: retrieverMethod,

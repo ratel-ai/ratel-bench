@@ -369,6 +369,10 @@ export interface McpAtlasToolCallRow {
   task_id: string;
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
+  model: string;
+  ratel_version_label: string;
+  ratel_local_version: string;
+  ratel_sdk_version: string | null;
   call_index: number;
   turn_index: number;
   tool_id: CanonicalToolId;
@@ -423,6 +427,10 @@ export interface McpAtlasSearchEventRow {
   task_id: string;
   arm: "ratel";
   catalog_scope: McpAtlasScope;
+  model: string;
+  ratel_version_label: string;
+  ratel_local_version: string;
+  ratel_sdk_version: string | null;
   search_index: number;
   query: string;
   origin: string;
@@ -448,6 +456,7 @@ export interface McpAtlasRetrievalRow {
   run_type: "mcpatlas_retrieval";
   run_id: string;
   generated_at: string;
+  model: string;
   ratel_version_label: string;
   ratel_local_version: string;
   retriever_method: string;

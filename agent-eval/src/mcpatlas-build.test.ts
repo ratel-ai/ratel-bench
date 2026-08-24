@@ -46,6 +46,10 @@ function ctx(over: Partial<CellContext> = {}): CellContext {
     catalog_scope: "coding",
     catalog_tool_ids: ["github/get_issue", "git/status", "git/log"],
     eval_ks: [1, 3, 5],
+    model: "claude-haiku-4-5",
+    ratel_version_label: "0.8.1",
+    ratel_local_version: "0.8.1",
+    ratel_sdk_version: "0.9.1",
     ...over,
   };
 }
@@ -218,6 +222,17 @@ describe("buildToolCallRows", () => {
     expect(rows[0].failure_class).toBe("upstream_error");
     expect(rows[0].error_message).toBe("404 not found");
   });
+
+  it("stamps model and ratel-local version from context, so multi-model/multi-version runs stay groupable", () => {
+    const rows = buildToolCallRows(
+      ctx({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" }),
+      [{ name: "x", input: {}, turn: 1 }],
+      [{ tool_id: "git/status", args: {} }],
+      [],
+      [],
+    );
+    expect(rows[0]).toMatchObject({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" });
+  });
 });
 
 describe("buildSearchEventRows", () => {
@@ -263,6 +278,16 @@ describe("buildSearchEventRows", () => {
     const { rows } = buildSearchEventRows(ctx({ arm: "native" }), telemetry, SERVERS, []);
     expect(rows).toEqual([]);
   });
+
+  it("stamps model and ratel-local version from context", () => {
+    const { rows } = buildSearchEventRows(
+      ctx({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" }),
+      telemetry,
+      SERVERS,
+      [],
+    );
+    expect(rows[0]).toMatchObject({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" });
+  });
 });
 
 describe("buildRetrievalRows", () => {
@@ -281,6 +306,18 @@ describe("buildRetrievalRows", () => {
     const rows = buildRetrievalRows(ctx(), results, ["a", "b"], "0.8.1", "0.8.1", "bm25");
     expect(rows).toHaveLength(9);
     expect(new Set(rows.map((r) => r.aggregation))).toEqual(new Set(["first", "best", "union"]));
+  });
+
+  it("stamps model from context", () => {
+    const rows = buildRetrievalRows(
+      ctx({ model: "claude-sonnet-5" }),
+      results,
+      ["a", "b"],
+      "0.8.1",
+      "0.8.1",
+      "bm25",
+    );
+    expect(rows[0].model).toBe("claude-sonnet-5");
   });
 
   it("union sees gold that no single search found alone", () => {
