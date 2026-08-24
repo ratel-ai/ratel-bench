@@ -531,6 +531,17 @@ function cellKeyFor(item: QueueItem, scope: McpAtlasScope): string {
   return `${item.task.task_id}__${item.arm}__s${scope}__r${item.runIndex}`;
 }
 
+/** `process.env`, stripped of undefined entries. Passed to the spawned `claude`
+ *  process so it inherits PATH (to find the `claude`/`npx`/`node` binaries) and
+ *  whatever auth it needs — an empty env makes `spawn` fail with ENOENT before
+ *  any API call happens, which looks like a $0 cell error with no useful
+ *  signal about what actually broke. */
+function inheritedEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) out[k] = v;
+  return out;
+}
+
 /** Runs one (task, arm) cell end to end: writes the cell's mcp.json/ratel.json,
  *  invokes Claude Code, reads the transcript and telemetry, judges the claims,
  *  and assembles all four row types. On any failure — including the case that
@@ -579,7 +590,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       permissionMode: cfg.permission_mode,
       cwd: scratch.workspaceDir,
       homeDir: scratch.homeDir,
-      env: {},
+      env: inheritedEnv(),
       timeoutMs: cfg.per_cell_timeout_ms,
     });
 
