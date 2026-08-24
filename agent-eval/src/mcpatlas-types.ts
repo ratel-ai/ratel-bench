@@ -280,6 +280,11 @@ export type McpAtlasFailureCounts = Record<McpAtlasFailureClass, number>;
 export interface McpAtlasToolCall {
   tool_id: CanonicalToolId;
   args: Record<string, unknown>;
+  /** The transcript turn this call happened on. Stamped directly from the raw
+   *  tool_use block at the moment effectiveCalls() accepts the call — not
+   *  re-derived later by position, which breaks the instant any search or
+   *  off-catalog call is filtered out ahead of it in the transcript. */
+  turn: number;
 }
 
 /** One cell = one (task, arm, scope, run_index). */

@@ -663,7 +663,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
     const uses = parseUses(transcriptText);
     const { calls, offCatalog } = effectiveCalls(uses, knownServers);
     const spans = invokeSpans(parseTelemetry(telemetryText), knownServers);
-    const toolCallRows = buildToolCallRows(ctx, uses, calls, offCatalog, spans);
+    const toolCallRows = buildToolCallRows(ctx, calls, offCatalog, spans);
 
     let searchEventRows: McpAtlasSearchEventRow[] = [];
     let retrievalRows: McpAtlasRetrievalRow[] = [];

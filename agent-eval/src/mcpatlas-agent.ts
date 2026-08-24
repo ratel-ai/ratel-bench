@@ -296,7 +296,7 @@ export function effectiveCalls(
       offCatalog.push(rawId);
       continue;
     }
-    calls.push({ tool_id: id, args });
+    calls.push({ tool_id: id, args, turn: u.turn });
   }
   return { calls, offCatalog, gatewayCalls, nonGatewayCalls, searchCalls };
 }

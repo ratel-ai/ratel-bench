@@ -189,8 +189,7 @@ describe("buildToolCallRows", () => {
   it("marks gold, catalog membership and gateway routing", () => {
     const rows = buildToolCallRows(
       ctx(),
-      [{ name: "x", input: {}, turn: 2 }],
-      [{ tool_id: "github/get_issue", args: { id: 1 } }],
+      [{ tool_id: "github/get_issue", args: { id: 1 }, turn: 2 }],
       [],
       [{ tool_id: "github/get_issue", args_size_bytes: 12, took_ms: 40, error: null }],
     );
@@ -207,7 +206,7 @@ describe("buildToolCallRows", () => {
   });
 
   it("emits a row for a hallucinated id so it cannot vanish", () => {
-    const rows = buildToolCallRows(ctx(), [], [], ["mcp__weather__forecast"], []);
+    const rows = buildToolCallRows(ctx(), [], ["mcp__weather__forecast"], []);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ failure_class: "off_catalog_call", in_catalog: false });
   });
@@ -215,8 +214,7 @@ describe("buildToolCallRows", () => {
   it("carries an upstream error onto the row", () => {
     const rows = buildToolCallRows(
       ctx(),
-      [{ name: "x", input: {}, turn: 1 }],
-      [{ tool_id: "git/status", args: {} }],
+      [{ tool_id: "git/status", args: {}, turn: 1 }],
       [],
       [{ tool_id: "git/status", args_size_bytes: 0, took_ms: 5, error: "404 not found" }],
     );
@@ -227,12 +225,27 @@ describe("buildToolCallRows", () => {
   it("stamps model and ratel-local version from context, so multi-model/multi-version runs stay groupable", () => {
     const rows = buildToolCallRows(
       ctx({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" }),
-      [{ name: "x", input: {}, turn: 1 }],
-      [{ tool_id: "git/status", args: {} }],
+      [{ tool_id: "git/status", args: {}, turn: 1 }],
       [],
       [],
     );
     expect(rows[0]).toMatchObject({ model: "claude-sonnet-5", ratel_local_version: "0.9.0" });
+  });
+
+  it("turn_index tracks the call's OWN recorded turn, not its position among survivors", () => {
+    // Regression: turn_index used to be derived from the raw transcript array
+    // by filtered-array position, which desynced the instant a search or
+    // off-catalog call was filtered out ahead of a real one.
+    const rows = buildToolCallRows(
+      ctx(),
+      [
+        { tool_id: "git/status", args: {}, turn: 7 },
+        { tool_id: "github/get_issue", args: { id: 1 }, turn: 12 },
+      ],
+      [],
+      [],
+    );
+    expect(rows.map((r) => r.turn_index)).toEqual([7, 12]);
   });
 });
 

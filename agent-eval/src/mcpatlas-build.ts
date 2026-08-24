@@ -216,8 +216,7 @@ export interface CellContext {
 
 export function buildToolCallRows(
   ctx: CellContext,
-  uses: readonly RawToolUse[],
-  calls: readonly { tool_id: CanonicalToolId; args: Record<string, unknown> }[],
+  calls: readonly { tool_id: CanonicalToolId; args: Record<string, unknown>; turn: number }[],
   offCatalog: readonly string[],
   spans: readonly InvokeSpan[],
 ): McpAtlasToolCallRow[] {
@@ -248,7 +247,7 @@ export function buildToolCallRows(
     return {
       ...base,
       call_index: i,
-      turn_index: uses[i]?.turn ?? -1,
+      turn_index: c.turn,
       tool_id: c.tool_id,
       server: serverOf(c.tool_id),
       via_gateway: viaGateway,
@@ -591,7 +590,7 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
   );
   const observedIds = calls.map((c) => c.tool_id);
   const spans = invokeSpans(parseTelemetry(input.telemetryText), knownServers);
-  const toolCallRows = buildToolCallRows(ctx, uses, calls, offCatalog, spans);
+  const toolCallRows = buildToolCallRows(ctx, calls, offCatalog, spans);
   const failures = tallyFailures(toolCallRows);
   const sel = selectionMetrics(ctx.task.gold_tool_ids, observedIds);
   const retrievable = retrievableGold(ctx);

@@ -205,7 +205,7 @@ describe("transcript parsing", () => {
 describe("effectiveCalls — what makes the arms comparable", () => {
   it("native calls reduce to canonical ids", () => {
     const e = effectiveCalls([use("mcp__github__get_issue", { id: 1 })], SERVERS);
-    expect(e.calls).toEqual([{ tool_id: "github/get_issue", args: { id: 1 } }]);
+    expect(e.calls).toEqual([{ tool_id: "github/get_issue", args: { id: 1 }, turn: 1 }]);
     expect(e.nonGatewayCalls).toBe(1);
     expect(e.gatewayCalls).toBe(0);
   });
@@ -245,6 +245,27 @@ describe("effectiveCalls — what makes the arms comparable", () => {
   it("GATEWAY_SEARCH_NAMES contains both real names", () => {
     expect(GATEWAY_SEARCH_NAMES.has("mcp__ratel-local__search_tools")).toBe(true);
     expect(GATEWAY_SEARCH_NAMES.has("mcp__ratel-local__search_capabilities")).toBe(true);
+  });
+
+  it("stamps each call's own turn — not derivable later by filtered-array position", () => {
+    // Regression: turn_index used to be re-derived downstream by indexing the
+    // raw transcript at the call's position among SURVIVORS, which desynced
+    // the instant a search/off-catalog call was filtered out ahead of a real
+    // one. Stamping turn here, at acceptance time, makes that impossible.
+    const e = effectiveCalls(
+      [
+        use(GATEWAY_SEARCH, { query: "x" }, 1), // filtered out — search
+        use("mcp__weather__forecast", {}, 2), // filtered out — off-catalog
+        use("mcp__git__status", {}, 3),
+        use(GATEWAY_INVOKE, {}, 4), // filtered — missing toolId
+        use("mcp__github__get_issue", { id: 1 }, 5),
+      ],
+      SERVERS,
+    );
+    expect(e.calls.map((c) => ({ tool_id: c.tool_id, turn: c.turn }))).toEqual([
+      { tool_id: "git/status", turn: 3 },
+      { tool_id: "github/get_issue", turn: 5 },
+    ]);
   });
 
   it("records an unknown tool id as off-catalog, not as a call", () => {
