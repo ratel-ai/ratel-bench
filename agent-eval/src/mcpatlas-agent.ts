@@ -141,7 +141,12 @@ export function parseClaudeResult(stdout: string): ClaudeResult | null {
   }
   const r = candidates.at(-1);
   if (!r) return null;
-  return { ...r, usage: { ...ZERO_USAGE, ...(r.usage ?? {}) } };
+  // `result` is typed as a required string, but a real envelope can omit it —
+  // e.g. an error subtype (max-turns, API error) with no final text produced.
+  // Defaulting here means every downstream consumer (claim screening chief
+  // among them — it calls .toLowerCase() on this unconditionally) can trust
+  // the type instead of re-guessing whether this specific field might lie.
+  return { ...r, result: r.result ?? "", usage: { ...ZERO_USAGE, ...(r.usage ?? {}) } };
 }
 
 export function totalTokens(u: ClaudeUsage): number {

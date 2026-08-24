@@ -116,6 +116,17 @@ describe("parseClaudeResult", () => {
     expect(r?.usage.cache_read_input_tokens).toBe(100);
   });
 
+  it("defaults a missing result to an empty string, never undefined", () => {
+    // A real envelope can omit `result` entirely — e.g. an error subtype
+    // (max-turns, no tool calls, no final text) — even though the type says
+    // it's a required string. A live smoke-test run hit exactly this and
+    // crashed claim screening downstream (.toLowerCase() on undefined) before
+    // this default existed.
+    const { result: _omit, ...withoutResult } = envelope;
+    const r = parseClaudeResult(JSON.stringify(withoutResult));
+    expect(r?.result).toBe("");
+  });
+
   it("takes the LAST result line, so stream-json is a drop-in", () => {
     const stream = [
       JSON.stringify({ type: "assistant", message: {} }),
