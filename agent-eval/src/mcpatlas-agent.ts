@@ -225,7 +225,12 @@ export function toolUsesFromTranscript(text: string): RawToolUse[] {
   return out;
 }
 
-export const GATEWAY_SEARCH = "mcp__ratel-local__search_capabilities";
+// Confirmed against the live ratel-local 0.8.1 process's own MCP connection
+// log during a real smoke-test run ("Calling MCP tool: search_tools" —
+// succeeded every time): the shipped gateway's search tool is named
+// search_tools, not search_capabilities. The stale name meant every real
+// search call was silently misclassified as off_catalog.
+export const GATEWAY_SEARCH = "mcp__ratel-local__search_tools";
 export const GATEWAY_INVOKE = "mcp__ratel-local__invoke_tool";
 
 export interface EffectiveCalls {

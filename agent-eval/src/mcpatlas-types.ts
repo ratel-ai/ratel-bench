@@ -38,7 +38,7 @@ export type McpAtlasWorkload = "version-control" | "database" | "analysis";
 export const MCPATLAS_KS = [1, 3, 5] as const;
 export type McpAtlasK = (typeof MCPATLAS_KS)[number];
 
-/** How multiple `search_capabilities` calls within one task collapse to a score.
+/** How multiple `search_tools` calls within one task collapse to a score.
  *  `first` is the headline; `best` is the reformulation ceiling; `union` predicts
  *  task success. Never averaged — searches ask different questions. */
 export type McpAtlasAggregation = "first" | "best" | "union";
@@ -217,7 +217,7 @@ export interface McpAtlasTokenBreakdown {
   first_turn_context_tokens: number;
   peak_context_tokens: number;
   compaction_events: number;
-  /** ratel's payback: schemas arriving via search_capabilities results plus
+  /** ratel's payback: schemas arriving via search_tools results plus
    *  invoke_tool wrappers. MUST be subtracted before claiming savings. 0 native. */
   retrieval_overhead_tokens: number;
   /** Tool RESULTS, both arms — the part a gateway does not shrink. */

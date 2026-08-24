@@ -51,8 +51,10 @@ export const SERVER_REQUIRED_ENV: Record<string, string[]> = {
 };
 
 /** What ratel-local exposes here. `get_skill_content` needs a non-empty skill
- *  catalog and `auth` needs a runAuthFlow; this mode supplies neither. */
-export const GATEWAY_TOOLS = ["search_capabilities", "invoke_tool"] as const;
+ *  catalog and `auth` needs a runAuthFlow; this mode supplies neither.
+ *  `search_tools`, not `search_capabilities` — confirmed against the live
+ *  0.8.1 process's own MCP connection log during a real smoke-test run. */
+export const GATEWAY_TOOLS = ["search_tools", "invoke_tool"] as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool id normalization — the join key
@@ -188,7 +190,7 @@ interface McpServerEntry {
 }
 
 /** One shim per Atlas server — not one aggregated shim — so ratel-local registers
- *  N distinct upstreams and `search_capabilities` groups hits by server the way
+ *  N distinct upstreams and `search_tools` groups hits by server the way
  *  it does in production. */
 export function buildShimEntries(
   manifest: McpAtlasCatalogManifest,

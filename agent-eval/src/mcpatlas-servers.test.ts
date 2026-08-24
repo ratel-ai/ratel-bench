@@ -180,7 +180,7 @@ describe("per-arm configuration", () => {
       "mcp__github__b",
     ]);
     expect(allowedToolsFor("ratel", m)).toEqual([
-      "mcp__ratel-local__search_capabilities",
+      "mcp__ratel-local__search_tools",
       "mcp__ratel-local__invoke_tool",
     ]);
   });

@@ -567,7 +567,7 @@ describe("assembleCell", () => {
       cacheSource: "live",
     });
     expect(native.catalog_size).toBe(3); // ctx()'s catalog_tool_ids has 3 entries
-    expect(ratel.catalog_size).toBe(2); // search_capabilities, invoke_tool
+    expect(ratel.catalog_size).toBe(2); // search_tools, invoke_tool
     expect(ratel.telemetry_binding).toBe("per_cell_file");
   });
 

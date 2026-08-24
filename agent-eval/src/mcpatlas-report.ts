@@ -160,7 +160,7 @@ export function computeLimitations(input: ReportInput): Limitation[] {
       id: "agent_skipped_search",
       severity: "caveat",
       statement:
-        "In more than 10% of ratel-arm tasks the agent never called search_capabilities. Those " +
+        "In more than 10% of ratel-arm tasks the agent never called search_tools. Those " +
         "tasks are excluded from retrieval means; retrieval quality is measured only where " +
         "retrieval was used.",
       affects: ["mean_recall", "hit_rate", "mean_ndcg", "mean_mrr"],

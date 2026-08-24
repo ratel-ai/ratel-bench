@@ -440,7 +440,7 @@ export function buildTokenBreakdown(input: {
   const first = prompts[0] ?? 0;
   const u = input.result.usage;
   const schema = input.arm === "native" ? input.nativeCatalogTokens : input.gatewaySchemaTokens;
-  // ratel pays retrieval back into context: what search_capabilities returned.
+  // ratel pays retrieval back into context: what search_tools returned.
   const retrievalOverhead =
     input.arm === "ratel" ? catalogTokenEstimate(parseTelemetry(input.telemetryText)) : 0;
   const cacheDenom = u.cache_read_input_tokens + u.input_tokens;

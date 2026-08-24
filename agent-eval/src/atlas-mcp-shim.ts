@@ -5,9 +5,9 @@
 // goes through this shim.
 //
 // One process per Atlas server, not one aggregated process. That matters for the
-// ratel arm: ratel-local must register N distinct upstreams so
-// `search_capabilities` groups hits by server the way it does in production, and
-// so `ratel_tool_payload` telemetry reports per-server schema token counts.
+// ratel arm: ratel-local must register N distinct upstreams so `search_tools`
+// groups hits by server the way it does in production, and so
+// `ratel_tool_payload` telemetry reports per-server schema token counts.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
