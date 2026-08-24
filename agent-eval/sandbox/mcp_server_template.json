@@ -115,11 +115,10 @@
       ]
     },
     "git": {
-      "command": "uvx",
+      "command": "sh",
       "args": [
-        "--with",
-        "mcp==1.12.1",
-        "mcp-server-git==2026.7.10"
+        "-c",
+        "cd /data && exec uvx --with mcp==1.12.1 mcp-server-git==2026.7.10"
       ]
     },
     "github": {
