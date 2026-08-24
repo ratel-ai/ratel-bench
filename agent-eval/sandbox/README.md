@@ -60,10 +60,28 @@ found via the ratel arm's transcripts first while investigating a separate,
 unrelated bug (`invoke_tool` receiving a stringified `params` instead of an
 object, reported upstream against ratel-local, not fixed here).
 
+## `cli-mcp-server` couldn't search inside a file
+
+Also found from the same smoke test: `cli-mcp-server`'s `run_command` only
+allowed `ls`, `cat`, `find` (its own `ALLOWED_COMMANDS` env var, upstream's
+default). That's enough to list and dump a whole file, but not to search
+*inside* one — the agent hit a real file (`voices.index.json`, 811,706
+characters) too large to `cat` in one call, reached for `grep`, and got
+`Security violation: Command 'grep' is not allowed`. With no way to search a
+large file, it gave up on that path entirely rather than finding another way
+in, and burned its remaining turn budget on unrelated exploration.
+
+Added `grep` to `ALLOWED_COMMANDS`. Verified live through the real shim:
+`grep -i irish /data/repos/storyteller/data/voices.11labs.json` now returns
+the real matches (`"accent": "irish"`, `"accent": "american-irish"`) instead
+of being refused. `ALLOW_SHELL_OPERATORS` stays `false` — no pipes, so
+`cat file | grep x` still won't work, only `grep x file` directly.
+
 ## Scope of the change
 
-`args`/`command` differ from upstream for `git` and `cli-mcp-server`. No
-server is added, removed, or otherwise reconfigured.
+`args`/`command` differ from upstream for `git` and `cli-mcp-server`; `grep`
+was added to `cli-mcp-server`'s `ALLOWED_COMMANDS`. No server is added,
+removed, or otherwise reconfigured.
 
 This is a declared limitation: the environment is not byte-identical to stock
 MCP-Atlas. The mode already declares non-comparability with their leaderboard
