@@ -922,6 +922,15 @@ export async function main(): Promise<void> {
   const ratelLocalPin = arg("--ratel-local", process.env.RATEL_LOCAL_VERSION ?? "0.8.1");
   const model = arg("--model", process.env.RATEL_BENCH_MODEL ?? "claude-haiku-4-5");
   const judgeModelId = arg("--judge-model", "");
+  const retrieverMethodArg = arg("--retriever-method", "bm25");
+  if (!["bm25", "semantic", "hybrid"].includes(retrieverMethodArg)) {
+    console.error(
+      `--retriever-method must be one of bm25, semantic, hybrid — got "${retrieverMethodArg}"`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const retrieverMethod = retrieverMethodArg as "bm25" | "semantic" | "hybrid";
 
   const manifest = JSON.parse(
     readFileSync(resolveRepoPath(`fixtures/mcpatlas/catalog-${scope}.json`), "utf8"),
@@ -987,7 +996,7 @@ export async function main(): Promise<void> {
       perCellTimeoutMs: 300_000,
       permissionMode: "bypassPermissions",
       judgeModel: judgeModelId,
-      retrieverMethod: "bm25",
+      retrieverMethod,
       topKTools: 5,
       topKSkills: 3,
       arms,
