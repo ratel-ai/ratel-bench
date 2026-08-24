@@ -76,7 +76,13 @@ export function httpSandbox(sandboxUrl: string, timeoutMs = 60_000): SandboxClie
       return Array.isArray(body) ? body : (body.tools ?? []);
     },
     async callTool(name, args) {
-      return await post("/call-tool", { name, arguments: args });
+      // The sandbox's actual request schema is {tool_name, tool_args} — verified
+      // directly against the live sandbox, which 422s on {name, arguments} with
+      // "Field required" for both. This was never exercised until a real
+      // end-to-end run: every /call-tool request on both arms was silently
+      // failing, and the native arm's failure classification (below) had no
+      // way to surface it, since it never touches ratel's telemetry.
+      return await post("/call-tool", { tool_name: name, tool_args: args });
     },
   };
 }

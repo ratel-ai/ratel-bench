@@ -1,10 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type AtlasTool,
   createShimServer,
   filterToolsForServer,
+  httpSandbox,
   qualify,
   type SandboxClient,
   toToolResult,
@@ -112,6 +113,49 @@ describe("toToolResult", () => {
   it("stringifies anything else", () => {
     expect(toToolResult({ a: 1 }).content[0].text).toBe('{"a":1}');
     expect(toToolResult(null).content[0].text).toBe("null");
+  });
+});
+
+describe("httpSandbox — the wire format against the real sandbox", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs /call-tool with {tool_name, tool_args}, not {name, arguments}", async () => {
+    // The live sandbox's actual request schema — confirmed directly against it,
+    // which 422s on {name, arguments} with "Field required" for both keys. This
+    // went uncaught for a full build because httpSandbox had no test coverage
+    // at all: every real tool CALL (not list) on both arms was silently
+    // failing until this was caught in a live end-to-end run.
+    const calls: Array<{ url: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(init.body as string) });
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await httpSandbox("http://localhost:1984").callTool("filesystem_list_allowed_directories", {
+      foo: "bar",
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://localhost:1984/call-tool");
+    expect(calls[0].body).toEqual({
+      tool_name: "filesystem_list_allowed_directories",
+      tool_args: { foo: "bar" },
+    });
+  });
+
+  it("throws with the response body on a non-2xx status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response('{"detail":"bad request"}', { status: 422 })),
+    );
+    await expect(httpSandbox("http://localhost:1984").callTool("x", {})).rejects.toThrow(
+      /HTTP 422/,
+    );
   });
 });
 
