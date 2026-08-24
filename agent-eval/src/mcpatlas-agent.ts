@@ -11,8 +11,27 @@ import type { CanonicalToolId, McpAtlasToolCall } from "./mcpatlas-types.js";
  *  tool-routing benchmark into a shell benchmark, and does so UNEQUALLY: the
  *  native arm sees more MCP tools and has less incentive to shell out. Frozen
  *  and identical across arms. */
+/**
+ * The agent's entire reachable surface must be the frozen MCP catalog — any
+ * built-in that reads, searches, or executes outside it turns a tool-routing
+ * benchmark into a shell/filesystem benchmark and biases the arms unequally
+ * (native sees more MCP tools and has less incentive to use a built-in;
+ * ratel's narrower catalog gives the model more reason to reach for one).
+ *
+ * `--allowedTools` alone does not achieve this: it only ever listed MCP tool
+ * names here, and a live run still showed the agent using `Grep`/`Glob`
+ * against the (empty) local scratch workspace instead of the MCP `filesystem`
+ * server — Claude Code treats a baseline set of built-ins as available
+ * regardless of the allow list. `--disallowedTools` is the only lever that
+ * actually blocks them.
+ */
 export const DISALLOWED_TOOLS = [
   "Bash",
+  "BashOutput",
+  "KillShell",
+  "Read",
+  "Grep",
+  "Glob",
   "WebFetch",
   "WebSearch",
   "Write",
