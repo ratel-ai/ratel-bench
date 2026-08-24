@@ -33,11 +33,13 @@ import {
   unionRecall,
   wastedSearches,
 } from "./mcpatlas-gateway.js";
-import { serverOf } from "./mcpatlas-servers.js";
+import { GATEWAY_TOOLS, serverOf } from "./mcpatlas-servers.js";
 import type {
   CanonicalToolId,
+  ClaimRubricResult,
   McpAtlasAggregation,
   McpAtlasArm,
+  McpAtlasCell,
   McpAtlasFailureClass,
   McpAtlasFailureCounts,
   McpAtlasLatencyBreakdown,
@@ -538,4 +540,145 @@ export function invokedOrder(
 
 export function parseUses(transcriptText: string): RawToolUse[] {
   return toolUsesFromTranscript(transcriptText);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The cell assembler
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface AssembleCellInput {
+  ctx: CellContext;
+  result: ClaudeResult;
+  transcriptText: string;
+  transcriptPath: string;
+  telemetryText: string;
+  telemetryPath: string | null;
+  /** Computed by the caller via `judgeClaims` — may hit the network, so it
+   *  stays async and driver-side rather than inside this (pure) assembler. */
+  claimRubric: ClaimRubricResult;
+  /** Catalog schema tokens for the native arm, from a prior ratel run's
+   *  `ratel_tool_payload` events — the same estimator for both arms. */
+  nativeCatalogTokens: number;
+  gatewaySchemaTokens: number;
+  /** Median native duration per tool id, campaign-wide. Absent (or empty) on a
+   *  campaign with no native cells — `gateway_overhead_ms_est` is then `null`
+   *  everywhere, which `buildLatencyBreakdown` already handles. */
+  nativeBaselineMs?: Map<string, number>;
+  agentVersion: string;
+  runIndex: number;
+  cacheSource: "live" | "reused";
+}
+
+/**
+ * Assemble one complete `McpAtlasCell` from a cell's raw artifacts.
+ *
+ * Pure and I/O-free: every input is text or an already-parsed object, so this
+ * has no Docker/process/network dependency and is unit-testable with fixtures
+ * alone. `mcpatlas-run.ts` is the only intended caller — it owns turning those
+ * fixtures into a `McpAtlasToolCallRow[]`/`McpAtlasSearchEventRow[]`/
+ * `McpAtlasRetrievalRow[]` sibling set too, via the existing `buildToolCallRows`/
+ * `buildSearchEventRows`/`buildRetrievalRows`, which take the same `ctx`.
+ */
+export function assembleCell(input: AssembleCellInput): McpAtlasCell {
+  const { ctx } = input;
+  const knownServers = [
+    ...new Set(ctx.catalog_tool_ids.map(serverOf).filter((s): s is string => s !== null)),
+  ];
+  const uses = parseUses(input.transcriptText);
+  const { calls, offCatalog, gatewayCalls, nonGatewayCalls, searchCalls } = effectiveCalls(
+    uses,
+    knownServers,
+  );
+  const observedIds = calls.map((c) => c.tool_id);
+  const spans = invokeSpans(parseTelemetry(input.telemetryText), knownServers);
+  const toolCallRows = buildToolCallRows(ctx, uses, calls, offCatalog, spans);
+  const failures = tallyFailures(toolCallRows);
+  const sel = selectionMetrics(ctx.task.gold_tool_ids, observedIds);
+  const retrievable = retrievableGold(ctx);
+
+  const tokens = buildTokenBreakdown({
+    result: input.result,
+    transcriptText: input.transcriptText,
+    telemetryText: input.telemetryText,
+    arm: ctx.arm,
+    nativeCatalogTokens: input.nativeCatalogTokens,
+    gatewaySchemaTokens: input.gatewaySchemaTokens,
+  });
+  const latency = buildLatencyBreakdown({
+    result: input.result,
+    telemetryText: input.telemetryText,
+    knownServers,
+    arm: ctx.arm,
+    nativeBaselineMs: input.nativeBaselineMs,
+  });
+
+  return {
+    run_type: "mcpatlas_task",
+    run_id: ctx.run_id,
+    config_hash: ctx.config_hash,
+    generated_at: ctx.generated_at,
+    cell_key: ctx.cell_key,
+
+    task_id: ctx.task.task_id,
+    scenario_id: ctx.task.id,
+    category: "mcpatlas-coding",
+    arm: ctx.arm,
+    catalog_scope: ctx.catalog_scope,
+    catalog_tool_count: ctx.catalog_tool_ids.length,
+    // Visible to the model: native sees the whole catalog; ratel sees only the
+    // two gateway tools actually wired in (`allowedToolsFor` in
+    // mcpatlas-servers.ts is authoritative — GATEWAY_TOOLS.length, not a fixed
+    // constant, in case that set ever grows).
+    catalog_size: ctx.arm === "native" ? ctx.catalog_tool_ids.length : GATEWAY_TOOLS.length,
+    run_index: input.runIndex,
+
+    ratel_version_label: ctx.ratel_version_label,
+    ratel_local_version: ctx.ratel_local_version,
+    ratel_sdk_version: ctx.ratel_sdk_version,
+    agent_version: input.agentVersion,
+    model: ctx.model,
+
+    enabled_tool_ids: ctx.task.enabled_tool_ids,
+    gold_tool_ids: ctx.task.gold_tool_ids,
+    retrievable_gold_ids: retrievable,
+    gold_coverage: ctx.task.gold_tool_ids.length
+      ? retrievable.length / ctx.task.gold_tool_ids.length
+      : 1,
+
+    observed_tool_ids: observedIds,
+    tool_calls: calls,
+
+    claim_rubric: input.claimRubric,
+    task_pass: input.claimRubric.verdict === "pass",
+    programmatic_verdict: sel.hit ? "pass" : "fail",
+    judge_verdict: input.claimRubric.verdict,
+
+    tool_selection_recall: sel.recall,
+    tool_selection_precision: sel.precision,
+    tool_selection_f1: sel.f1,
+    tool_selection_pass: sel.pass,
+    tool_selection_hit: sel.hit,
+    trajectory_order_similarity: sel.order_similarity,
+    missing_gold: sel.missing_gold,
+    extra_calls: sel.extra_calls,
+    off_catalog_calls: offCatalog,
+
+    tokens,
+    latency,
+    tool_failures: failures,
+    tool_calls_total: toolCallRows.length,
+    tool_calls_unique: new Set(observedIds).size,
+    gateway_calls: gatewayCalls,
+    non_gateway_calls: nonGatewayCalls,
+    search_count: searchCalls,
+
+    final_text: input.result.result,
+    finish_reason: input.result.subtype,
+    error: input.result.is_error ? (input.result.result ?? "error") : null,
+
+    transcript_path: input.transcriptPath,
+    telemetry_path: input.telemetryPath,
+    telemetry_binding: input.telemetryPath ? "per_cell_file" : "none",
+    cache_source: input.cacheSource,
+  };
 }

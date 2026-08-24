@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ClaudeResult } from "./mcpatlas-agent.js";
 import {
+  assembleCell,
   buildLatencyBreakdown,
   buildRetrievalRows,
   buildSearchEventRows,
@@ -16,7 +17,7 @@ import {
   toolFailureRate,
 } from "./mcpatlas-build.js";
 import { CODING_SERVERS } from "./mcpatlas-servers.js";
-import type { McpAtlasTask, McpAtlasToolCallRow } from "./mcpatlas-types.js";
+import type { ClaimRubricResult, McpAtlasTask, McpAtlasToolCallRow } from "./mcpatlas-types.js";
 
 const SERVERS = [...CODING_SERVERS];
 
@@ -479,5 +480,139 @@ describe("buildLatencyBreakdown", () => {
       nativeBaselineMs: new Map([["git/status", 150]]),
     });
     expect(l.gateway_overhead_ms_est).toBe(50);
+  });
+});
+
+function claimRubric(over: Partial<ClaimRubricResult> = {}): ClaimRubricResult {
+  return {
+    claims: [],
+    coverage: 1,
+    verdict: "pass",
+    judge_model: "claude-sonnet-5",
+    judge_error: null,
+    judge_wall_ms: 500,
+    judge_input_tokens: 200,
+    judge_output_tokens: 50,
+    ...over,
+  };
+}
+
+describe("assembleCell", () => {
+  const transcript = JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "tool_use", name: "mcp__github__get_issue", input: {} }],
+    },
+  });
+
+  it("assembles a passing cell from gold-matching calls and a passing claim rubric", () => {
+    const cell = assembleCell({
+      ctx: ctx(),
+      result: result(),
+      transcriptText: transcript,
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.241",
+      runIndex: 0,
+      cacheSource: "live",
+    });
+
+    expect(cell.run_type).toBe("mcpatlas_task");
+    expect(cell.task_id).toBe("t1");
+    expect(cell.scenario_id).toBe("mcpatlas-t1");
+    expect(cell.arm).toBe("ratel");
+    expect(cell.model).toBe("claude-haiku-4-5");
+    expect(cell.ratel_local_version).toBe("0.8.1");
+    expect(cell.observed_tool_ids).toEqual(["github/get_issue"]);
+    expect(cell.tool_selection_recall).toBe(0.5); // gold is github/get_issue + git/status
+    expect(cell.task_pass).toBe(true); // driven by the claim rubric, not tool selection
+    expect(cell.judge_verdict).toBe("pass");
+    expect(cell.programmatic_verdict).toBe("pass"); // hit, not strict pass
+    expect(cell.cache_source).toBe("live");
+    expect(cell.telemetry_binding).toBe("none");
+  });
+
+  it("catalog_size is the full catalog for native and the gateway tool count for ratel", () => {
+    const native = assembleCell({
+      ctx: ctx({ arm: "native" }),
+      result: result(),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.241",
+      runIndex: 0,
+      cacheSource: "live",
+    });
+    const ratel = assembleCell({
+      ctx: ctx({ arm: "ratel" }),
+      result: result(),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: "/tmp/telemetry.jsonl",
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.241",
+      runIndex: 0,
+      cacheSource: "live",
+    });
+    expect(native.catalog_size).toBe(3); // ctx()'s catalog_tool_ids has 3 entries
+    expect(ratel.catalog_size).toBe(2); // search_capabilities, invoke_tool
+    expect(ratel.telemetry_binding).toBe("per_cell_file");
+  });
+
+  it("task_pass tracks claim_rubric.verdict even when tool selection misses gold entirely", () => {
+    const cell = assembleCell({
+      ctx: ctx(),
+      result: result(),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric({ verdict: "fail", coverage: 0 }),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.241",
+      runIndex: 0,
+      cacheSource: "reused",
+    });
+    expect(cell.observed_tool_ids).toEqual([]);
+    expect(cell.tool_selection_pass).toBe(false);
+    expect(cell.tool_selection_hit).toBe(false);
+    expect(cell.programmatic_verdict).toBe("fail");
+    expect(cell.task_pass).toBe(false);
+    expect(cell.cache_source).toBe("reused");
+  });
+
+  it("gold_coverage reflects gold ∩ catalog, not raw gold count", () => {
+    const cell = assembleCell({
+      ctx: ctx({
+        task: task({ gold_tool_ids: ["github/get_issue", "airtable/list_bases"] }),
+        catalog_tool_ids: ["github/get_issue", "git/status"], // airtable not registered
+      }),
+      result: result(),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.241",
+      runIndex: 0,
+      cacheSource: "live",
+    });
+    expect(cell.retrievable_gold_ids).toEqual(["github/get_issue"]);
+    expect(cell.gold_coverage).toBe(0.5);
   });
 });
