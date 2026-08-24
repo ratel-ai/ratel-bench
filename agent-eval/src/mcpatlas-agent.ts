@@ -38,6 +38,16 @@ export const DISALLOWED_TOOLS = [
   "Edit",
   "NotebookEdit",
   "Task",
+  // Claude Code's own built-in tool-discovery mechanism — separate from the
+  // gateway's search_tools/search_capabilities and from native's full-schema
+  // visibility. A live run showed it called repeatedly and unproductively
+  // (every call fails: "no matching deferred tools found", since it has
+  // nothing of its own to discover once --strict-mcp-config is set) right
+  // before that cell ran out of its turn budget. Blocking it removes a dead
+  // end; it does not by itself explain why the model reached for it —
+  // that needs a transcript, watch for whether removing this just shifts the
+  // same flailing to a different dead end.
+  "ToolSearch",
 ] as const;
 
 export interface ClaudeArgsOpts {
