@@ -390,6 +390,11 @@ export interface CellScratch {
 
 export function makeScratch(cellKey: string, rootDir: string): CellScratch {
   const cellDir = join(rootDir, cellKey);
+  // A prior --keep-artifacts run at the same cell_key leaves its home/session
+  // files behind; mkdirSync alone would layer this run's Claude Code session
+  // on top of that stale state (multiple .claude/projects/*.jsonl transcripts,
+  // stale MCP connection logs) rather than starting clean. Wipe first.
+  rmSync(cellDir, { recursive: true, force: true });
   const homeDir = join(cellDir, "home");
   const workspaceDir = join(cellDir, "workspace");
   for (const d of [cellDir, homeDir, workspaceDir]) mkdirSync(d, { recursive: true });

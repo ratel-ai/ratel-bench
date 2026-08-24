@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +13,7 @@ import {
   drainNativeCache,
   formatDoneLine,
   freezeConfig,
+  makeScratch,
   nativeCacheKey,
   readJsonl,
   readNativeCacheIndex,
@@ -514,6 +515,32 @@ describe("output truncation vs cache source — never the same file", () => {
     expect(cached).toHaveLength(2);
     expect(readJsonl(cacheSource)).toHaveLength(2);
     expect(readJsonl(output)).toEqual([]);
+  });
+});
+
+describe("makeScratch", () => {
+  let root: string;
+  afterEach(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("wipes a stale directory left by a prior --keep-artifacts run at the same cell_key", () => {
+    root = mkdtempSync(join(tmpdir(), "mcpatlas-scratch-test-"));
+    const first = makeScratch("t1__native__scoding__r0", root);
+    const staleFile = join(first.homeDir, "stale-session.jsonl");
+    writeFileSync(staleFile, "leftover from a previous run");
+    expect(existsSync(staleFile)).toBe(true);
+
+    makeScratch("t1__native__scoding__r0", root);
+
+    expect(existsSync(staleFile)).toBe(false);
+  });
+
+  it("still creates the expected directory structure", () => {
+    root = mkdtempSync(join(tmpdir(), "mcpatlas-scratch-test-"));
+    const s = makeScratch("t1__ratel__scoding__r0", root);
+    expect(existsSync(s.homeDir)).toBe(true);
+    expect(existsSync(s.workspaceDir)).toBe(true);
   });
 });
 
