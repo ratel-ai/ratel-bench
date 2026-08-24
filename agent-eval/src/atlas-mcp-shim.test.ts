@@ -57,6 +57,38 @@ describe("filterToolsForServer", () => {
     expect(t.inputSchema).toBe(schema);
   });
 
+  it("drops the sandbox's explicit-null fields rather than passing them through", () => {
+    // The real sandbox emits title/outputSchema/annotations/_meta as literal
+    // `null`, not absent. Claude Code's and ratel-local's MCP client schemas
+    // reject `null` for these optional fields — spread-through nulls made
+    // every server fail tools/list validation and lose its connection after
+    // ~12s of retries, leaving the agent with zero tools on both arms.
+    const raw = [
+      {
+        name: "git_status",
+        title: null,
+        description: "status",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        annotations: null,
+        _meta: null,
+      },
+    ] as unknown as AtlasTool[];
+    const [t] = filterToolsForServer(raw, "git");
+    expect(Object.values(t)).not.toContain(null);
+    expect(t).toEqual({
+      name: "status",
+      description: "status",
+      inputSchema: { type: "object", properties: {} },
+    });
+  });
+
+  it("omits description entirely rather than passing through null/undefined", () => {
+    const raw = [{ name: "git_status", description: null }] as unknown as AtlasTool[];
+    const [t] = filterToolsForServer(raw, "git");
+    expect("description" in t).toBe(false);
+  });
+
   it("re-qualifies on the way back out", () => {
     expect(qualify("github", "get_issue")).toBe("github_get_issue");
   });

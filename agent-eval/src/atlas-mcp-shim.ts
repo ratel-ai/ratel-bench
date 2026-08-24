@@ -20,14 +20,23 @@ export interface AtlasTool {
 }
 
 /** Tools belonging to `server`, with the `<server>_` prefix stripped so the tool
- *  looks native to the agent. Restored on the way back out in `callTool`. */
+ *  looks native to the agent. Restored on the way back out in `callTool`.
+ *
+ * Rebuilds each tool as a clean `{name, description, inputSchema}` rather than
+ * spreading the sandbox's raw object through: the sandbox emits explicit
+ * `null` for optional fields it doesn't use (`title`, `outputSchema`,
+ * `annotations`, `_meta`), and the MCP client's tools/list schema — both
+ * Claude Code's and ratel-local's — treats a `null` there as an invalid value,
+ * not an absent one. Passed through verbatim, every one of these tools failed
+ * validation and every server's connection was torn down after retrying for
+ * ~12s, leaving the agent with zero tools on both arms. */
 export function filterToolsForServer(tools: AtlasTool[], server: string): AtlasTool[] {
   const prefix = `${server}_`;
   return tools
     .filter((t) => typeof t?.name === "string" && t.name.startsWith(prefix))
     .map((t) => ({
-      ...t,
       name: t.name.slice(prefix.length),
+      ...(t.description ? { description: t.description } : {}),
       // The MCP spec requires an object schema; the sandbox sometimes omits it.
       inputSchema: t.inputSchema ?? { type: "object", properties: {} },
     }));
