@@ -177,13 +177,15 @@ describe("runChecks", () => {
     expect(facts.catalog_sha256).toBeNull();
   });
 
-  it("asserts the PINNED coding catalog size, not whatever the manifest says", async () => {
-    // 79 is part of the frozen experiment; a manifest that disagrees means ingest
-    // ran against a different dataset revision.
+  it("asserts the PINNED coding server SET, not the tool count", async () => {
+    // Server count is stable (it's exactly the 11 coding servers); tool count
+    // per server is not — MCP-Atlas's own upstream servers gain and lose tools
+    // across versions, so asserting an exact count here would go stale on every
+    // such change. The test manifest has 4 servers, not the pinned 11.
     const { results } = await runChecks(opts({ scope: "coding" }));
     const c = by(results, "corpus — catalog size");
     expect(c?.ok).toBe(false);
-    expect(c?.detail).toContain("expected 79");
+    expect(c?.detail).toContain("expected 11 servers");
   });
 
   it("fails on a corpus that is not the pinned one", async () => {

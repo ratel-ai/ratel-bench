@@ -11,8 +11,14 @@
 
 import { readFileSync } from "node:fs";
 import type { AtlasTool } from "./atlas-mcp-shim.js";
-import { EXPECTED_CODING_TOOLS, EXPECTED_TASK_COUNT } from "./mcpatlas-ingest.js";
-import { catalogHash, missingEnv, normalizeToolId, requiredEnv } from "./mcpatlas-servers.js";
+import { EXPECTED_TASK_COUNT } from "./mcpatlas-ingest.js";
+import {
+  CODING_SERVERS,
+  catalogHash,
+  missingEnv,
+  normalizeToolId,
+  requiredEnv,
+} from "./mcpatlas-servers.js";
 import type { McpAtlasCatalogManifest, McpAtlasScope } from "./mcpatlas-types.js";
 
 export type Severity = "blocking" | "warning";
@@ -196,16 +202,23 @@ export async function runChecks(o: DoctorOptions): Promise<{
           "the corpus is not the pinned experiment; results would not be comparable",
         ),
   );
-  const expectedTools = o.scope === "coding" ? EXPECTED_CODING_TOOLS : o.manifest.tool_count;
+  // Tool COUNT is not asserted here: the manifest is built from the live
+  // sandbox (see `checkSandboxCatalog` below, which is the authoritative check
+  // on catalog correctness), and each server's tool count moves as MCP-Atlas
+  // updates its own upstream servers — asserting an exact number here just
+  // means this check goes stale every time that happens. Server SET is stable
+  // and worth asserting: it catches the actual failure mode (wrong
+  // ENABLED_SERVERS, or a server silently missing from the manifest).
+  const expectedServers = o.scope === "coding" ? CODING_SERVERS.length : o.manifest.server_count;
   results.push(
-    o.manifest.tool_count === expectedTools
+    o.manifest.server_count === expectedServers
       ? ok(
           "corpus — catalog size",
           `${o.manifest.tool_count} tools / ${o.manifest.server_count} servers`,
         )
       : fail(
           "corpus — catalog size",
-          `expected ${expectedTools} tools, manifest has ${o.manifest.tool_count}`,
+          `expected ${expectedServers} servers, manifest has ${o.manifest.server_count}`,
           "re-run mcpatlas-ingest",
         ),
   );
