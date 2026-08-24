@@ -7,6 +7,7 @@ import {
   effectiveCalls,
   GATEWAY_INVOKE,
   GATEWAY_SEARCH,
+  GATEWAY_SEARCH_NAMES,
   parseClaudeResult,
   type RawToolUse,
   slugifyProjectPath,
@@ -227,6 +228,23 @@ describe("effectiveCalls — what makes the arms comparable", () => {
     expect(e.searchCalls).toBe(1);
     expect(e.gatewayCalls).toBe(2);
     expect(e.calls.map((c) => c.tool_id)).toEqual(["git/status"]);
+  });
+
+  it("recognizes search_capabilities as a search too, not just search_tools", () => {
+    // Both names have been observed succeeding against the real gateway in
+    // separate live runs — recognizing only one silently misclassified real
+    // searches under the other as off_catalog_call.
+    const e = effectiveCalls(
+      [use("mcp__ratel-local__search_capabilities", { query: "issues" })],
+      SERVERS,
+    );
+    expect(e.searchCalls).toBe(1);
+    expect(e.offCatalog).toEqual([]);
+  });
+
+  it("GATEWAY_SEARCH_NAMES contains both real names", () => {
+    expect(GATEWAY_SEARCH_NAMES.has("mcp__ratel-local__search_tools")).toBe(true);
+    expect(GATEWAY_SEARCH_NAMES.has("mcp__ratel-local__search_capabilities")).toBe(true);
   });
 
   it("records an unknown tool id as off-catalog, not as a call", () => {
