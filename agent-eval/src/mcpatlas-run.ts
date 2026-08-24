@@ -908,6 +908,7 @@ export async function main(): Promise<void> {
   const armsFlag = arg("--arms", "native,ratel");
   const arms = armsFlag.split(",").map((a) => a.trim()) as McpAtlasArm[];
   const tasksLimit = Number(arg("--tasks", "0"));
+  const tasksOffset = Number(arg("--task-offset", "0"));
   const concurrency = Number(arg("--concurrency", "1"));
   const dollarCap = Number(arg("--dollar-global", "50"));
   const refreshNative = process.argv.includes("--refresh-native");
@@ -929,7 +930,12 @@ export async function main(): Promise<void> {
     readFileSync(resolveRepoPath("fixtures/mcpatlas/tasks-coding-v1.json"), "utf8"),
   ) as { task_list_hash: string; dataset_revision?: string };
   const allTasks = readJsonl<McpAtlasTask>(resolveRepoPath("test-data/mcpatlas-coding.jsonl"));
-  const tasks = tasksLimit > 0 ? allTasks.slice(0, tasksLimit) : allTasks;
+  // Offset first, then limit — so `--tasks 1 --task-offset 3` selects exactly
+  // the 4th task rather than requiring a re-run of every task before it just
+  // to isolate one for debugging (a real friction point today: `--tasks N`
+  // alone always starts from the first task).
+  const offsetTasks = tasksOffset > 0 ? allTasks.slice(tasksOffset) : allTasks;
+  const tasks = tasksLimit > 0 ? offsetTasks.slice(0, tasksLimit) : offsetTasks;
 
   if (!skipDoctor) {
     const { results, facts } = await runChecks({
