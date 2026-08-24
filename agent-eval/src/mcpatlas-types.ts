@@ -135,6 +135,11 @@ export interface McpAtlasRunConfig {
   permission_mode: string;
   prompt_id: string;
   prompt_hash: string;
+  /** sha256 of the `--append-system-prompt` text, identical on both arms. A
+   *  statement of environmental fact (which built-ins are unavailable), never
+   *  task strategy — see mcpatlas-prompt.ts's SYSTEM_PROMPT_ADDENDUM for why
+   *  that distinction is load-bearing for the comparison staying valid. */
+  system_prompt_addendum_hash: string;
 
   // Judging
   judge_model: string;
