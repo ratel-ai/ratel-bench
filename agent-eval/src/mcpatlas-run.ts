@@ -990,6 +990,18 @@ export async function main(): Promise<void> {
   // answerable at all. Cells stay distinct because run_index is part of
   // cell_key and of the native cache key.
   const runsPerTask = Math.max(1, Number(arg("--runs", "1")));
+  // Upstream MCP-Atlas defaults (services/agent-harness: DEFAULT_MAX_TURNS=256,
+  // README: --timeout 1800s). Ours were hardcoded at 20 turns / 300s — the 20
+  // was an arbitrary value, and at k=3 it terminated 5 of 15 ratel cells while
+  // never once binding on native, biasing the arm comparison against the arm
+  // whose search->invoke indirection legitimately costs more turns.
+  //
+  // Note upstream also caps max_tool_calls at 100, which is its real bound. We
+  // cannot mirror that: Claude Code owns the agent loop, so we have no
+  // mid-run hook to count calls. The per-cell timeout is our only equivalent
+  // backstop, which is why it moves with maxTurns rather than staying at 300s.
+  const maxTurns = Math.max(1, Number(arg("--max-turns", "256")));
+  const perCellTimeoutMs = Math.max(1000, Number(arg("--per-cell-timeout-ms", "1800000")));
   const retrieverMethodArg = arg("--retriever-method", "bm25");
   if (!["bm25", "semantic", "hybrid"].includes(retrieverMethodArg)) {
     console.error(
@@ -1060,8 +1072,8 @@ export async function main(): Promise<void> {
       claudeCodeVersion: facts.claude_code_version ?? "unknown",
       benchGitSha,
       agentModel: model,
-      maxTurns: 20,
-      perCellTimeoutMs: 300_000,
+      maxTurns,
+      perCellTimeoutMs,
       permissionMode: "bypassPermissions",
       judgeModel: judgeModelId,
       retrieverMethod,
