@@ -135,6 +135,10 @@ export interface McpAtlasRunConfig {
   permission_mode: string;
   prompt_id: string;
   prompt_hash: string;
+  /** sha256 of the `--append-system-prompt` text, identical on both arms and
+   *  applied to every cell. States the episode format (no user will answer),
+   *  never task strategy — see SYSTEM_PROMPT_ADDENDUM in mcpatlas-prompt.ts. */
+  system_prompt_addendum_hash: string;
 
   // Judging
   judge_model: string;

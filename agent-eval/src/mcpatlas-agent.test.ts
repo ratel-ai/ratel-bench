@@ -14,6 +14,7 @@ import {
   toolUsesFromTranscript,
   totalTokens,
 } from "./mcpatlas-agent.js";
+import { SYSTEM_PROMPT_ADDENDUM } from "./mcpatlas-prompt.js";
 import { CODING_SERVERS } from "./mcpatlas-servers.js";
 
 const SERVERS = [...CODING_SERVERS];
@@ -86,6 +87,38 @@ describe("buildClaudeArgs", () => {
     const bt = b[b.indexOf("--disallowedTools") + 1];
     expect(at).toBe(bt);
     expect(at).toBe(DISALLOWED_TOOLS.join(","));
+  });
+
+  it("omits --append-system-prompt when none is given", () => {
+    expect(buildClaudeArgs(BASE)).not.toContain("--append-system-prompt");
+  });
+
+  it("forwards appendSystemPrompt verbatim", () => {
+    const args = buildClaudeArgs({ ...BASE, appendSystemPrompt: "no user is available." });
+    const i = args.indexOf("--append-system-prompt");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("no user is available.");
+  });
+
+  it("the addendum states episode format only — it must not name tools or strategy", () => {
+    // The boundary that keeps the comparison valid: naming search_tools, or
+    // saying "search before invoking", would coach the ratel arm on the exact
+    // mechanism under test. Naming which built-ins are missing was tried and
+    // backfired (the model quoted it back as a reason to give up).
+    const t = SYSTEM_PROMPT_ADDENDUM.toLowerCase();
+    for (const banned of [
+      "search_tools",
+      "invoke_tool",
+      "search_capabilities",
+      "bash",
+      "grep",
+      "glob",
+      "gateway",
+      "ratel",
+    ]) {
+      expect(t).not.toContain(banned);
+    }
+    expect(t).toContain("no user is available");
   });
 });
 
