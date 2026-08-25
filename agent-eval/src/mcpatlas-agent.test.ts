@@ -87,17 +87,6 @@ describe("buildClaudeArgs", () => {
     expect(at).toBe(bt);
     expect(at).toBe(DISALLOWED_TOOLS.join(","));
   });
-
-  it("omits --append-system-prompt when not given", () => {
-    expect(buildClaudeArgs(BASE)).not.toContain("--append-system-prompt");
-  });
-
-  it("forwards appendSystemPrompt verbatim when given", () => {
-    const args = buildClaudeArgs({ ...BASE, appendSystemPrompt: "Bash is unavailable here." });
-    const i = args.indexOf("--append-system-prompt");
-    expect(i).toBeGreaterThan(-1);
-    expect(args[i + 1]).toBe("Bash is unavailable here.");
-  });
 });
 
 describe("parseClaudeResult", () => {

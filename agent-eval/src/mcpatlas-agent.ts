@@ -62,9 +62,6 @@ export interface ClaudeArgsOpts {
    *  surface is the frozen MCP catalog. */
   permissionMode?: string;
   addDir?: string;
-  /** Forwarded verbatim to `--append-system-prompt`. Environmental fact, not
-   *  task strategy — see mcpatlas-prompt.ts's SYSTEM_PROMPT_ADDENDUM. */
-  appendSystemPrompt?: string;
 }
 
 export function buildClaudeArgs(o: ClaudeArgsOpts): string[] {
@@ -90,7 +87,6 @@ export function buildClaudeArgs(o: ClaudeArgsOpts): string[] {
     DISALLOWED_TOOLS.join(","),
   ];
   if (o.addDir) args.push("--add-dir", o.addDir);
-  if (o.appendSystemPrompt) args.push("--append-system-prompt", o.appendSystemPrompt);
   return args;
 }
 

@@ -45,13 +45,7 @@ import {
   SYSTEM as JUDGE_SYSTEM,
   judgeClaims,
 } from "./mcpatlas-judge.js";
-import {
-  buildPrompt,
-  PROMPT_HASH,
-  PROMPT_ID,
-  SYSTEM_PROMPT_ADDENDUM,
-  SYSTEM_PROMPT_ADDENDUM_HASH,
-} from "./mcpatlas-prompt.js";
+import { buildPrompt, PROMPT_HASH, PROMPT_ID } from "./mcpatlas-prompt.js";
 import {
   buildNativeMcpConfig,
   buildRatelMcpConfig,
@@ -180,7 +174,6 @@ export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
     permission_mode: input.permissionMode,
     prompt_id: PROMPT_ID,
     prompt_hash: PROMPT_HASH,
-    system_prompt_addendum_hash: SYSTEM_PROMPT_ADDENDUM_HASH,
     judge_model: input.judgeModel,
     claim_pass_threshold: DEFAULT_PASS_THRESHOLD,
     claim_partial_threshold: DEFAULT_PARTIAL_THRESHOLD,
@@ -604,7 +597,6 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       homeDir: scratch.homeDir,
       env: inheritedEnv(),
       timeoutMs: cfg.per_cell_timeout_ms,
-      appendSystemPrompt: SYSTEM_PROMPT_ADDENDUM,
     });
 
     const result = parseClaudeResult(outcome.stdout);
