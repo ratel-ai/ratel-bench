@@ -922,6 +922,12 @@ export async function main(): Promise<void> {
   const ratelLocalPin = arg("--ratel-local", process.env.RATEL_LOCAL_VERSION ?? "0.8.1");
   const model = arg("--model", process.env.RATEL_BENCH_MODEL ?? "claude-haiku-4-5");
   const judgeModelId = arg("--judge-model", "");
+  // k=1 makes every per-task result a single sample, so run-to-run swings are
+  // indistinguishable from real effects — the limitation the plan flags as
+  // `k1_no_variance`. Raising this is what makes "did that change help?"
+  // answerable at all. Cells stay distinct because run_index is part of
+  // cell_key and of the native cache key.
+  const runsPerTask = Math.max(1, Number(arg("--runs", "1")));
   const retrieverMethodArg = arg("--retriever-method", "bm25");
   if (!["bm25", "semantic", "hybrid"].includes(retrieverMethodArg)) {
     console.error(
@@ -1001,7 +1007,7 @@ export async function main(): Promise<void> {
       topKSkills: 3,
       arms,
       evalKs: [1, 3, 5],
-      runsPerTask: 1,
+      runsPerTask,
       seed: 0,
       concurrency,
       datasetRevision: pinned.dataset_revision ?? "unpinned",
