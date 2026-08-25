@@ -547,6 +547,33 @@ function inheritedEnv(): Record<string, string> {
   return out;
 }
 
+/** Shared, run-independent cache for ratel-local's embedding model.
+ *
+ *  Semantic/hybrid retrieval loads BAAI/bge-small-en-v1.5 (128 MB) into
+ *  ratel-local. The HuggingFace cache lives under `$HOME/.cache/huggingface`,
+ *  and every cell gets a throwaway HOME for session isolation — so without
+ *  this, each of the 30 cells in a k=3 run re-downloads 128 MB and pays a
+ *  ~29s model load, against Claude Code's 30s MCP connection timeout. The
+ *  gateway never finishes starting, serves zero tools, and the agent falls
+ *  back to disallowed built-ins. Measured directly: cold start times out,
+ *  warm start reaches `[ratel] ready` with all four tools and no delay.
+ *
+ *  Pointing HF_HOME at a stable path keeps the isolation that matters (Claude
+ *  Code's own session state stays per-cell) while sharing an immutable model
+ *  cache, which is not session state. Harmless under bm25, which never loads
+ *  an embedding model.
+ *
+ *  Note this deliberately does NOT inherit the developer's real
+ *  ~/.cache/huggingface: a stale token there is sent on download and rejected
+ *  with a 401, where anonymous access succeeds. */
+export const SHARED_HF_HOME = "results/raw/mcpatlas/.hf-cache";
+
+function embeddingCacheEnv(): Record<string, string> {
+  const dir = resolveRepoPath(SHARED_HF_HOME);
+  mkdirSync(dir, { recursive: true });
+  return { HF_HOME: dir };
+}
+
 /** Runs one (task, arm) cell end to end: writes the cell's mcp.json/ratel.json,
  *  invokes Claude Code, reads the transcript and telemetry, judges the claims,
  *  and assembles all four row types. On any failure — including the case that
@@ -595,7 +622,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       permissionMode: cfg.permission_mode,
       cwd: scratch.workspaceDir,
       homeDir: scratch.homeDir,
-      env: inheritedEnv(),
+      env: { ...inheritedEnv(), ...embeddingCacheEnv() },
       timeoutMs: cfg.per_cell_timeout_ms,
     });
 
