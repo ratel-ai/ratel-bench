@@ -601,6 +601,14 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
             ratelLocalPin: cfg.ratel_local_version,
             serveConfigPath: scratch.serveConfigPath,
             telemetryPath: scratch.telemetryPath,
+            // Must go in mcp.json, not just the parent process env: Claude Code
+            // does not propagate its own environment to spawned stdio MCP
+            // servers, so HF_HOME set on `claude` never reached ratel-local and
+            // the embedding cache stayed cold (verified: a full semantic k=3 run
+            // still produced zero searches with HF_HOME set only on the parent).
+            // PATH is included because a server-level `env` may replace rather
+            // than merge, and npx needs it.
+            env: { ...embeddingCacheEnv(), PATH: process.env.PATH ?? "" },
           }),
         ),
       );
