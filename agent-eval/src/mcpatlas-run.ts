@@ -574,6 +574,21 @@ function embeddingCacheEnv(): Record<string, string> {
   return { HF_HOME: dir };
 }
 
+/** Claude Code's MCP server startup timeout, in ms. Its default is 30s, and
+ *  ratel-local under semantic retrieval needs ~44s to reach `[ratel] ready`
+ *  even with a warm model cache — measured directly. Under the default the
+ *  gateway is killed mid-startup with CONNECT_TIMEOUT, serves zero tools, and
+ *  the agent falls back to disallowed built-ins, which is what made every
+ *  semantic run void.
+ *
+ *  Set on the PARENT claude process (a Claude Code setting), unlike HF_HOME
+ *  which must go in mcp.json on the server entry itself.
+ *
+ *  120s is ~2.7x the measured startup with headroom, while staying well inside
+ *  the 300s per-cell budget so a genuinely hung server still fails the cell
+ *  rather than consuming it. Harmless under bm25, which starts in seconds. */
+export const MCP_STARTUP_TIMEOUT_MS = 120_000;
+
 /** Runs one (task, arm) cell end to end: writes the cell's mcp.json/ratel.json,
  *  invokes Claude Code, reads the transcript and telemetry, judges the claims,
  *  and assembles all four row types. On any failure — including the case that
@@ -630,7 +645,11 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       permissionMode: cfg.permission_mode,
       cwd: scratch.workspaceDir,
       homeDir: scratch.homeDir,
-      env: { ...inheritedEnv(), ...embeddingCacheEnv() },
+      env: {
+        ...inheritedEnv(),
+        ...embeddingCacheEnv(),
+        MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
+      },
       timeoutMs: cfg.per_cell_timeout_ms,
     });
 
