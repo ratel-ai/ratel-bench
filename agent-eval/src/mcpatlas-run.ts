@@ -984,11 +984,39 @@ export async function main(): Promise<void> {
   const ratelLocalPin = arg("--ratel-local", process.env.RATEL_LOCAL_VERSION ?? "0.8.1");
   const model = arg("--model", process.env.RATEL_BENCH_MODEL ?? "claude-haiku-4-5");
   const judgeModelId = arg("--judge-model", "");
+  // k=1 by default, and this is a measured decision rather than a cost-saving
+  // default — do not raise it for the headline run without re-deriving.
+  //
   // k=1 makes every per-task result a single sample, so run-to-run swings are
-  // indistinguishable from real effects — the limitation the plan flags as
-  // `k1_no_variance`. Raising this is what makes "did that change help?"
-  // answerable at all. Cells stay distinct because run_index is part of
-  // cell_key and of the native cache key.
+  // indistinguishable from real effects: the `k1_no_variance` limitation. A
+  // 5-task x 2-arm x 3-run smoke measured how large that actually is — 2 of 5
+  // tasks flipped on each arm (native P.P / .P., ratel P.P / P..), and had we
+  // run once the ratel headline would have read 40%, 0% or 20% depending on
+  // which single run we drew.
+  //
+  // That looks like an argument for k=3 and is not, because it conflates two
+  // noise sources. Only one of them scales with k:
+  //
+  //   Var(mean) = (1/n) [ Var(p_i)  +  E[p_i(1-p_i)] / k ]
+  //                       ^^^^^^^^     ^^^^^^^^^^^^^^^^^
+  //                       which tasks  run-to-run flips
+  //                       you chose    (the only k term)
+  //
+  // At n=5 one flip moves the headline 20pp, which is why the smoke swung so
+  // hard. At the real n=55 one flip moves it 1.8pp, and task sampling
+  // dominates — a floor k cannot lower. Substituting the observed flip rate
+  // gives roughly +/-12pp per arm at k=1 against +/-10pp at k=3: triple the
+  // cells and triple the spend to buy about 2pp, on a delta that is nowhere
+  // near significant at either k.
+  //
+  // So the honest way to spend the k budget is not a third run of all 55
+  // tasks but `--variance-subset`: a handful of tasks at higher k, enough to
+  // report a measured `success_flip_rate` instead of the bare
+  // `k1_no_variance` caveat. Those rows carry run_index > 0 and are excluded
+  // from headline aggregation, so they never over-weight the subset.
+  //
+  // Cells stay distinct because run_index is part of cell_key and of the
+  // native cache key, so raising this for a targeted question is always safe.
   const runsPerTask = Math.max(1, Number(arg("--runs", "1")));
   // Upstream MCP-Atlas defaults (services/agent-harness: DEFAULT_MAX_TURNS=256,
   // README: --timeout 1800s). Ours were hardcoded at 20 turns / 300s — the 20
