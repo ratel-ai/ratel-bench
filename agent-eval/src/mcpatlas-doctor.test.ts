@@ -7,6 +7,7 @@ import {
   doctorExitCode,
   formatResults,
   isPlaceholder,
+  parseVersionOutput,
   runChecks,
 } from "./mcpatlas-doctor.js";
 import { buildCatalogManifest } from "./mcpatlas-servers.js";
@@ -311,5 +312,44 @@ describe("exit code and formatting", () => {
 
   it("summarises a clean run", () => {
     expect(formatResults([r({})])).toContain("all checks passed");
+  });
+});
+
+describe("parseVersionOutput", () => {
+  it("reads a bare version", () => {
+    expect(parseVersionOutput("0.8.1")).toBe("0.8.1");
+  });
+
+  // The actual regression. `ratel-local --version` writes to stderr, and on a
+  // cold npx cache npm's own notices land there first; taking the first
+  // whitespace token yielded "npm", which then keyed report.json.
+  it("skips npm notices preceding the version", () => {
+    const raw = "npm warn exec The following package was not found and will be installed\n0.8.1";
+    expect(parseVersionOutput(raw)).toBe("0.8.1");
+  });
+
+  it("keeps a prerelease suffix whole", () => {
+    expect(parseVersionOutput("0.9.0-rc.1")).toBe("0.9.0-rc.1");
+  });
+
+  it("keeps a build-metadata suffix whole", () => {
+    expect(parseVersionOutput("1.2.3+build.5")).toBe("1.2.3+build.5");
+  });
+
+  it("finds the version after multiple notice lines", () => {
+    const raw = ["npm warn exec package not found", "npm notice New major version", "0.8.1"].join(
+      "\n",
+    );
+    expect(parseVersionOutput(raw)).toBe("0.8.1");
+  });
+
+  // null is deliberate: runChecks turns it into a blocking failure, so a run
+  // that cannot identify the version under test stops instead of mislabelling.
+  it("returns null when no version is present", () => {
+    expect(parseVersionOutput("npm warn exec The following package was not found\n")).toBeNull();
+  });
+
+  it("returns null on empty input", () => {
+    expect(parseVersionOutput("")).toBeNull();
   });
 });

@@ -395,6 +395,36 @@ async function sh(cmd: string, args: string[]): Promise<string | null> {
   });
 }
 
+/**
+ * Extract a semver from command output that may be preceded by npm notices.
+ *
+ * WHY THIS IS NOT `output.split(/\s+/)[0]`. `ratel-local --version` writes to
+ * stderr (see `sh` above), so its version always arrives through the stderr
+ * fallback — and on a COLD npx cache npm writes its own notices to that same
+ * stream first:
+ *
+ *     npm warn exec The following package was not found ...
+ *     0.8.1
+ *
+ * Taking the first whitespace token then yields `"npm"`. That value propagates
+ * into `ResolvedFacts.ratel_local_version`, the frozen run config, and finally
+ * `report.json`'s `ratel_local_versions` key — so a run on any clean
+ * environment (CI, fresh container, new laptop) files its results under a
+ * version that does not exist, while looking green. This benchmark exists to
+ * compare gateway versions over time; a mislabelled key makes a run
+ * unattributable and uncomparable.
+ *
+ * Returns null when no version is present so callers fail loudly rather than
+ * recording a wrong one — `runChecks` turns null into a blocking `ratel-local`
+ * failure, which is the correct outcome for a run that cannot identify the
+ * version under test.
+ *
+ * `[-+]` keeps prereleases whole: `0.9.0-rc.1`, not `0.9.0`.
+ */
+export function parseVersionOutput(raw: string): string | null {
+  return raw.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/)?.[0] ?? null;
+}
+
 async function post(url: string, body: unknown, timeoutMs = 15_000): Promise<unknown | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -440,14 +470,16 @@ export function defaultProbes(env: Record<string, string | undefined> = process.
       return Array.isArray(tools) ? (tools as AtlasTool[]) : null;
     },
     async ratelLocal(pin) {
-      const version = await sh("npx", ["-y", `@ratel-ai/ratel-local@${pin}`, "--version"]);
+      const raw = await sh("npx", ["-y", `@ratel-ai/ratel-local@${pin}`, "--version"]);
+      if (!raw) return null;
+      const version = parseVersionOutput(raw);
       if (!version) return null;
       const sdk = await sh("npm", [
         "view",
         `@ratel-ai/ratel-local@${pin}`,
         "dependencies.@ratel-ai/sdk",
       ]);
-      return { version: version.split(/\s+/)[0], sdkVersion: sdk || null };
+      return { version, sdkVersion: sdk || null };
     },
   };
 }
