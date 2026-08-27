@@ -1203,25 +1203,25 @@ export async function main(): Promise<void> {
   // mid-run hook to count calls. The per-cell timeout is our only equivalent
   // backstop, which is why it moves with maxTurns rather than staying at 300s.
   //
-  // 40, not upstream's 256, as a deliberate cost bound — a runaway cell is the
-  // single largest cost tail here, and one 31-turn cell was 91% of the entire
-  // native-vs-ratel cost delta in the 5-task Sonnet 4.6 smoke.
+  // 256 matches upstream MCP-Atlas (services/agent-harness: DEFAULT_MAX_TURNS).
+  // Deliberately NOT a cost bound, despite runaway cells being the largest cost
+  // tail here — one 31-turn cell was 91% of the native-vs-ratel cost delta in
+  // the 5-task Sonnet 4.6 smoke.
   //
-  // THE RISK THIS CARRIES, stated because the paragraph above is a record of it
-  // biting once already. A turn cap does not bind symmetrically: ratel spends
-  // roughly one extra turn per search, ran +56% turns overall in that smoke, and
-  // its worst cell was 31 turns against native's 22. 40 is therefore only ~29%
-  // above the worst OBSERVED ratel cell, measured on 5 tasks — the 55-task tail
-  // will be longer. Every cell the cap truncates is scored a failure, so if it
-  // binds on ratel and not on native it manufactures an arm difference out of
-  // the harness rather than the gateway.
+  // The reason a cap is the wrong tool for that: it does not bind symmetrically.
+  // ratel spends about one extra turn per search and ran +56% turns in that
+  // smoke, so any cap low enough to bound cost binds on ratel first, and a
+  // truncated cell scores as a failure. That manufactures an arm difference out
+  // of the harness rather than the gateway. Measured: the old hardcoded 20
+  // terminated 5 of 15 ratel cells and zero native cells.
   //
-  // What makes that detectable rather than silent: Claude Code reports
-  // `error_max_turns`, which reaches the row as `finish_reason`. BEFORE reading
-  // any success delta from a run at this cap, count that value per arm. If it is
-  // non-zero on ratel and zero on native, the comparison is void — raise the cap
-  // and re-run rather than reporting the number.
-  const maxTurns = Math.max(1, Number(arg("--max-turns", "40")));
+  // Cost is bounded by --dollar-global and by the per-cell timeout instead, both
+  // of which stop a runaway without silently converting it into a lost task.
+  //
+  // If a run is ever capped lower, count `finish_reason === "error_max_turns"`
+  // per arm before reading any success delta: non-zero on ratel and zero on
+  // native voids the comparison.
+  const maxTurns = Math.max(1, Number(arg("--max-turns", "256")));
   const perCellTimeoutMs = Math.max(1000, Number(arg("--per-cell-timeout-ms", "1800000")));
   const retrieverMethodArg = arg("--retriever-method", "bm25");
   if (!["bm25", "semantic", "hybrid"].includes(retrieverMethodArg)) {
