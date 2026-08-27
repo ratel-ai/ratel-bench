@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildClaudeArgs,
@@ -10,6 +13,8 @@ import {
   GATEWAY_SEARCH_NAMES,
   parseClaudeResult,
   type RawToolUse,
+  type RunClaudeOpts,
+  runClaude,
   slugifyProjectPath,
   toolUsesFromTranscript,
   totalTokens,
@@ -328,4 +333,70 @@ describe("effectiveCalls — what makes the arms comparable", () => {
     const e = effectiveCalls([use(GATEWAY_INVOKE, { tool_id: "git__status" })], SERVERS);
     expect(e.calls.map((c) => c.tool_id)).toEqual(["git/status"]);
   });
+});
+
+// runClaude spawns a real process, so these are the only tests here that touch
+// the OS. They exist because `signal` was discarded for the whole life of this
+// mode: a full AWS run had 22 ratel cells die with exitCode null and empty
+// stderr, and without the signal there was no way to tell an OOM kill from any
+// other abnormal death.
+describe("runClaude signal capture", () => {
+  const opts = (bin: string, timeoutMs: number): RunClaudeOpts => ({
+    prompt: "unused",
+    mcpConfigPath: "/dev/null",
+    allowedTools: [],
+    model: "test",
+    maxTurns: 1,
+    cwd: tmpdir(),
+    homeDir: tmpdir(),
+    env: { PATH: process.env.PATH ?? "" },
+    timeoutMs,
+    bin,
+  });
+
+  const script = (body: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpatlas-runclaude-"));
+    const p = join(dir, "fake-claude.sh");
+    writeFileSync(p, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return p;
+  };
+
+  it("reports the signal when the process is killed", async () => {
+    // Outlives its timeout, so runClaude's own timer SIGTERMs the group.
+    const r = await runClaude(opts(script("sleep 30"), 200));
+    expect(r.signal).toBe("SIGTERM");
+    expect(r.exitCode).toBeNull();
+    expect(r.timedOut).toBe(true);
+  }, 20_000);
+
+  it("reports SIGKILL — the OOM signature — with no timeout involved", async () => {
+    // The exact shape of the 22 failed AWS cells: killed by SIGKILL, exitCode
+    // null, stderr empty, and NOT our timeout. A generous timeoutMs keeps
+    // runClaude's own timer out of it, so this proves the signal is read from
+    // the close event rather than inferred from the kill path we control.
+    const r = await runClaude(opts(script("kill -KILL $$"), 10_000));
+    expect(r.signal).toBe("SIGKILL");
+    expect(r.exitCode).toBeNull();
+    expect(r.timedOut).toBe(false);
+    expect(r.stderr).toBe("");
+  }, 20_000);
+
+  it("reports a null signal on a normal exit", async () => {
+    const r = await runClaude(opts(script("exit 0"), 10_000));
+    expect(r.signal).toBeNull();
+    expect(r.exitCode).toBe(0);
+    expect(r.timedOut).toBe(false);
+  }, 20_000);
+
+  it("distinguishes a non-zero exit from a signal death", async () => {
+    const r = await runClaude(opts(script("exit 7"), 10_000));
+    expect(r.exitCode).toBe(7);
+    expect(r.signal).toBeNull();
+  }, 20_000);
+
+  it("reports a null signal when the binary does not exist", async () => {
+    const r = await runClaude(opts("/nonexistent/mcpatlas-no-such-bin", 10_000));
+    expect(r.signal).toBeNull();
+    expect(r.exitCode).toBeNull();
+  }, 20_000);
 });

@@ -472,3 +472,96 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
 
   return { taskSummary, retrievalSummary, failureSummary, costSummary };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rows -> summary history.
+ *
+ * APPEND-only, unlike the raw row files that `mcpatlas-run` truncates. These
+ * four files are the cross-version record: one run's summary never replaces the
+ * previous version's, because comparing gateway versions over time is the whole
+ * point of the mode. `mcpatlas-report` reduces them back to the latest row per
+ * group key.
+ */
+async function main(): Promise<void> {
+  const { readFileSync, existsSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { dirname, isAbsolute, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+
+  let root = dirname(fileURLToPath(import.meta.url));
+  for (let d = 0; d < 16 && !existsSync(resolve(root, "pnpm-workspace.yaml")); d++) {
+    root = dirname(root);
+  }
+  const rp = (p: string): string => (isAbsolute(p) ? p : resolve(root, p));
+  const arg = (name: string, fallback: string): string => {
+    const i = process.argv.indexOf(name);
+    return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+  };
+  const readRows = <T>(p: string): T[] =>
+    existsSync(p)
+      ? readFileSync(p, "utf8")
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => JSON.parse(l) as T)
+      : [];
+
+  const scope = arg("--scope", "coding");
+  const rawDir = rp(arg("--raw-dir", "results/raw/mcpatlas"));
+  const outDir = rp(arg("--out-dir", "results/raw/mcpatlas"));
+
+  const cells = readRows<McpAtlasCell>(`${rawDir}/agent.jsonl`);
+  if (cells.length === 0) {
+    // Loud, not silent: an empty summarize produces a valid-looking but empty
+    // report, which reads as "the benchmark found nothing" rather than "the
+    // benchmark did not run".
+    console.error(`mcpatlas-summarize: no cells in ${rawDir}/agent.jsonl — run mcpatlas-run first`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const corpus = readRows<{ task_id: string; workload: McpAtlasWorkload }>(
+    rp(`test-data/mcpatlas-${scope}.jsonl`),
+  );
+  const workloads = new Map(corpus.map((t) => [t.task_id, t.workload]));
+  const missing = cells.filter((c) => !workloads.has(c.task_id)).length;
+  if (missing > 0) {
+    // summarizeMcpAtlas defaults an unknown task to "analysis", which would
+    // silently mis-bucket every workload split.
+    console.warn(`mcpatlas-summarize: ${missing} cell(s) have no workload in the corpus`);
+  }
+
+  const result = summarizeMcpAtlas({
+    cells,
+    toolCalls: readRows(`${rawDir}/tool-calls.jsonl`),
+    retrieval: readRows(`${rawDir}/retrieval-rows.jsonl`),
+    workloads,
+  });
+
+  mkdirSync(outDir, { recursive: true });
+  const append = (file: string, rows: readonly object[]): void => {
+    if (rows.length === 0) return;
+    writeFileSync(`${outDir}/${file}`, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, {
+      flag: "a",
+    });
+  };
+  append("task-completion-summary.jsonl", result.taskSummary);
+  append("retrieval-summary.jsonl", result.retrievalSummary);
+  append("failure-summary.jsonl", result.failureSummary);
+  append("cost-summary.jsonl", result.costSummary);
+
+  console.log(
+    `summarized: ${cells.length} cells -> ${result.taskSummary.length} task, ` +
+      `${result.retrievalSummary.length} retrieval, ${result.failureSummary.length} failure, ` +
+      `${result.costSummary.length} cost rows`,
+  );
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(`mcpatlas-summarize: ${(err as Error).message}`);
+    process.exit(1);
+  });
+}

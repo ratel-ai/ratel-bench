@@ -837,7 +837,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
     const result = parseClaudeResult(outcome.stdout);
     if (!result) {
       throw new Error(
-        `claude produced no parseable result envelope (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}): ${outcome.stderr.slice(0, 500)}`,
+        `claude produced no parseable result envelope (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}, signal=${outcome.signal}): ${outcome.stderr.slice(0, 500)}`,
       );
     }
 

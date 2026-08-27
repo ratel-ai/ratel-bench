@@ -12,7 +12,6 @@
     "mcpatlas-ingest": "tsx src/mcpatlas-ingest.ts",
     "mcpatlas-shim": "tsx src/atlas-mcp-shim.ts",
     "mcpatlas-run": "tsx src/mcpatlas-run.ts",
-    "mcpatlas-build": "tsx src/mcpatlas-build.ts",
     "mcpatlas-summarize": "tsx src/mcpatlas-summarize.ts",
     "mcpatlas-report": "tsx src/mcpatlas-report.ts"
   },

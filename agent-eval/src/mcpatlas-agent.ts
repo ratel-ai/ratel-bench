@@ -337,6 +337,11 @@ export interface RunClaudeOutcome {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** POSIX signal that killed the process, e.g. "SIGKILL". Null on a normal
+   *  exit. Node reports exitCode null whenever a signal ends the process, so
+   *  without this field a SIGKILL is indistinguishable from any other abnormal
+   *  death — and SIGKILL with empty stderr is the OOM-killer signature. */
+  signal: NodeJS.Signals | null;
   timedOut: boolean;
   wallMs: number;
 }
@@ -378,9 +383,9 @@ export function runClaude(o: RunClaudeOpts): Promise<RunClaudeOutcome> {
       killGroup("SIGTERM");
       setTimeout(() => killGroup("SIGKILL"), 5_000).unref();
     }, o.timeoutMs);
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode: code, timedOut, wallMs: Date.now() - started });
+      resolve({ stdout, stderr, exitCode: code, signal, timedOut, wallMs: Date.now() - started });
     });
     child.on("error", (err) => {
       clearTimeout(timer);
@@ -388,6 +393,8 @@ export function runClaude(o: RunClaudeOpts): Promise<RunClaudeOutcome> {
         stdout,
         stderr: `${stderr}\n${(err as Error).message}`,
         exitCode: null,
+        // Spawn failure, not a signal death — the process never ran.
+        signal: null,
         timedOut,
         wallMs: Date.now() - started,
       });

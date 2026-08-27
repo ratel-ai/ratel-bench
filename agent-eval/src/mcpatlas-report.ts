@@ -346,3 +346,99 @@ export function buildReport(input: ReportInput): McpAtlasReport {
 
   return report;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Summary history -> report.json.
+ *
+ * `buildReport` reduces the append-only summary files to the latest row per
+ * group key, so re-running this after a new version's summarize refreshes the
+ * report without discarding earlier versions' rows.
+ */
+async function main(): Promise<void> {
+  const { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } = await import(
+    "node:fs"
+  );
+  const { dirname, isAbsolute, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+
+  let root = dirname(fileURLToPath(import.meta.url));
+  for (let d = 0; d < 16 && !existsSync(resolve(root, "pnpm-workspace.yaml")); d++) {
+    root = dirname(root);
+  }
+  const rp = (p: string): string => (isAbsolute(p) ? p : resolve(root, p));
+  const arg = (name: string, fallback: string): string => {
+    const i = process.argv.indexOf(name);
+    return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+  };
+  const readRows = <T>(p: string): T[] =>
+    existsSync(p)
+      ? readFileSync(p, "utf8")
+          .split("\n")
+          .filter((l) => l.trim())
+          .map((l) => JSON.parse(l) as T)
+      : [];
+
+  const rawDir = rp(arg("--raw-dir", "results/raw/mcpatlas"));
+  const outPath = rp(arg("--out", "results/reports/mcpatlas/report.json"));
+
+  const task = readRows<McpAtlasTaskSummaryRow>(`${rawDir}/task-completion-summary.jsonl`);
+  if (task.length === 0) {
+    console.error(
+      `mcpatlas-report: no rows in ${rawDir}/task-completion-summary.jsonl — run mcpatlas-summarize first`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // Newest frozen config, for the `configuration` block and its declared
+  // limitations. Config filenames carry a millisecond timestamp, so lexical
+  // order is chronological.
+  const cfgDir = `${rawDir}/config`;
+  const newest = existsSync(cfgDir)
+    ? readdirSync(cfgDir)
+        .filter((f) => f.endsWith(".json"))
+        .sort()
+        .at(-1)
+    : undefined;
+  const config = newest
+    ? (JSON.parse(readFileSync(`${cfgDir}/${newest}`, "utf8")) as Record<string, unknown>)
+    : undefined;
+
+  const report = buildReport({
+    generatedAt: new Date().toISOString(),
+    task,
+    retrieval: readRows(`${rawDir}/retrieval-summary.jsonl`),
+    failures: readRows(`${rawDir}/failure-summary.jsonl`),
+    cost: readRows(`${rawDir}/cost-summary.jsonl`),
+    config,
+    declaredLimitations: (config?.declared_limitations as string[]) ?? [],
+  });
+
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);
+
+  // limitations live per ratel_local_version, not at the top level.
+  const versions = Object.keys(report.ratel_local_versions);
+  const blocking = versions.reduce(
+    (n, v) =>
+      n +
+      report.ratel_local_versions[v].limitations.computed.filter((l) => l.severity === "blocking")
+        .length,
+    0,
+  );
+  console.log(
+    `report: ${outPath} (${task.length} task rows, versions ${versions.join(", ") || "none"}, ` +
+      `config ${newest ?? "none"}, ${blocking} blocking limitation(s))`,
+  );
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error(`mcpatlas-report: ${(err as Error).message}`);
+    process.exit(1);
+  });
+}
