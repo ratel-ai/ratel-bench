@@ -1,6 +1,24 @@
 {
   "run": [
     {
+      "id": "claude-sonnet-5",
+      "bedrockProfile": "eu.anthropic.claude-sonnet-5",
+      "pricing": {
+        "bedrock": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        },
+        "anthropic": {
+          "inputPer1M": 3.0,
+          "outputPer1M": 15.0,
+          "cachedInputPer1M": 0.3,
+          "cacheCreationPer1M": 3.75
+        }
+      }
+    },
+    {
       "id": "claude-sonnet-4-6",
       "bedrockProfile": "eu.anthropic.claude-sonnet-4-6",
       "pricing": {
