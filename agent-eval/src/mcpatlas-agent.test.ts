@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -393,6 +393,41 @@ describe("runClaude signal capture", () => {
     expect(r.exitCode).toBe(7);
     expect(r.signal).toBeNull();
   }, 20_000);
+
+  // The leak that collapsed a 55-cell AWS run: `claude` exiting does not take
+  // ratel-local or its shims with it. They inherit the process group, are
+  // reparented to init, and survive. ~13 processes per ratel cell.
+  it("does not leave descendants running after a normal exit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcpatlas-orphan-"));
+    const pidFile = join(dir, "child.pid");
+    // Backgrounds a long-lived grandchild, records its pid, then exits 0 —
+    // the shape of claude spawning ratel-local and returning.
+    const r = await runClaude(
+      // stdio redirected: a grandchild holding the inherited stdout pipe would
+      // delay `close` until IT exits, so the timeout would reap the group and the
+      // test would pass without the fix. Real ratel-local gets its own MCP stdio
+      // pipes and does not hold claude's, which is precisely why `close` fires
+      // promptly and the orphan survives.
+      opts(script(`sleep 300 >/dev/null 2>&1 &\necho $! > ${pidFile}\nexit 0`), 60_000),
+    );
+    expect(r.exitCode).toBe(0);
+
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(Number.isFinite(pid)).toBe(true);
+
+    // signal delivery is async; poll rather than assume it has landed.
+    const alive = (): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const deadline = Date.now() + 5_000;
+    while (alive() && Date.now() < deadline) await new Promise((r2) => setTimeout(r2, 100));
+    expect(alive()).toBe(false);
+  }, 30_000);
 
   it("reports a null signal when the binary does not exist", async () => {
     const r = await runClaude(opts("/nonexistent/mcpatlas-no-such-bin", 10_000));

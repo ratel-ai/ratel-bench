@@ -385,6 +385,30 @@ export function runClaude(o: RunClaudeOpts): Promise<RunClaudeOutcome> {
     }, o.timeoutMs);
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      // Reap the group on EVERY exit path, not only on timeout. `claude` exiting
+      // does NOT take ratel-local or its 11 stdio shims with it: they inherited
+      // this process group, get reparented to init, and keep running. At ~13
+      // processes per ratel cell they accumulate until the host is out of
+      // memory — measured on AWS as 23 clean cells followed by collapse, half
+      // the survivors OOM-killed (SIGKILL, empty stderr, timedOut=false) and
+      // half unable to start the gateway at all (empty telemetry). Lowering
+      // concurrency did not help, which is what identified it as cumulative
+      // rather than peak load.
+      //
+      // mcpatlas-run.ts's schema probe already reaps on every path; this was the
+      // omission in the other of the two places that spawn detached.
+      //
+      // SIGTERM then SIGKILL, not a bare SIGKILL: the caller reads
+      // telemetry.jsonl after this resolves and an empty file is a hard cell
+      // error, so truncating a flush here would manufacture the very failure
+      // being fixed. Verified against a live gateway that telemetry is written
+      // incrementally (130 rows present while running, 130 after SIGTERM), so
+      // this is belt-and-braces rather than load-bearing.
+      //
+      // Safe by construction: `claude` has already exited, so this only touches
+      // survivors, and killGroup swallows ESRCH when the group is already gone.
+      killGroup("SIGTERM");
+      setTimeout(() => killGroup("SIGKILL"), 2_000).unref();
       resolve({ stdout, stderr, exitCode: code, signal, timedOut, wallMs: Date.now() - started });
     });
     child.on("error", (err) => {
