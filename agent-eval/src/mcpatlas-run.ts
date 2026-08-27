@@ -1526,8 +1526,33 @@ export async function main(): Promise<void> {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((err) => {
-    console.error(`mcpatlas-run: ${(err as Error).message}`);
-    process.exit(1);
-  });
+  main()
+    .catch((err) => {
+      console.error(`mcpatlas-run: ${(err as Error).message}`);
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      // Guarantee termination once the work is done and the `done:` line is out.
+      //
+      // Everything above is finished at this point: rows are written with
+      // synchronous writeFileSync, so there is no pending output to lose. What
+      // remains is whether the event loop DRAINS, and this driver spawns Docker,
+      // npx, Claude Code and eleven stdio shims per cell — any one leaked child
+      // or undestroyed pipe holds a handle open and the process simply never
+      // returns. That already happened once: the schema probe killed `npx`
+      // rather than its process group, and a completed 2-cell run hung after
+      // printing its final line.
+      //
+      // On a laptop that is an annoyance you can Ctrl-C. On CodeBuild it is a
+      // 45-minute timeout, a failed build, and no signal saying the benchmark
+      // had actually finished — the run looks broken when the data is fine.
+      //
+      // unref'd deliberately: an unref'd timer cannot hold the loop open by
+      // itself, so a clean exit still happens immediately and this never fires.
+      // It only fires when something ELSE is keeping the loop alive, which is
+      // precisely the case worth killing. The delay lets a piped stdout flush,
+      // since writes to a pipe are asynchronous and process.exit() would
+      // truncate the `done:` line that downstream tooling parses.
+      setTimeout(() => process.exit(process.exitCode ?? 0), 2_000).unref();
+    });
 }
