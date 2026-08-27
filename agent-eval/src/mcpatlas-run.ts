@@ -680,6 +680,12 @@ export async function measureGatewaySchemaTokens(o: {
       {
         stdio: ["pipe", "pipe", "ignore"],
         env: { ...inheritedEnv(), ...embeddingCacheEnv() },
+        // Own process group, for the same reason runClaude uses one: `npx` is a
+        // launcher, and killing it leaves ratel-local AND its 11 upstream stdio
+        // shims running. They hold their pipes open, which keeps this process's
+        // event loop alive — the campaign finishes, prints its `done:` line, and
+        // then hangs forever instead of exiting.
+        detached: true,
       },
     );
     let buf = "";
@@ -689,11 +695,23 @@ export async function measureGatewaySchemaTokens(o: {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      // Signal the group, not the launcher. Fall back to the direct kill if the
+      // group is already gone.
       try {
-        child.kill("SIGKILL");
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
       } catch {
-        /* already gone */
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
       }
+      // Belt and braces: even after the group dies, an inherited pipe can hold
+      // the loop open. Nothing reads these again once we have the answer.
+      child.stdout?.destroy();
+      child.stdin?.destroy();
+      child.unref();
       resolveP(v);
     };
     // Semantic startup downloads/loads an embedding model; MCP_STARTUP_TIMEOUT_MS
