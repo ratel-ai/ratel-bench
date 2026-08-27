@@ -400,13 +400,62 @@ describe("buildTokenBreakdown — occupancy and billing kept apart", () => {
     const t = buildTokenBreakdown({
       result: result(),
       transcriptText: transcript,
+      // Two searches returning three definitions in total: 100 + 250 + 100.
+      telemetryText: tel(
+        {
+          type: "search",
+          hits: [
+            { tool_id: "github__get_issue", score: 0.9 },
+            { tool_id: "github__list_issues", score: 0.5 },
+          ],
+        },
+        { type: "search", hits: [{ tool_id: "github__get_issue", score: 0.8 }] },
+      ),
+      arm: "ratel",
+      nativeCatalogTokens: 4000,
+      gatewaySchemaTokens: 300,
+      perToolTokens: new Map([
+        ["github/get_issue", 100],
+        ["github/list_issues", 250],
+      ]),
+      knownServers: ["github"],
+    });
+    expect(t.tool_schema_tokens).toBe(300);
+    expect(t.retrieval_overhead_tokens).toBe(450);
+  });
+
+  // The bug this replaced: overhead was catalogTokenEstimate(telemetry), i.e. the
+  // sum of ratel_tool_payload REGISTRATION events — the whole catalog, identical
+  // on every cell, and nothing the model was ever shown.
+  it("ignores registration payload events when pricing retrieval overhead", () => {
+    const t = buildTokenBreakdown({
+      result: result(),
+      transcriptText: transcript,
       telemetryText: tel({ type: "ratel_tool_payload", server: "github", estimated_tokens: 800 }),
       arm: "ratel",
       nativeCatalogTokens: 4000,
       gatewaySchemaTokens: 300,
+      perToolTokens: new Map([["github/get_issue", 100]]),
+      knownServers: ["github"],
     });
-    expect(t.tool_schema_tokens).toBe(300);
-    expect(t.retrieval_overhead_tokens).toBe(800);
+    expect(t.retrieval_overhead_tokens).toBe(0);
+  });
+
+  // Unmeasured must be 0-by-omission, not a guess — same rule as the null
+  // retrieval metrics.
+  it("leaves overhead at zero when no per-tool map is supplied", () => {
+    const t = buildTokenBreakdown({
+      result: result(),
+      transcriptText: transcript,
+      telemetryText: tel({
+        type: "search",
+        hits: [{ tool_id: "github__get_issue", score: 0.9 }],
+      }),
+      arm: "ratel",
+      nativeCatalogTokens: 4000,
+      gatewaySchemaTokens: 300,
+    });
+    expect(t.retrieval_overhead_tokens).toBe(0);
   });
 
   it("cache hit ratio explains why occupancy savings outrun dollar savings", () => {

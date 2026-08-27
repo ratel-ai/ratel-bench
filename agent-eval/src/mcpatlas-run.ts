@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LanguageModel } from "ai";
+import type { AtlasTool } from "./atlas-mcp-shim.js";
 import {
   DISALLOWED_TOOLS,
   effectiveCalls,
@@ -38,7 +39,12 @@ import {
   type CellContext,
   parseUses,
 } from "./mcpatlas-build.js";
-import { invokeSpans, parseTelemetry } from "./mcpatlas-gateway.js";
+import {
+  invokeSpans,
+  parseTelemetry,
+  perToolTokenMap,
+  schemaTokenEstimate,
+} from "./mcpatlas-gateway.js";
 import {
   DEFAULT_PARTIAL_THRESHOLD,
   DEFAULT_PASS_THRESHOLD,
@@ -58,6 +64,7 @@ import {
   buildRatelServeConfig,
   GATEWAY_TOOLS,
   missingEnv,
+  normalizeToolId,
   type ShimSpec,
 } from "./mcpatlas-servers.js";
 import type {
@@ -527,6 +534,7 @@ export interface RunCellOptions {
   nativeBaselineMs: Map<string, number>;
   nativeCatalogTokens: number;
   gatewaySchemaTokens: number;
+  perToolTokens?: Map<string, number>;
   cacheSource: "live" | "reused";
   deps?: RunCellDeps;
 }
@@ -595,6 +603,153 @@ function embeddingCacheEnv(): Record<string, string> {
  *  the 300s per-cell budget so a genuinely hung server still fails the cell
  *  rather than consuming it. Harmless under bm25, which starts in seconds. */
 export const MCP_STARTUP_TIMEOUT_MS = 120_000;
+
+/** The catalog's tool definitions, straight from the sandbox — the manifest
+ *  carries only tool ids, and pricing occupancy needs the schemas themselves.
+ *  Same endpoint and shape handling as the doctor's `sandboxTools` probe. */
+async function fetchSandboxTools(url: string): Promise<AtlasTool[] | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 20_000);
+  try {
+    const res = await fetch(`${url.replace(/\/+$/, "")}/list-tools`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (Array.isArray(body)) return body as AtlasTool[];
+    const tools = (body as { tools?: unknown }).tools;
+    return Array.isArray(tools) ? (tools as AtlasTool[]) : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Ground truth for both arms' `tool_schema_tokens`, measured ONCE per campaign
+ * before any cell runs.
+ *
+ * WHY THIS EXISTS AT ALL. These two numbers used to be threaded in as literal
+ * `0` and then read back off the cells they had been written to — a loop that
+ * could never resolve, so `tool_schema_tokens` and `schema_share_of_prefix`
+ * were 0 on every cell of both arms in every run to date. That is the headline
+ * occupancy metric: the whole "127 schemas become 4" claim is this field.
+ *
+ * WHY IT CANNOT COME FROM TELEMETRY. ratel-local emits `ratel_tool_payload`
+ * registration events carrying its own `estimated_tokens`, and those are
+ * genuinely good — 25,759 for the coding catalog against an observed 24,343
+ * real-token first-turn difference. But it emits nothing for its OWN four
+ * gateway tools, so taking the native side from telemetry and the gateway side
+ * from `schemaTokenEstimate` would put the two arms on different rulers and
+ * silently inflate the savings by the ~7% they disagree on. Both sides are
+ * measured here with one function instead.
+ *
+ * The gateway side is asked of the gateway directly rather than derived from
+ * `GATEWAY_TOOLS`, because that constant lists what the agent is ALLOWED to
+ * call (2 names) while context is occupied by everything `tools/list` returns
+ * (4, including `search_capabilities` and `auth`). Occupancy must be measured
+ * from what is actually in the prompt.
+ *
+ * Returns null if the gateway cannot be reached; the caller decides whether
+ * that is fatal, and records zero rather than a guess.
+ */
+export async function measureGatewaySchemaTokens(o: {
+  manifest: McpAtlasCatalogManifest;
+  shim: ShimSpec;
+  retrieverMethod: "bm25" | "semantic" | "hybrid";
+  ratelLocalPin: string;
+  scratchRoot: string;
+}): Promise<number | null> {
+  const { spawn } = await import("node:child_process");
+  const dir = join(o.scratchRoot, ".schema-probe");
+  mkdirSync(dir, { recursive: true });
+  const cfgPath = join(dir, "ratel.json");
+  writeFileSync(
+    cfgPath,
+    JSON.stringify(buildRatelServeConfig(o.manifest, o.shim, o.retrieverMethod)),
+  );
+
+  return await new Promise<number | null>((resolveP) => {
+    const child = spawn(
+      "npx",
+      ["-y", `@ratel-ai/ratel-local@${o.ratelLocalPin}`, "serve", cfgPath],
+      {
+        stdio: ["pipe", "pipe", "ignore"],
+        env: { ...inheritedEnv(), ...embeddingCacheEnv() },
+      },
+    );
+    let buf = "";
+    let done = false;
+    let instructionsTokens = 0;
+    const finish = (v: number | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      resolveP(v);
+    };
+    // Semantic startup downloads/loads an embedding model; MCP_STARTUP_TIMEOUT_MS
+    // is the same budget a real cell gives it.
+    const timer = setTimeout(() => finish(null), MCP_STARTUP_TIMEOUT_MS);
+
+    child.on("error", () => finish(null));
+    child.on("close", () => finish(null));
+    child.stdout.on("data", (d) => {
+      buf += d;
+      let nl = buf.indexOf("\n");
+      while (nl >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id === 1) {
+            // The gateway ships a server `instructions` block ("call
+            // search_capabilities first...", plus a per-server tool census).
+            // It lands in the ratel arm's context and the native arm never
+            // pays it, so leaving it out would overstate the gateway's
+            // savings. It is occupancy, so it counts.
+            const instr = msg.result?.instructions;
+            instructionsTokens = typeof instr === "string" ? Math.ceil(instr.length / 4) : 0;
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+            );
+            child.stdin.write(
+              `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`,
+            );
+          } else if (msg.id === 2) {
+            const tools = msg.result?.tools;
+            finish(Array.isArray(tools) ? schemaTokenEstimate(tools) + instructionsTokens : null);
+          }
+        } catch {
+          // ratel-local writes only JSON-RPC to stdout, but be tolerant.
+        }
+      }
+    });
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "mcpatlas-schema-probe", version: "1" },
+        },
+      })}\n`,
+    );
+  });
+}
 
 /** Runs one (task, arm) cell end to end: writes the cell's mcp.json/ratel.json,
  *  invokes Claude Code, reads the transcript and telemetry, judges the claims,
@@ -716,6 +871,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       claimRubric,
       nativeCatalogTokens: o.nativeCatalogTokens,
       gatewaySchemaTokens: o.gatewaySchemaTokens,
+      perToolTokens: o.perToolTokens,
       nativeBaselineMs: o.nativeBaselineMs,
       agentVersion: cfg.claude_code_version,
       runIndex: item.runIndex,
@@ -1238,9 +1394,43 @@ export async function main(): Promise<void> {
     const nativeItems = toRun.filter((q) => q.arm === "native");
     const ratelItems = toRun.filter((q) => q.arm === "ratel");
     let nativeBaselineMs = collectNativeBaselineMs([]);
-    let nativeCatalogTokens = 0;
-    let gatewaySchemaTokens = 0;
     const collectedNativeToolCalls: McpAtlasToolCallRow[] = [];
+
+    // Measured once, before any cell, and fixed for the campaign: the catalog
+    // is registered whole and identical across arms, so these do not vary per
+    // task. Both come from `schemaTokenEstimate` — see its docstring on why one
+    // ruler for both arms matters more than absolute precision.
+    const sandboxTools = await fetchSandboxTools(sandboxUrl);
+    const nativeCatalogTokens = sandboxTools ? schemaTokenEstimate(sandboxTools) : 0;
+    const knownServersForTokens = manifest.servers.map((sv) => sv.server);
+    const perToolTokens = sandboxTools
+      ? perToolTokenMap(
+          sandboxTools,
+          (t) => normalizeToolId(t.name, knownServersForTokens) ?? t.name,
+        )
+      : undefined;
+    const gatewaySchemaTokens =
+      (await measureGatewaySchemaTokens({
+        manifest,
+        shim,
+        retrieverMethod: cfg.retriever_method,
+        ratelLocalPin: cfg.ratel_local_version,
+        scratchRoot,
+      })) ?? 0;
+    if (!nativeCatalogTokens || !gatewaySchemaTokens) {
+      // Not fatal — the run is still valid for task success, selection and
+      // cost. Say so loudly, because a silent zero here is exactly the bug
+      // this measurement replaced.
+      console.warn(
+        `warning: schema occupancy unmeasured (catalog=${nativeCatalogTokens}, gateway=${gatewaySchemaTokens}); ` +
+          "tool_schema_tokens and the savings derived from it will be 0 for this run",
+      );
+    } else {
+      console.log(
+        `schema occupancy: native catalog ${nativeCatalogTokens} tokens (${sandboxTools?.length ?? 0} tools), ` +
+          `gateway ${gatewaySchemaTokens} tokens`,
+      );
+    }
 
     const runOneNative = (item: QueueItem) =>
       runCell({
@@ -1252,8 +1442,9 @@ export async function main(): Promise<void> {
         keepArtifacts,
         judgeModel,
         nativeBaselineMs: new Map(),
-        nativeCatalogTokens: 0,
-        gatewaySchemaTokens: 0,
+        nativeCatalogTokens,
+        gatewaySchemaTokens,
+        perToolTokens,
         cacheSource: "live",
       });
 
@@ -1266,9 +1457,6 @@ export async function main(): Promise<void> {
         for (const row of r.toolCallRows) {
           appendJsonl(toolCallsPath, row);
           collectedNativeToolCalls.push(row);
-        }
-        if (r.cell.tokens.tool_schema_tokens > 0) {
-          nativeCatalogTokens = Math.max(nativeCatalogTokens, r.cell.tokens.tool_schema_tokens);
         }
       },
     });
@@ -1287,6 +1475,7 @@ export async function main(): Promise<void> {
         nativeBaselineMs,
         nativeCatalogTokens,
         gatewaySchemaTokens,
+        perToolTokens,
         cacheSource: "live",
       });
 
@@ -1299,9 +1488,6 @@ export async function main(): Promise<void> {
         for (const row of r.toolCallRows) appendJsonl(toolCallsPath, row);
         for (const row of r.searchEventRows) appendJsonl(searchEventsPath, row);
         for (const row of r.retrievalRows) appendJsonl(retrievalRowsPath, row);
-        if (r.cell.tokens.tool_schema_tokens > 0) {
-          gatewaySchemaTokens = Math.max(gatewaySchemaTokens, r.cell.tokens.tool_schema_tokens);
-        }
       },
     });
 

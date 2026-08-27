@@ -87,6 +87,61 @@ export function catalogTokenEstimate(events: TelemetryEvent[]): number {
     .reduce((n, e) => n + (Number(e.estimated_tokens) || 0), 0);
 }
 
+/** Tokens a tool definition occupies in the system prompt: name, description and
+ *  JSON schema, as the host serialises them.
+ *
+ *  ~4 chars/token is the standard English-plus-JSON approximation, and it runs
+ *  LOW here. Measured against the live coding catalog: this returns 23,973 for
+ *  the 127 tools where ratel-local's own estimator reports 25,759, about 7%
+ *  under. Corroborated independently by real tokenizer counts — the observed
+ *  native-minus-ratel first-turn context difference is 24,343 tokens, which is
+ *  (catalog - gateway schemas) and so puts the true catalog above 24,343.
+ *
+ *  Use it anyway, and use it for BOTH arms. What this feeds is never an
+ *  absolute: it is `schema_tokens_savings_pct` and `net_context_savings_pct`,
+ *  ratios in which a proportional bias cancels. The failure mode to avoid is
+ *  not imprecision but MIXED RULERS — taking the native catalog from
+ *  ratel-local's telemetry (25,759, its estimator) and the gateway schemas
+ *  from this function would silently inflate the savings by that same 7%.
+ *  One function, both arms, schemas fetched from the same source.
+ *
+ *  Measured on the live coding scope: native catalog 23,973 tokens over 127
+ *  tools; gateway surface 1,096 over 4 tools plus its server `instructions`
+ *  block. Predicted first-turn difference 22,877 against 24,343 observed —
+ *  the same ~6% low, in the same direction, on both sides.
+ *
+ *  Do not quote the absolute token counts as exact; quote the percentages. */
+export function schemaTokenEstimate(tools: readonly SchemaBearingTool[]): number {
+  return tools.reduce((n, t) => n + perToolSchemaTokens(t), 0);
+}
+
+export interface SchemaBearingTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export function perToolSchemaTokens(tool: SchemaBearingTool): number {
+  const serialised = JSON.stringify({
+    name: tool.name,
+    description: tool.description ?? "",
+    inputSchema: tool.inputSchema ?? {},
+  });
+  return Math.ceil(serialised.length / 4);
+}
+
+/** tool_id -> estimated schema tokens, for pricing what a search result costs
+ *  when its definitions are handed back to the model. `id` maps a tool to the
+ *  canonical id used in telemetry, so callers can supply their own dialect. */
+export function perToolTokenMap(
+  tools: readonly SchemaBearingTool[],
+  id: (t: SchemaBearingTool) => string,
+): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const t of tools) m.set(id(t), perToolSchemaTokens(t));
+  return m;
+}
+
 export interface InvokeSpan {
   tool_id: string;
   args_size_bytes: number;

@@ -20,7 +20,6 @@ import {
   turnUsagesFromTranscript,
 } from "./mcpatlas-agent.js";
 import {
-  catalogTokenEstimate,
   type InvokeSpan,
   invokeSpans,
   metricsAtK,
@@ -33,7 +32,7 @@ import {
   unionRecall,
   wastedSearches,
 } from "./mcpatlas-gateway.js";
-import { GATEWAY_TOOLS, serverOf } from "./mcpatlas-servers.js";
+import { GATEWAY_TOOLS, normalizeToolId, serverOf } from "./mcpatlas-servers.js";
 import type {
   CanonicalToolId,
   ClaimRubricResult,
@@ -429,19 +428,51 @@ export function buildTokenBreakdown(input: {
   transcriptText: string;
   telemetryText: string;
   arm: McpAtlasArm;
-  /** Catalog schema tokens for the native arm, from a prior ratel run's
-   *  `ratel_tool_payload` events — the same estimator for both arms. */
+  /** Both measured once per campaign by `schemaTokenEstimate` over schemas
+   *  fetched from the same source — see its docstring on why one ruler for
+   *  both arms matters more than absolute precision. These arrive from the
+   *  caller because neither is derivable from a single cell. */
   nativeCatalogTokens: number;
   gatewaySchemaTokens: number;
+  /** canonical tool_id -> schema tokens, for pricing what each search result
+   *  cost the ratel arm in context. Omit to leave the overhead unmeasured
+   *  (0) rather than guessed. */
+  perToolTokens?: Map<string, number>;
+  /** Needed to canonicalise telemetry tool ids before the map lookup. */
+  knownServers?: readonly string[];
 }): McpAtlasTokenBreakdown {
   const turns = turnUsagesFromTranscript(input.transcriptText);
   const prompts = turns.map(promptTokens);
   const first = prompts[0] ?? 0;
   const u = input.result.usage;
   const schema = input.arm === "native" ? input.nativeCatalogTokens : input.gatewaySchemaTokens;
-  // ratel pays retrieval back into context: what search_tools returned.
+  // What ratel pays BACK into context: the definitions search_tools handed the
+  // model, priced per returned tool and summed over every search this cell made.
+  //
+  // This used to be `catalogTokenEstimate(telemetry)`, which sums ratel-local's
+  // `ratel_tool_payload` REGISTRATION events — the size of the whole 127-tool
+  // catalog, not of anything the model was shown. It was therefore identical on
+  // every ratel cell (25,759 in the last run, task-invariant, the tell) and it
+  // made the headline nonsensical: net_context_savings = (catalog - gateway) -
+  // catalog = -gateway, so the gateway scored negative on context no matter how
+  // well it did.
+  //
+  // Caveat worth keeping in view: this prices each hit at its full schema. If a
+  // search result is a summary rather than a complete definition, this is an
+  // UPPER bound on the overhead, and so a lower bound on net savings — the
+  // conservative direction for a number that flatters the gateway.
   const retrievalOverhead =
-    input.arm === "ratel" ? catalogTokenEstimate(parseTelemetry(input.telemetryText)) : 0;
+    input.arm === "ratel" && input.perToolTokens
+      ? searchEvents(parseTelemetry(input.telemetryText)).reduce(
+          (n, e) =>
+            n +
+            (e.hits ?? []).reduce((m, h) => {
+              const id = normalizeToolId(h.tool_id, input.knownServers ?? []);
+              return m + (id ? (input.perToolTokens?.get(id) ?? 0) : 0);
+            }, 0),
+          0,
+        )
+      : 0;
   const cacheDenom = u.cache_read_input_tokens + u.input_tokens;
   return {
     tool_schema_tokens: schema,
@@ -559,6 +590,9 @@ export interface AssembleCellInput {
    *  `ratel_tool_payload` events — the same estimator for both arms. */
   nativeCatalogTokens: number;
   gatewaySchemaTokens: number;
+  /** canonical tool_id -> schema tokens, measured once per campaign; prices
+   *  what ratel's search results cost it in context. */
+  perToolTokens?: Map<string, number>;
   /** Median native duration per tool id, campaign-wide. Absent (or empty) on a
    *  campaign with no native cells — `gateway_overhead_ms_est` is then `null`
    *  everywhere, which `buildLatencyBreakdown` already handles. */
@@ -602,6 +636,8 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     arm: ctx.arm,
     nativeCatalogTokens: input.nativeCatalogTokens,
     gatewaySchemaTokens: input.gatewaySchemaTokens,
+    perToolTokens: input.perToolTokens,
+    knownServers,
   });
   const latency = buildLatencyBreakdown({
     result: input.result,

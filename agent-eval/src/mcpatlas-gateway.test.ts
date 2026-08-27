@@ -4,8 +4,11 @@ import {
   invokeSpans,
   metricsAtK,
   parseTelemetry,
+  perToolSchemaTokens,
+  perToolTokenMap,
   rankedHits,
   type SearchEvent,
+  schemaTokenEstimate,
   searchEvents,
   searchesUntilFirstGold,
   unionRanked,
@@ -237,5 +240,63 @@ describe("invokeSpans", () => {
   it("still reports an invoke that never terminated", () => {
     const events = parseTelemetry(JSON.stringify({ type: "invoke_start", tool_id: "git__status" }));
     expect(invokeSpans(events, SERVERS)[0]).toMatchObject({ error: "no invoke_end" });
+  });
+});
+
+describe("schemaTokenEstimate", () => {
+  const tool = (name: string, description = "", inputSchema = {}) => ({
+    name,
+    description,
+    inputSchema,
+  });
+
+  it("sums per-tool estimates", () => {
+    const tools = [tool("a", "does a"), tool("b", "does b")];
+    expect(schemaTokenEstimate(tools)).toBe(
+      perToolSchemaTokens(tools[0]) + perToolSchemaTokens(tools[1]),
+    );
+  });
+
+  it("is zero for an empty catalog", () => {
+    expect(schemaTokenEstimate([])).toBe(0);
+  });
+
+  it("charges for description and schema, not just the name", () => {
+    const bare = perToolSchemaTokens(tool("get_issue"));
+    const full = perToolSchemaTokens(
+      tool("get_issue", "Fetch one issue by number", {
+        type: "object",
+        properties: { number: { type: "integer" } },
+        required: ["number"],
+      }),
+    );
+    expect(full).toBeGreaterThan(bare);
+  });
+
+  it("treats a missing description or schema as empty rather than throwing", () => {
+    expect(perToolSchemaTokens({ name: "x" })).toBeGreaterThan(0);
+  });
+
+  // The property the occupancy comparison rests on: one ruler for both arms.
+  // A 127-tool catalog must price far above a 4-tool gateway surface.
+  it("scales with catalog size", () => {
+    const many = Array.from({ length: 127 }, (_, i) => tool(`t${i}`, "a tool", { type: "object" }));
+    const few = Array.from({ length: 4 }, (_, i) => tool(`g${i}`, "a tool", { type: "object" }));
+    expect(schemaTokenEstimate(many)).toBeGreaterThan(schemaTokenEstimate(few) * 20);
+  });
+});
+
+describe("perToolTokenMap", () => {
+  it("keys by the caller's canonical id", () => {
+    const m = perToolTokenMap([{ name: "github_get_issue" }, { name: "git_log" }], (t) =>
+      t.name.replace("_", "/"),
+    );
+    expect([...m.keys()].sort()).toEqual(["git/log", "github/get_issue"]);
+    expect(m.get("git/log")).toBeGreaterThan(0);
+  });
+
+  it("last write wins on duplicate ids", () => {
+    const m = perToolTokenMap([{ name: "a", description: "x" }, { name: "a" }], (t) => t.name);
+    expect(m.size).toBe(1);
   });
 });
