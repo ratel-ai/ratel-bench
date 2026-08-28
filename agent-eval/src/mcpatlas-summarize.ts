@@ -34,6 +34,10 @@ export interface McpAtlasTaskSummaryRow {
   model: string;
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
+  /** The --catalog-tools target these rows were measured at (0 = whole
+   *  scope). A GROUP KEY, not a metric: without it a second run at another
+   *  size silently replaces the first in report.json. */
+  catalog_tools: number;
   workload: WorkloadBucket;
   // metrics
   tasks: number;
@@ -76,6 +80,8 @@ export interface McpAtlasRetrievalSummaryRow {
   ratel_local_version: string;
   retriever_method: string;
   catalog_scope: McpAtlasScope;
+  /** See McpAtlasTaskSummaryRow.catalog_tools. */
+  catalog_tools: number;
   workload: WorkloadBucket;
   aggregation: McpAtlasAggregation;
   k: number;
@@ -110,6 +116,10 @@ export interface McpAtlasFailureSummaryRow {
   model: string;
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
+  /** The --catalog-tools target these rows were measured at (0 = whole
+   *  scope). A GROUP KEY, not a metric: without it a second run at another
+   *  size silently replaces the first in report.json. */
+  catalog_tools: number;
   workload: WorkloadBucket;
   // metrics
   cells: number;
@@ -131,6 +141,8 @@ export interface McpAtlasCostSummaryRow {
   model: string;
   arm: "native_vs_ratel";
   catalog_scope: McpAtlasScope;
+  /** See McpAtlasTaskSummaryRow.catalog_tools. */
+  catalog_tools: number;
   workload: WorkloadBucket;
   // metrics
   tasks_paired: number;
@@ -209,6 +221,11 @@ function groupBy<T>(xs: readonly T[], key: (x: T) => string): Map<string, T[]> {
 
 export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   const wl = (taskId: string): McpAtlasWorkload => input.workloads.get(taskId) ?? "analysis";
+  // Retrieval rows carry no catalog_tools of their own; take it from the cell
+  // they belong to. Rows written before the field existed read as 0, the whole
+  // scope, which is what they were.
+  const catalogToolsByCell = new Map(input.cells.map((c) => [c.cell_key, c.catalog_tools ?? 0]));
+  const catalogToolsOf = (cellKey: string): number => catalogToolsByCell.get(cellKey) ?? 0;
 
   // ── task completion ────────────────────────────────────────────────────────
   const taskSummary: McpAtlasTaskSummaryRow[] = [];
@@ -218,7 +235,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   for (const [, rows] of groupBy(
     expanded,
     (r) =>
-      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.arm}::${r.cell.catalog_scope}::${r.bucket}`,
+      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.arm}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}`,
   )) {
     const cells = rows.map((r) => r.cell);
     const first = cells[0];
@@ -238,6 +255,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       model: first.model,
       arm: first.arm,
       catalog_scope: first.catalog_scope,
+      catalog_tools: rows[0].cell.catalog_tools ?? 0,
       workload: rows[0].bucket,
       tasks: n,
       task_pass_rate: passes / n,
@@ -283,7 +301,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   for (const [, rows] of groupBy(
     rExpanded,
     (r) =>
-      `${r.row.ratel_version_label}::${r.row.catalog_scope}::${r.bucket}::${r.row.aggregation}::${r.row.k}`,
+      `${r.row.ratel_version_label}::${r.row.catalog_scope}::${catalogToolsOf(r.row.cell_key)}::${r.bucket}::${r.row.aggregation}::${r.row.k}`,
   )) {
     const all = rows.map((r) => r.row);
     const first = all[0];
@@ -301,6 +319,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       ratel_local_version: first.ratel_local_version,
       retriever_method: first.retriever_method,
       catalog_scope: first.catalog_scope,
+      catalog_tools: catalogToolsOf(first.cell_key),
       workload: rows[0].bucket,
       aggregation: first.aggregation,
       k: first.k,
@@ -341,7 +360,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   );
   for (const [key, rows] of groupBy(tcExpanded, (r) => {
     const c = cellByKey.get(r.row.cell_key);
-    return `${c?.ratel_version_label}::${c?.model}::${r.row.arm}::${r.row.catalog_scope}::${r.bucket}`;
+    return `${c?.ratel_version_label}::${c?.model}::${r.row.arm}::${r.row.catalog_scope}::${c?.catalog_tools ?? 0}::${r.bucket}`;
   })) {
     const calls = rows.map((r) => r.row);
     const cells = [...new Set(calls.map((c) => c.cell_key))]
@@ -379,6 +398,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       model,
       arm: arm as McpAtlasArm,
       catalog_scope: catalog_scope as McpAtlasScope,
+      catalog_tools: cellByKey.get(rows[0].row.cell_key)?.catalog_tools ?? 0,
       workload: rows[0].bucket,
       cells: cells.length,
       cells_errored: cells.filter((c) => c.error !== null).length,
@@ -402,7 +422,8 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   const costSummary: McpAtlasCostSummaryRow[] = [];
   for (const [, rows] of groupBy(
     expanded,
-    (r) => `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.catalog_scope}::${r.bucket}`,
+    (r) =>
+      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}`,
   )) {
     const byArm = groupBy(rows, (r) => r.cell.arm);
     const native = (byArm.get("native") ?? []).map((r) => r.cell);
@@ -439,6 +460,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       model: first.model,
       arm: "native_vs_ratel",
       catalog_scope: first.catalog_scope,
+      catalog_tools: rows[0].cell.catalog_tools ?? 0,
       workload: rows[0].bucket,
       tasks_paired: paired.size,
       native_mean_tool_schema_tokens: nSchema,

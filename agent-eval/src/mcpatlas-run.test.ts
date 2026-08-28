@@ -116,6 +116,7 @@ describe("nativeCacheKey", () => {
     promptHash: "ph1",
     taskListHash: "th1",
     datasetRevision: "dr1",
+    catalogTools: 0,
   };
 
   it("is stable across ratel_local_version — the whole point of native caching", () => {
@@ -126,6 +127,20 @@ describe("nativeCacheKey", () => {
 
   it("changes with scope — catalog size is the tool surface itself here", () => {
     expect(nativeCacheKey(base)).not.toBe(nativeCacheKey({ ...base, scope: "full" }));
+  });
+
+  // Same reason as scope, expressed continuously. Without this a size sweep
+  // serves every native cell from the first size's cache, comparing
+  // ratel-at-40-tools against native-at-127-tools: the gateway looks like it
+  // saves far more context than it does, and nothing errors.
+  it("changes with catalogTools — cells at different sizes are different measurements", () => {
+    expect(nativeCacheKey(base)).not.toBe(nativeCacheKey({ ...base, catalogTools: 40 }));
+    expect(nativeCacheKey({ ...base, catalogTools: 40 })).not.toBe(
+      nativeCacheKey({ ...base, catalogTools: 100 }),
+    );
+    expect(nativeCacheKey({ ...base, catalogTools: 40 })).toBe(
+      nativeCacheKey({ ...base, catalogTools: 40 }),
+    );
   });
 
   it("changes with agent version, prompt hash, task-list hash, and dataset revision", () => {
@@ -154,6 +169,7 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
       arm: "native",
       catalog_scope: "coding",
       catalog_tool_count: 2,
+      catalog_tools: 0,
       catalog_size: 2,
       run_index: 0,
       ratel_version_label: "0.8.1",
@@ -253,6 +269,7 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
       taskId: item.task.task_id,
       model: "claude-haiku-4-5",
       scope: "coding",
+      catalogTools: 0,
       runIndex: item.runIndex,
       agentVersion: "2.1.241",
       promptHash: "ph1",
@@ -301,6 +318,42 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
     expect(reusedCells).toEqual([]);
   });
 
+  // The publishable-looking wrong number this guards against: a sweep reusing
+  // native-at-127 for a ratel-at-40 comparison, silently inflating the measured
+  // context savings.
+  it("does NOT reuse a cell measured at a different catalog size", () => {
+    const at127 = cell({ catalog_tools: 0 });
+    const ctxArgs = { promptHash: "ph1", taskListHash: "th1", datasetRevision: "dr1" };
+    const idx = readNativeCacheIndex([at127], ctxArgs);
+    const keyAt40 = nativeCacheKey({
+      taskId: "t1",
+      model: at127.model,
+      scope: "coding",
+      catalogTools: 40,
+      runIndex: 0,
+      agentVersion: at127.agent_version,
+      ...ctxArgs,
+    });
+    expect(idx.reuse.has(keyAt40)).toBe(false);
+    expect(idx.current.has(keyAt40)).toBe(false);
+  });
+
+  it("reuses a cell measured at the SAME catalog size", () => {
+    const at40 = cell({ catalog_tools: 40 });
+    const ctxArgs = { promptHash: "ph1", taskListHash: "th1", datasetRevision: "dr1" };
+    const idx = readNativeCacheIndex([at40], ctxArgs);
+    const keyAt40 = nativeCacheKey({
+      taskId: "t1",
+      model: at40.model,
+      scope: "coding",
+      catalogTools: 40,
+      runIndex: 0,
+      agentVersion: at40.agent_version,
+      ...ctxArgs,
+    });
+    expect(idx.reuse.get(keyAt40)).toBeDefined();
+  });
+
   it("readNativeCacheIndex keeps the earliest generated_at on a key collision", () => {
     const older = cell({ generated_at: "2026-08-01T00:00:00.000Z", cell_key: "old" });
     const newer = cell({ generated_at: "2026-08-20T00:00:00.000Z", cell_key: "new" });
@@ -310,6 +363,7 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
       taskId: "t1",
       model: "claude-haiku-4-5",
       scope: "coding",
+      catalogTools: 0,
       runIndex: 0,
       agentVersion: "2.1.241",
       ...context,

@@ -17,18 +17,51 @@ import type {
 } from "./mcpatlas-summarize.js";
 
 /** Keys that identify a group rather than measure it; stripped from `metrics`. */
+/**
+ * Fields that identify a row rather than measure it — stripped from `metrics`.
+ *
+ * `retriever_method` is deliberately NOT here. It is a grouping dimension, so
+ * two methods now coexist in one retriever_evaluation bucket; if it were
+ * stripped the reader would see two identical-looking metric objects with no
+ * way to tell bm25 from semantic. It stays visible in `metrics` alongside
+ * `aggregation` and `k`, which serve the same discriminating role.
+ *
+ * `catalog_tools` IS here, because bucketLabel already renders it into the
+ * bucket name (`coding@40/all`), so it is visible without duplicating it.
+ */
 export const GROUP_KEYS = new Set([
   "timestamp",
   "source",
   "ratel_version_label",
   "ratel_local_version",
   "agent_version",
-  "retriever_method",
   "model",
   "arm",
   "catalog_scope",
+  "catalog_tools",
   "workload",
 ]);
+
+/**
+ * Bucket label for the report's third level.
+ *
+ * `catalog_tools` must be part of the key or `latestGroups` keeps only the
+ * newest row per (scope, workload) and a second run at another catalog size
+ * SILENTLY REPLACES the first — the report could not represent a sweep at all,
+ * which is the thing --catalog-tools exists to enable.
+ *
+ * Rendered as `coding@40/all` only when a sweep is active. At 0 (whole scope,
+ * the default) it stays exactly `coding/all`, so existing reports and anything
+ * reading them are unaffected.
+ */
+function bucketLabel(r: {
+  catalog_scope: string;
+  workload: string;
+  catalog_tools?: number;
+}): string {
+  const size = r.catalog_tools ?? 0;
+  return size > 0 ? `${r.catalog_scope}@${size}/${r.workload}` : `${r.catalog_scope}/${r.workload}`;
+}
 
 export function metricFields<T extends object>(row: T): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).filter(([k]) => !GROUP_KEYS.has(k)));
@@ -294,10 +327,11 @@ export function buildReport(input: ReportInput): McpAtlasReport {
     const retriever_evaluation: Record<string, { timestamp: string; metrics: unknown[] }> = {};
     for (const [, group] of latestGroups(
       rt,
-      (r) => `${r.catalog_scope}::${r.workload}::${r.aggregation}::${r.k}`,
+      (r) =>
+        `${r.catalog_scope}::${r.catalog_tools ?? 0}::${r.retriever_method}::${r.workload}::${r.aggregation}::${r.k}`,
     )) {
       for (const r of group) {
-        const bucket = `${r.catalog_scope}/${r.workload}`;
+        const bucket = bucketLabel(r);
         const entry = (retriever_evaluation[bucket] ??= { timestamp: r.timestamp, metrics: [] });
         entry.metrics.push(metricFields(r));
         if (r.timestamp > entry.timestamp) entry.timestamp = r.timestamp;
@@ -320,19 +354,19 @@ export function buildReport(input: ReportInput): McpAtlasReport {
         t,
         (r) => r.model,
         (r) => r.arm,
-        (r) => `${r.catalog_scope}/${r.workload}`,
+        (r) => bucketLabel(r),
       ),
       cost_comparison: nest(
         c,
         (r) => r.model,
         (r) => r.arm,
-        (r) => `${r.catalog_scope}/${r.workload}`,
+        (r) => bucketLabel(r),
       ),
       failures: nest(
         f,
         (r) => r.model,
         (r) => r.arm,
-        (r) => `${r.catalog_scope}/${r.workload}`,
+        (r) => bucketLabel(r),
       ),
       ...(input.config
         ? { configuration: { timestamp: input.generatedAt, config: input.config } }

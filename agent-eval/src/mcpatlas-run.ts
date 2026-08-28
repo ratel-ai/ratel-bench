@@ -267,6 +267,7 @@ export interface NativeCacheKeyInput {
   taskId: string;
   model: string;
   scope: McpAtlasScope;
+  catalogTools: number;
   runIndex: number;
   agentVersion: string;
   promptHash: string;
@@ -279,6 +280,15 @@ export interface NativeCacheKeyInput {
  * `ratel_local_version` changes — deliberately absent from this key. `scope`
  * IS included: here the catalog size is the tool surface itself, and omitting
  * it would serve a 79-tool cell for a 195-tool cell.
+ *
+ * `catalogTools` is the same variable expressed continuously, and is included
+ * for the same reason. Native's whole context IS the catalog — roughly 11k
+ * schema tokens at 40 tools against 24k at 127 — so cells at different sizes
+ * are different measurements. Without it a size sweep would serve every native
+ * cell from the first size's cache, comparing ratel-at-40 against
+ * native-at-127: the gateway would appear to save far more context than it
+ * does, with no error raised and a publishable-looking number. (ratel is
+ * unaffected — it is never cached.)
  */
 export function nativeCacheKey(input: NativeCacheKeyInput): string {
   return [
@@ -286,6 +296,7 @@ export function nativeCacheKey(input: NativeCacheKeyInput): string {
     "native",
     input.model,
     input.scope,
+    input.catalogTools,
     input.runIndex,
     input.agentVersion,
     input.promptHash,
@@ -324,6 +335,8 @@ export function readNativeCacheIndex(
       taskId: c.task_id,
       model: c.model,
       scope: c.catalog_scope,
+      // Older rows predate this field; treat as the whole scope.
+      catalogTools: c.catalog_tools ?? 0,
       runIndex: c.run_index,
       agentVersion: c.agent_version,
       promptHash: context.promptHash,
@@ -894,6 +907,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       task: item.task,
       arm: item.arm,
       catalog_scope: cfg.catalogs[0].scope,
+      catalog_tools: cfg.catalog_tools,
       catalog_tool_ids: manifest.servers.flatMap((s) => s.tool_ids),
       eval_ks: cfg.eval_ks,
       per_call_timeout_ms: cfg.per_cell_timeout_ms,
@@ -975,6 +989,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       arm: item.arm,
       catalog_scope: cfg.catalogs[0].scope,
       catalog_tool_count: manifest.tool_count,
+      catalog_tools: cfg.catalog_tools,
       catalog_size: item.arm === "native" ? manifest.tool_count : GATEWAY_TOOLS.length,
       run_index: item.runIndex,
       ratel_version_label: cfg.ratel_version_label,
@@ -1434,6 +1449,7 @@ export async function main(): Promise<void> {
           taskId: item.task.task_id,
           model,
           scope,
+          catalogTools: cfg.catalog_tools,
           runIndex: item.runIndex,
           agentVersion: cfg.claude_code_version,
           promptHash: PROMPT_HASH,

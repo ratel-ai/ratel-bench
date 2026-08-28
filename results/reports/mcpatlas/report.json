@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-27T10:27:16.132Z",
+  "generated_at": "2026-08-28T08:09:24.464Z",
   "ratel_local_versions": {
     "0.8.1": {
       "retriever_evaluation": {
@@ -7,6 +7,7 @@
           "timestamp": "2026-08-27T07:29:20.794Z",
           "metrics": [
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 1,
               "n_tasks": 3,
@@ -27,6 +28,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 3,
               "n_tasks": 3,
@@ -47,6 +49,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 5,
               "n_tasks": 3,
@@ -67,6 +70,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 1,
               "n_tasks": 3,
@@ -87,6 +91,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 3,
               "n_tasks": 3,
@@ -107,6 +112,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 5,
               "n_tasks": 3,
@@ -127,6 +133,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 1,
               "n_tasks": 3,
@@ -147,6 +154,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 3,
               "n_tasks": 3,
@@ -167,6 +175,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 5,
               "n_tasks": 3,
@@ -192,6 +201,7 @@
           "timestamp": "2026-08-27T07:29:20.794Z",
           "metrics": [
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 1,
               "n_tasks": 5,
@@ -212,6 +222,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 3,
               "n_tasks": 5,
@@ -232,6 +243,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 5,
               "n_tasks": 5,
@@ -252,6 +264,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 1,
               "n_tasks": 5,
@@ -272,6 +285,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 3,
               "n_tasks": 5,
@@ -292,6 +306,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 5,
               "n_tasks": 5,
@@ -312,6 +327,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 1,
               "n_tasks": 5,
@@ -332,6 +348,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 3,
               "n_tasks": 5,
@@ -352,6 +369,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 5,
               "n_tasks": 5,
@@ -377,6 +395,7 @@
           "timestamp": "2026-08-27T07:29:20.794Z",
           "metrics": [
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 1,
               "n_tasks": 2,
@@ -397,6 +416,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 3,
               "n_tasks": 2,
@@ -417,6 +437,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "best",
               "k": 5,
               "n_tasks": 2,
@@ -437,6 +458,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 1,
               "n_tasks": 2,
@@ -457,6 +479,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 3,
               "n_tasks": 2,
@@ -477,6 +500,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "first",
               "k": 5,
               "n_tasks": 2,
@@ -497,6 +521,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 1,
               "n_tasks": 2,
@@ -517,6 +542,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 3,
               "n_tasks": 2,
@@ -537,6 +563,7 @@
               "mean_zero_score_dropped": 0
             },
             {
+              "retriever_method": "bm25",
               "aggregation": "union",
               "k": 5,
               "n_tasks": 2,
@@ -1062,7 +1089,7 @@
         }
       },
       "configuration": {
-        "timestamp": "2026-08-27T10:27:16.132Z",
+        "timestamp": "2026-08-28T08:09:24.464Z",
         "config": {
           "run_type": "mcpatlas_config",
           "ratel_version_label": "0.8.1",

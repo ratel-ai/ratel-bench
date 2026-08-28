@@ -22,6 +22,7 @@ function cell(over: Partial<McpAtlasCell> = {}): McpAtlasCell {
     arm: "native",
     catalog_scope: "coding",
     catalog_tool_count: 79,
+    catalog_tools: 0,
     catalog_size: 79,
     run_index: 0,
     ratel_version_label: "0.8.1",

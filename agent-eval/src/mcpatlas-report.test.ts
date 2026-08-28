@@ -27,6 +27,7 @@ function task(over: Partial<McpAtlasTaskSummaryRow> = {}): McpAtlasTaskSummaryRo
     model: "claude-haiku-4-5",
     arm: "native",
     catalog_scope: "coding",
+    catalog_tools: 0,
     workload: "all",
     tasks: 55,
     task_pass_rate: 0.5,
@@ -70,6 +71,7 @@ function retrieval(over: Partial<McpAtlasRetrievalSummaryRow> = {}): McpAtlasRet
     ratel_local_version: "0.8.1",
     retriever_method: "bm25",
     catalog_scope: "coding",
+    catalog_tools: 0,
     workload: "all",
     aggregation: "first",
     k: 5,
@@ -102,6 +104,7 @@ function cost(over: Partial<McpAtlasCostSummaryRow> = {}): McpAtlasCostSummaryRo
     model: "claude-haiku-4-5",
     arm: "native_vs_ratel",
     catalog_scope: "coding",
+    catalog_tools: 0,
     workload: "all",
     tasks_paired: 55,
     native_mean_tool_schema_tokens: 4000,
@@ -143,6 +146,7 @@ function failure(over: Partial<McpAtlasFailureSummaryRow> = {}): McpAtlasFailure
     model: "claude-haiku-4-5",
     arm: "native",
     catalog_scope: "coding",
+    catalog_tools: 0,
     workload: "all",
     cells: 55,
     cells_errored: 0,
@@ -337,5 +341,59 @@ describe("buildReport", () => {
     const v = buildReport(input({ config: { agent_model: "claude-haiku-4-5" } }))
       .ratel_local_versions["0.8.1"];
     expect(v.configuration?.config).toEqual({ agent_model: "claude-haiku-4-5" });
+  });
+});
+
+// A catalog-size sweep is the reason --catalog-tools exists. Before
+// catalog_tools joined the grouping keys, latestGroups kept only the newest row
+// per (scope, workload) and the second size silently REPLACED the first, so the
+// report could not represent a sweep at all.
+describe("a catalog-size sweep survives into one report", () => {
+  it("keeps both sizes in task_completion instead of overwriting", () => {
+    const r = buildReport({
+      generatedAt: LATER,
+      task: [
+        task({ catalog_tools: 40, timestamp: TS }),
+        task({ catalog_tools: 127, timestamp: LATER }),
+      ],
+      retrieval: [],
+      failures: [],
+      cost: [],
+    });
+    const buckets = Object.keys(
+      r.ratel_local_versions["0.8.1"].task_completion["claude-haiku-4-5"].native,
+    ).sort();
+    expect(buckets).toEqual(["coding@127/all", "coding@40/all"]);
+  });
+
+  it("leaves the un-swept label untouched, so existing reports are unaffected", () => {
+    const r = buildReport({
+      generatedAt: LATER,
+      task: [task({ catalog_tools: 0 })],
+      retrieval: [],
+      failures: [],
+      cost: [],
+    });
+    expect(
+      Object.keys(r.ratel_local_versions["0.8.1"].task_completion["claude-haiku-4-5"].native),
+    ).toEqual(["coding/all"]);
+  });
+
+  it("keeps two retriever methods rather than the newest replacing the older", () => {
+    const r = buildReport({
+      generatedAt: LATER,
+      task: [task()],
+      retrieval: [
+        retrieval({ retriever_method: "bm25", timestamp: TS }),
+        retrieval({ retriever_method: "semantic", timestamp: LATER }),
+      ],
+      failures: [],
+      cost: [],
+    });
+    const metrics = r.ratel_local_versions["0.8.1"].retriever_evaluation["coding/all"].metrics;
+    expect(metrics.length).toBe(2);
+    expect(
+      (metrics as { retriever_method?: string }[]).map((m) => m.retriever_method).sort(),
+    ).toEqual(["bm25", "semantic"]);
   });
 });

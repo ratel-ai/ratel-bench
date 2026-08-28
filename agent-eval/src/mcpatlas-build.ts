@@ -205,6 +205,8 @@ export interface CellContext {
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
   catalog_tool_ids: readonly CanonicalToolId[];
+  /** The --catalog-tools target (0 = whole scope). */
+  catalog_tools: number;
   eval_ks: readonly number[];
   per_call_timeout_ms?: number;
   model: string;
@@ -660,6 +662,7 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     arm: ctx.arm,
     catalog_scope: ctx.catalog_scope,
     catalog_tool_count: ctx.catalog_tool_ids.length,
+    catalog_tools: ctx.catalog_tools,
     // Visible to the model: native sees the whole catalog; ratel sees only the
     // two gateway tools actually wired in (`allowedToolsFor` in
     // mcpatlas-servers.ts is authoritative — GATEWAY_TOOLS.length, not a fixed

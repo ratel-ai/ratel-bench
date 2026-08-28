@@ -45,6 +45,7 @@ function ctx(over: Partial<CellContext> = {}): CellContext {
     task: task(),
     arm: "ratel",
     catalog_scope: "coding",
+    catalog_tools: 0,
     catalog_tool_ids: ["github/get_issue", "git/status", "git/log"],
     eval_ks: [1, 3, 5],
     model: "claude-haiku-4-5",
@@ -660,6 +661,7 @@ describe("assembleCell", () => {
     const cell = assembleCell({
       ctx: ctx({
         task: task({ gold_tool_ids: ["github/get_issue", "airtable/list_bases"] }),
+        catalog_tools: 0,
         catalog_tool_ids: ["github/get_issue", "git/status"], // airtable not registered
       }),
       result: result(),

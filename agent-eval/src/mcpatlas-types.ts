@@ -311,6 +311,11 @@ export interface McpAtlasCell {
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
   catalog_tool_count: number;
+  /** The --catalog-tools TARGET this cell ran under (0 = whole scope). Distinct
+   *  from catalog_tool_count, which is what was realised — they differ when a
+   *  task's gold exceeds the target. Part of the native cache key, so a cell
+   *  measured at one catalog size is never served for another. */
+  catalog_tools: number;
   /** Tools VISIBLE to the model. native: the whole catalog. ratel: 4. */
   catalog_size: number;
   run_index: number;
