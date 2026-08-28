@@ -66,6 +66,8 @@ import {
   missingEnv,
   normalizeToolId,
   type ShimSpec,
+  selectCatalogTools,
+  subsetManifest,
 } from "./mcpatlas-servers.js";
 import type {
   McpAtlasArm,
@@ -158,6 +160,7 @@ export interface BuildRunConfigInput {
   topKSkills: number;
   arms: McpAtlasArm[];
   evalKs: number[];
+  catalogTools: number;
   runsPerTask: number;
   seed: number;
   concurrency: number;
@@ -199,6 +202,7 @@ export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
     arms: input.arms,
     catalogs: [input.manifest],
     eval_ks: input.evalKs,
+    catalog_tools: input.catalogTools,
     runs_per_task: input.runsPerTask,
     seed: input.seed,
     concurrency: input.concurrency,
@@ -776,18 +780,46 @@ export async function measureGatewaySchemaTokens(o: {
  *  complete, schema-valid result with `cell.error` set, never a missing row. */
 export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
   const deps = o.deps ?? REAL_RUN_CELL_DEPS;
-  const { item, cfg, manifest } = o;
+  const { item, cfg } = o;
+  // Per-task catalog when a size sweep is active: this task's gold plus seeded
+  // fillers from the scope. Seeded on (task, size, seed) so a rerun reproduces
+  // it and BOTH ARMS get the identical set — catalog_sha256 is asserted equal
+  // across arms and that assertion is what makes the comparison valid.
+  const subsetting = cfg.catalog_tools > 0;
+  const manifest = subsetting
+    ? subsetManifest(
+        o.manifest,
+        selectCatalogTools(
+          o.manifest,
+          item.task.gold_tool_ids,
+          cfg.catalog_tools,
+          `${item.task.task_id}|${cfg.catalog_tools}|${cfg.seed}`,
+        ),
+      )
+    : o.manifest;
+  // Occupancy must follow the catalog the agent actually saw. The campaign-wide
+  // nativeCatalogTokens prices all 127 tools; a subset costs less, and reporting
+  // the full figure would overstate native's context and inflate the savings.
+  const nativeCatalogTokens =
+    subsetting && o.perToolTokens
+      ? manifest.servers
+          .flatMap((s) => s.tool_ids)
+          .reduce((n, id) => n + (o.perToolTokens?.get(id) ?? 0), 0)
+      : o.nativeCatalogTokens;
   const cellKey = cellKeyFor(item, cfg.catalogs[0].scope);
   const scratch = makeScratch(cellKey, o.scratchRoot);
   const knownServers = manifest.servers.map((s) => s.server);
 
   try {
     if (item.arm === "native") {
-      writeFileSync(scratch.mcpConfigPath, JSON.stringify(buildNativeMcpConfig(manifest, o.shim)));
+      writeFileSync(
+        scratch.mcpConfigPath,
+        JSON.stringify(buildNativeMcpConfig(manifest, o.shim, subsetting)),
+      );
     } else {
       writeFileSync(
         scratch.serveConfigPath,
-        JSON.stringify(buildRatelServeConfig(manifest, o.shim, cfg.retriever_method)),
+        JSON.stringify(buildRatelServeConfig(manifest, o.shim, cfg.retriever_method, subsetting)),
       );
       writeFileSync(
         scratch.mcpConfigPath,
@@ -887,7 +919,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       telemetryText,
       telemetryPath: item.arm === "ratel" ? scratch.telemetryPath : null,
       claimRubric,
-      nativeCatalogTokens: o.nativeCatalogTokens,
+      nativeCatalogTokens,
       gatewaySchemaTokens: o.gatewaySchemaTokens,
       perToolTokens: o.perToolTokens,
       nativeBaselineMs: o.nativeBaselineMs,
@@ -1191,6 +1223,11 @@ export async function main(): Promise<void> {
   //
   // Cells stay distinct because run_index is part of cell_key and of the
   // native cache key, so raising this for a targeted question is always safe.
+  // Catalog-size sweep. 0 (default) = whole scope, the historical behaviour.
+  // Any positive value gives each task a catalog of its gold tools plus seeded
+  // fillers from the scope, so gold coverage stays complete at every size and
+  // the gold fraction stays roughly constant across tasks.
+  const catalogTools = Math.max(0, Number(arg("--catalog-tools", "0")));
   const runsPerTask = Math.max(1, Number(arg("--runs", "1")));
   // Upstream MCP-Atlas defaults (services/agent-harness: DEFAULT_MAX_TURNS=256,
   // README: --timeout 1800s). Ours were hardcoded at 20 turns / 300s — the 20
@@ -1302,6 +1339,7 @@ export async function main(): Promise<void> {
       topKSkills: 3,
       arms,
       evalKs: [1, 3, 5],
+      catalogTools,
       runsPerTask,
       seed: 0,
       concurrency,

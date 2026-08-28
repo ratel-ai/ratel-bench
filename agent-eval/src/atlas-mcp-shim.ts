@@ -110,14 +110,38 @@ export function toToolResult(payload: unknown): {
   return { content: [{ type: "text", text: JSON.stringify(payload ?? null) }] };
 }
 
-export function createShimServer(server: string, sandbox: SandboxClient): Server {
+/**
+ * Restrict a server's advertised tools to `allow` (bare names, no prefix).
+ *
+ * This is the ONLY place catalog size can be varied. Filtering the manifest
+ * instead would shrink native's `--allowedTools` while the shim kept
+ * advertising every tool, so all the schemas would stay in the prompt and
+ * `tool_schema_tokens` would not move — the agent would be told what it may
+ * call without the catalog actually getting smaller. Filtering here shrinks
+ * both arms from one point: native's context, and the set ratel-local
+ * registers and searches over.
+ *
+ * An empty/absent allow-list means "no restriction", so the default path is
+ * unchanged.
+ */
+export function applyAllowList(tools: AtlasTool[], allow: readonly string[] | null): AtlasTool[] {
+  if (!allow || allow.length === 0) return tools;
+  const keep = new Set(allow);
+  return tools.filter((t) => keep.has(t.name));
+}
+
+export function createShimServer(
+  server: string,
+  sandbox: SandboxClient,
+  allow: readonly string[] | null = null,
+): Server {
   const mcp = new Server(
     { name: `atlas-${server}`, version: "0.0.0" },
     { capabilities: { tools: {} } },
   );
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: filterToolsForServer(await sandbox.listTools(), server),
+    tools: applyAllowList(filterToolsForServer(await sandbox.listTools(), server), allow),
   }));
 
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -147,8 +171,16 @@ function arg(name: string, fallback: string): string {
 async function main(): Promise<void> {
   const server = arg("--server", "");
   const sandboxUrl = arg("--sandbox-url", process.env.MCP_SANDBOX_URL ?? "http://localhost:1984");
+  // Comma-separated bare tool names. Absent => advertise everything.
+  const allowRaw = arg("--allow", "");
+  const allow = allowRaw
+    ? allowRaw
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : null;
   if (!server) throw new Error("atlas-mcp-shim requires --server <name>");
-  const mcp = createShimServer(server, httpSandbox(sandboxUrl));
+  const mcp = createShimServer(server, httpSandbox(sandboxUrl), allow);
   await mcp.connect(new StdioServerTransport());
 }
 

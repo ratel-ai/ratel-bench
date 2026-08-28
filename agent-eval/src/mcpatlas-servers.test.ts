@@ -5,13 +5,16 @@ import {
   buildNativeMcpConfig,
   buildRatelMcpConfig,
   buildRatelServeConfig,
+  buildShimEntries,
   CODING_SERVERS,
   catalogHash,
   missingEnv,
   normalizeToolId,
   requiredEnv,
+  selectCatalogTools,
   serverOf,
   serversForScope,
+  subsetManifest,
   toAtlasToolName,
   toClaudeToolName,
 } from "./mcpatlas-servers.js";
@@ -183,5 +186,94 @@ describe("per-arm configuration", () => {
       "mcp__ratel-local__search_tools",
       "mcp__ratel-local__invoke_tool",
     ]);
+  });
+});
+
+describe("selectCatalogTools / subsetManifest", () => {
+  const man = buildCatalogManifest("coding", {
+    github: ["github/a", "github/b", "github/c", "github/d"],
+    git: ["git/x", "git/y", "git/z"],
+    filesystem: ["filesystem/p", "filesystem/q", "filesystem/r"],
+  });
+  const gold = ["github/a", "git/x"];
+
+  it("hits the target size exactly", () => {
+    expect(selectCatalogTools(man, gold, 5, "s").length).toBe(5);
+    expect(selectCatalogTools(man, gold, 10, "s").length).toBe(10);
+  });
+
+  // Non-negotiable: a catalog missing gold makes the task unsolvable and scores
+  // as a retrieval failure — the pool-contamination mode from 0.4.0 SR-Agents.
+  it("always keeps every gold tool", () => {
+    for (const size of [2, 3, 5, 8, 10]) {
+      const got = selectCatalogTools(man, gold, size, "s");
+      for (const g of gold) expect(got).toContain(g);
+    }
+  });
+
+  it("returns gold whole when the target is below the gold count", () => {
+    const got = selectCatalogTools(man, gold, 1, "s");
+    expect(got.length).toBe(2);
+    expect(got.sort()).toEqual(["git/x", "github/a"]);
+  });
+
+  it("is deterministic for a given seed and differs across seeds", () => {
+    expect(selectCatalogTools(man, gold, 6, "a")).toEqual(selectCatalogTools(man, gold, 6, "a"));
+    expect(selectCatalogTools(man, gold, 6, "a")).not.toEqual(
+      selectCatalogTools(man, gold, 6, "b"),
+    );
+  });
+
+  it("never exceeds the pool", () => {
+    expect(selectCatalogTools(man, gold, 999, "s").length).toBe(10);
+  });
+
+  it("subsetManifest recomputes counts and drops emptied servers", () => {
+    const sub = subsetManifest(man, ["github/a", "github/b", "git/x"]);
+    expect(sub.tool_count).toBe(3);
+    expect(sub.server_count).toBe(2);
+    expect(sub.servers.map((s) => s.server).sort()).toEqual(["git", "github"]);
+    expect(sub.servers.find((s) => s.server === "github")?.tool_count).toBe(2);
+  });
+
+  it("subsetManifest changes catalog_sha256, and equal subsets hash equal", () => {
+    const ids = selectCatalogTools(man, gold, 6, "s");
+    expect(subsetManifest(man, ids).catalog_sha256).not.toBe(man.catalog_sha256);
+    // Both arms build from the same subset, so the cross-arm equality assertion
+    // still holds under subsetting.
+    expect(subsetManifest(man, ids).catalog_sha256).toBe(subsetManifest(man, ids).catalog_sha256);
+  });
+});
+
+describe("catalog restriction reaches the shims", () => {
+  const man = buildCatalogManifest("coding", {
+    github: ["github/a", "github/b"],
+    git: ["git/x"],
+  });
+  const shim = { shimPath: "/s.ts", sandboxUrl: "http://localhost:1984" };
+
+  // Filtering the manifest alone would shrink --allowedTools while the shim kept
+  // advertising every tool, so the schemas would stay in the prompt and
+  // tool_schema_tokens would not move. --allow is what actually shrinks context.
+  it("emits --allow with bare names when restricted", () => {
+    const e = buildShimEntries(man, shim, true);
+    expect(e.github.args).toContain("--allow");
+    expect(e.github.args[e.github.args.indexOf("--allow") + 1]).toBe("a,b");
+    expect(e.git.args[e.git.args.indexOf("--allow") + 1]).toBe("x");
+  });
+
+  it("omits --allow by default, leaving the full-catalog path unchanged", () => {
+    expect(buildShimEntries(man, shim).github.args).not.toContain("--allow");
+    expect(buildNativeMcpConfig(man, shim).mcpServers.github.args).not.toContain("--allow");
+  });
+
+  it("both arms carry the same restriction", () => {
+    const native = buildNativeMcpConfig(man, shim, true).mcpServers;
+    const ratel = (
+      buildRatelServeConfig(man, shim, "bm25", true) as {
+        mcpServers: Record<string, { args: string[] }>;
+      }
+    ).mcpServers;
+    expect(native.github.args).toEqual(ratel.github.args);
   });
 });

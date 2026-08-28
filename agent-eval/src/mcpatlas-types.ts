@@ -156,6 +156,11 @@ export interface McpAtlasRunConfig {
   arms: McpAtlasArm[];
   catalogs: McpAtlasCatalogManifest[];
   eval_ks: number[];
+  /** Target tools per task for a catalog-size sweep. 0 = no subsetting: every
+   *  task sees the whole scope, which is the default and the historical
+   *  behaviour. When > 0 each task's catalog is its gold tools plus seeded
+   *  fillers drawn from the scope, so gold coverage stays complete. */
+  catalog_tools: number;
   runs_per_task: number;
   seed: number;
   concurrency: number;

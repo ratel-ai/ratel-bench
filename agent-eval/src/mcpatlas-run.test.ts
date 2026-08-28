@@ -70,6 +70,7 @@ const RUN_CONFIG_BASE = {
   topKSkills: 3,
   arms: ["native", "ratel"] as McpAtlasArm[],
   evalKs: [1, 3, 5],
+  catalogTools: 0,
   runsPerTask: 1,
   seed: 0,
   concurrency: 1,

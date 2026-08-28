@@ -195,23 +195,117 @@ interface McpServerEntry {
 export function buildShimEntries(
   manifest: McpAtlasCatalogManifest,
   shim: ShimSpec,
+  /** When true, each shim is told to advertise ONLY the manifest's tools for
+   *  its server, via `--allow`. Used for catalog-size sweeps, where the
+   *  manifest is a deliberate subset. Left false by default so the full-catalog
+   *  path emits byte-identical configs to before this option existed. */
+  restrictToManifest = false,
 ): Record<string, McpServerEntry> {
   const out: Record<string, McpServerEntry> = {};
   for (const s of manifest.servers) {
-    out[s.server] = {
-      type: "stdio",
-      command: "node",
-      args: [shim.shimPath, "--server", s.server, "--sandbox-url", shim.sandboxUrl],
-    };
+    const args = [shim.shimPath, "--server", s.server, "--sandbox-url", shim.sandboxUrl];
+    if (restrictToManifest) {
+      // Bare names — the shim strips the `<server>_` prefix before matching.
+      args.push("--allow", s.tool_ids.map((id) => id.split("/")[1]).join(","));
+    }
+    out[s.server] = { type: "stdio", command: "node", args };
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catalog-size sweep
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Deterministic PRNG (mulberry32) over a string seed, so a catalog subset is
+ *  reproducible across reruns and IDENTICAL for both arms — `catalog_sha256` is
+ *  asserted equal across arms and that assertion is what makes the comparison
+ *  valid. */
+function seededRandom(seed: string): () => number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  let a = h >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * The tool ids for one task at a target catalog size: every gold tool, then
+ * seeded fillers drawn from the rest of the catalog.
+ *
+ * Gold is never dropped. A catalog missing gold makes the task unsolvable and
+ * scores it as a retrieval failure — the pool-contamination mode that depressed
+ * the 0.4.0 SR-Agents numbers. If `size` is below the gold count the gold set is
+ * returned whole and the caller is over target; that is the correct direction to
+ * fail, and `catalog_tool_count` on the row records what was actually served.
+ *
+ * Fillers come from the full catalog pool, so at larger sizes they naturally
+ * include other tasks' gold — a harder and fairer distractor than an arbitrary
+ * tool, because it is something a real task genuinely needed.
+ */
+export function selectCatalogTools(
+  manifest: McpAtlasCatalogManifest,
+  goldToolIds: readonly CanonicalToolId[],
+  size: number,
+  seed: string,
+): CanonicalToolId[] {
+  const all = manifest.servers.flatMap((s) => s.tool_ids).sort();
+  const goldInCatalog = goldToolIds.filter((g) => all.includes(g));
+  const keep = new Set<CanonicalToolId>(goldInCatalog);
+  if (keep.size >= size) return [...keep].sort();
+
+  // Fisher-Yates over the non-gold remainder, seeded.
+  const pool = all.filter((t) => !keep.has(t));
+  const rnd = seededRandom(seed);
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  for (const t of pool) {
+    if (keep.size >= size) break;
+    keep.add(t);
+  }
+  return [...keep].sort();
+}
+
+/** A manifest restricted to `toolIds`, with counts and catalog_sha256
+ *  recomputed. Servers left with no tools are dropped, so no shim is spawned
+ *  for a server the agent cannot reach. */
+export function subsetManifest(
+  manifest: McpAtlasCatalogManifest,
+  toolIds: readonly CanonicalToolId[],
+): McpAtlasCatalogManifest {
+  const keep = new Set(toolIds);
+  const servers = manifest.servers
+    .map((s) => {
+      const tool_ids = s.tool_ids.filter((t) => keep.has(t));
+      return { ...s, tool_ids, tool_count: tool_ids.length };
+    })
+    .filter((s) => s.tool_ids.length > 0);
+  const all = servers.flatMap((s) => s.tool_ids).sort();
+  return {
+    ...manifest,
+    servers,
+    server_count: servers.length,
+    tool_count: all.length,
+    catalog_sha256: catalogHash(all),
+  };
 }
 
 export function buildNativeMcpConfig(
   manifest: McpAtlasCatalogManifest,
   shim: ShimSpec,
+  restrictToManifest = false,
 ): { mcpServers: Record<string, McpServerEntry> } {
-  return { mcpServers: buildShimEntries(manifest, shim) };
+  return { mcpServers: buildShimEntries(manifest, shim, restrictToManifest) };
 }
 
 /** ratel-local's own config: the identical upstream set the native arm used,
@@ -220,8 +314,11 @@ export function buildRatelServeConfig(
   manifest: McpAtlasCatalogManifest,
   shim: ShimSpec,
   retrievalMethod: "bm25" | "semantic" | "hybrid",
+  restrictToManifest = false,
 ): Record<string, unknown> {
-  const cfg: Record<string, unknown> = { mcpServers: buildShimEntries(manifest, shim) };
+  const cfg: Record<string, unknown> = {
+    mcpServers: buildShimEntries(manifest, shim, restrictToManifest),
+  };
   // The gateway treats an absent method as bm25; keep the config minimal so the
   // default path is exercised exactly as a user would get it.
   if (retrievalMethod !== "bm25") cfg.retrieval = { method: retrievalMethod };
