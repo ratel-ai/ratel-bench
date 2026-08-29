@@ -4,6 +4,7 @@ import {
   goldCallsFrom,
   goldCoverage,
   goldServers,
+  isImmutableRevision,
   parseListField,
   parsePythonLiteral,
   type RawAtlasRow,
@@ -303,5 +304,32 @@ describe("classifyWorkload — what a task is about, not which servers it uses",
 
   it("is total — every task gets a workload", () => {
     expect(classifyWorkload([])).toBe("analysis");
+  });
+});
+
+describe("isImmutableRevision", () => {
+  it("accepts a 40-hex commit sha", () => {
+    expect(
+      isImmutableRevision("hf:ScaleAI/MCP-Atlas@8c563b55d7c967755f474299848049834d624617"),
+    ).toBe(true);
+  });
+
+  // The regression this guards: "@main" recorded as provenance looks identical
+  // before and after an upstream edit, so a later task-list-hash mismatch would
+  // be unexplainable and the old corpus unrecoverable.
+  it("rejects moving references", () => {
+    expect(isImmutableRevision("hf:ScaleAI/MCP-Atlas@main")).toBe(false);
+    expect(isImmutableRevision("unpinned")).toBe(false);
+    expect(isImmutableRevision("hf:ScaleAI/MCP-Atlas@v1.2")).toBe(false);
+  });
+
+  it("rejects a truncated sha — HF tags can collide with short hex", () => {
+    expect(isImmutableRevision("hf:ScaleAI/MCP-Atlas@8c563b55")).toBe(false);
+  });
+
+  it("rejects uppercase hex, which HF never emits", () => {
+    expect(
+      isImmutableRevision("hf:ScaleAI/MCP-Atlas@8C563B55D7C967755F474299848049834D624617"),
+    ).toBe(false);
   });
 });

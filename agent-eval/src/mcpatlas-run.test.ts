@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,9 +14,11 @@ import {
   formatDoneLine,
   freezeConfig,
   makeScratch,
+  missingFromSandbox,
   nativeCacheKey,
   readJsonl,
   readNativeCacheIndex,
+  registrationMismatches,
   runCampaign,
   runCell,
   stableStringify,
@@ -52,6 +54,10 @@ function manifest() {
     git: ["git/status"],
   });
 }
+
+/** A sandbox serving exactly the test manifest — names in the sandbox's own
+ *  `<server>_<bare>` dialect. */
+const healthySandbox = async () => [{ name: "github_get_issue" }, { name: "git_status" }];
 
 const RUN_CONFIG_BASE = {
   scope: "coding" as const,
@@ -653,6 +659,7 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
             stdout: claudeStdout(),
@@ -688,6 +695,7 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
             stdout: "not json at all",
@@ -711,6 +719,7 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
             stdout: "",
@@ -732,6 +741,7 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts({ item: { task: task(), arm: "ratel", runIndex: 0 } }),
       deps: {
+        fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
             stdout: claudeStdout(),
@@ -750,12 +760,54 @@ describe("runCell", () => {
     expect(r.cell.arm).toBe("ratel");
   });
 
+  it("a ratel registration that disagrees with the manifest is a hard cell error", async () => {
+    const r = await runCell({
+      ...baseOpts({ item: { task: task(), arm: "ratel", runIndex: 0 } }),
+      deps: {
+        fetchSandboxTools: healthySandbox,
+        // Write real telemetry the way ratel-local would: the telemetry path
+        // is buried in the mcp.json this cell wrote, so recover it from there.
+        runClaude: async (o) => {
+          const mcp = JSON.parse(readFileSync(o.mcpConfigPath, "utf8")) as {
+            mcpServers: Record<string, { args: string[] }>;
+          };
+          const args = mcp.mcpServers["ratel-local"].args;
+          const telPath = args[args.indexOf("--telemetry-file") + 1];
+          // github registered, git missing — the desktop-commander shape.
+          writeFileSync(
+            telPath,
+            `${JSON.stringify({
+              type: "ratel_tool_payload",
+              server: "github",
+              tool_count: 1,
+              estimated_tokens: 10,
+            })}\n`,
+          );
+          return {
+            stdout: claudeStdout(),
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 1000,
+          } satisfies RunClaudeOutcome;
+        },
+        judgeClaims: async () => {
+          throw new Error("should not be reached — registration check must fail first");
+        },
+      },
+    });
+    expect(r.cell.error).toContain("registration disagrees");
+    expect(r.cell.error).toContain("git: not registered");
+  });
+
   it("cleans up the scratch dir unless keepArtifacts is set", async () => {
     const opts = baseOpts();
     await runCell({
       ...opts,
       keepArtifacts: false,
       deps: {
+        fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
             stdout: claudeStdout(),
@@ -784,5 +836,127 @@ describe("runCell", () => {
     });
     const cellDir = join(opts.scratchRoot, "t1__native__scoding__r0");
     expect(existsSync(cellDir)).toBe(false);
+  });
+});
+
+// #15 — per-cell catalog integrity. The scenario throughout: desktop-commander
+// died inside the sandbox mid-campaign, taking 21 tools; the doctor only checks
+// at startup, and gold_coverage is computed from the manifest so it stayed 1.0.
+describe("catalog integrity — pure checks", () => {
+  const servers = ["github", "git"];
+
+  it("missingFromSandbox is empty when every manifest tool is served", () => {
+    expect(
+      missingFromSandbox(
+        [{ name: "github_get_issue" }, { name: "git_status" }],
+        ["github/get_issue", "git/status"],
+        servers,
+      ),
+    ).toEqual([]);
+  });
+
+  it("missingFromSandbox names the tools a dead server took with it", () => {
+    expect(
+      missingFromSandbox(
+        [{ name: "git_status" }], // github vanished
+        ["github/get_issue", "git/status"],
+        servers,
+      ),
+    ).toEqual(["github/get_issue"]);
+  });
+
+  it("missingFromSandbox canonicalises the sandbox's underscore dialect", () => {
+    // git server, tool named git_log => sandbox name git_git_log
+    expect(missingFromSandbox([{ name: "git_git_log" }], ["git/git_log"], ["git"])).toEqual([]);
+  });
+
+  it("registrationMismatches flags a server the gateway never registered", () => {
+    const man = buildCatalogManifest("coding", {
+      github: ["github/get_issue"],
+      git: ["git/status"],
+    });
+    const tel = JSON.stringify({
+      type: "ratel_tool_payload",
+      server: "github",
+      tool_count: 1,
+      estimated_tokens: 10,
+    });
+    expect(registrationMismatches(tel, man)).toEqual(["git: not registered"]);
+  });
+
+  it("registrationMismatches flags a partial registration (wrong tool count)", () => {
+    const man = buildCatalogManifest("coding", { github: ["github/a", "github/b"] });
+    const tel = JSON.stringify({
+      type: "ratel_tool_payload",
+      server: "github",
+      tool_count: 1,
+      estimated_tokens: 10,
+    });
+    expect(registrationMismatches(tel, man)).toEqual([
+      "github: registered 1 tools, manifest has 2",
+    ]);
+  });
+
+  // Deliberate leniency: no payload events at all means an older ratel-local or
+  // a telemetry format change, and failing every cell of such a version is the
+  // wrong response. Empty telemetry has its own hard error.
+  it("registrationMismatches stays silent when telemetry has no payload events", () => {
+    const man = buildCatalogManifest("coding", { github: ["github/a"] });
+    expect(registrationMismatches('{"type":"search","hits":[]}', man)).toEqual([]);
+    expect(registrationMismatches("", man)).toEqual([]);
+  });
+});
+
+describe("catalog integrity — runCell refuses rather than spends", () => {
+  function baseOptsShared() {
+    const core = buildRunConfig({ ...RUN_CONFIG_BASE, manifest: manifest() });
+    return {
+      item: { task: task(), arm: "native" as const, runIndex: 0 },
+      cfg: freezeConfig(core, "run-integrity", "2026-08-29T00:00:00.000Z"),
+      manifest: manifest(),
+      shim: { shimPath: "/fake/shim.js", sandboxUrl: "http://localhost:1984" },
+      scratchRoot: mkdtempSync(join(tmpdir(), "mcpatlas-integrity-")),
+      keepArtifacts: false,
+      nativeBaselineMs: new Map<string, number>(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      cacheSource: "live" as const,
+    };
+  }
+
+  it("a missing tool refuses the cell BEFORE runClaude — no tokens bought", async () => {
+    let claudeCalled = false;
+    const r = await runCell({
+      ...baseOptsShared(),
+      deps: {
+        fetchSandboxTools: async () => [{ name: "git_status" }], // github gone
+        runClaude: async () => {
+          claudeCalled = true;
+          throw new Error("must not be reached");
+        },
+        judgeClaims: async () => {
+          throw new Error("must not be reached");
+        },
+      },
+    });
+    expect(claudeCalled).toBe(false);
+    expect(r.cell.error).toMatch(/catalog integrity/);
+    expect(r.cell.error).toMatch(/github\/get_issue/);
+  });
+
+  it("an unreachable sandbox refuses the cell", async () => {
+    const r = await runCell({
+      ...baseOptsShared(),
+      deps: {
+        fetchSandboxTools: async () => null,
+        runClaude: async () => {
+          throw new Error("must not be reached");
+        },
+        judgeClaims: async () => {
+          throw new Error("must not be reached");
+        },
+      },
+    });
+    expect(r.cell.error).toMatch(/sandbox unreachable/);
   });
 });

@@ -423,6 +423,25 @@ export function loadRows(path: string): RawAtlasRow[] {
   return out;
 }
 
+/**
+ * True only for a revision string that names an immutable commit — a 40-hex
+ * sha after `@`. `@main`, `@v1`-style tags (HF tags can move), and "unpinned"
+ * all fail.
+ *
+ * WHY THE GATE CARES. The corpus content is already guarded by
+ * `task_list_hash`, so a moving revision cannot silently change a RUN — but it
+ * can silently change what the NEXT ingest produces, and the provenance
+ * recorded on every row would still look identical ("@main" before and
+ * after). An upstream edit to MCP-Atlas would then surface as an
+ * inexplicable task-list-hash mismatch weeks later, with no way to recover
+ * which revision the old corpus came from. Pinning is the difference between
+ * "re-ingest reproduces the corpus" and "re-ingest reproduces the corpus if
+ * upstream hasn't touched anything since".
+ */
+export function isImmutableRevision(rev: string): boolean {
+  return /@[0-9a-f]{40}$/.test(rev);
+}
+
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(name);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
@@ -449,6 +468,14 @@ export function main(): void {
 
   // ── the gate ───────────────────────────────────────────────────────────────
   const problems: string[] = [];
+  if (!isImmutableRevision(datasetRevision) && !process.argv.includes("--allow-unpinned")) {
+    problems.push(
+      `--dataset-revision "${datasetRevision}" is not an immutable commit reference. ` +
+        `Pass the dataset's commit sha (e.g. hf:ScaleAI/MCP-Atlas@<40-hex-sha>, from ` +
+        `https://huggingface.co/api/datasets/ScaleAI/MCP-Atlas), or --allow-unpinned ` +
+        `for a deliberately throwaway ingest.`,
+    );
+  }
   if (tasks.length !== EXPECTED_TASK_COUNT) {
     problems.push(`expected ${EXPECTED_TASK_COUNT} coding tasks, got ${tasks.length}`);
   }

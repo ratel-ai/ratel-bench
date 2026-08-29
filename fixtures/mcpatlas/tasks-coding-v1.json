@@ -1,5 +1,5 @@
 {
-  "dataset_revision": "hf:ScaleAI/MCP-Atlas@main",
+  "dataset_revision": "hf:ScaleAI/MCP-Atlas@8c563b55d7c967755f474299848049834d624617",
   "task_list_hash": "4d25da4975abd7356de820427169768f400278e7e4a261c9be207b6db65eb3b9",
   "task_count": 55,
   "task_ids": [

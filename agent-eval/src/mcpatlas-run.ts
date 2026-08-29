@@ -45,6 +45,7 @@ import {
   perToolTokenMap,
   schemaTokenEstimate,
 } from "./mcpatlas-gateway.js";
+import { isImmutableRevision } from "./mcpatlas-ingest.js";
 import {
   DEFAULT_PARTIAL_THRESHOLD,
   DEFAULT_PASS_THRESHOLD,
@@ -536,9 +537,17 @@ export function teardownSandbox(handle: SandboxHandle, containerName: string, ke
 export interface RunCellDeps {
   runClaude: (o: RunClaudeOpts) => Promise<RunClaudeOutcome>;
   judgeClaims: typeof judgeClaims;
+  /** Live catalog probe for the per-cell integrity check. REQUIRED (not
+   *  defaulted per-field) so a unit test must supply a fake and can never make
+   *  a real network call by omission. */
+  fetchSandboxTools: (url: string) => Promise<AtlasTool[] | null>;
 }
 
-export const REAL_RUN_CELL_DEPS: RunCellDeps = { runClaude: realRunClaude, judgeClaims };
+export const REAL_RUN_CELL_DEPS: RunCellDeps = {
+  runClaude: realRunClaude,
+  judgeClaims,
+  fetchSandboxTools,
+};
 
 export interface RunCellOptions {
   item: QueueItem;
@@ -644,6 +653,62 @@ async function fetchSandboxTools(url: string): Promise<AtlasTool[] | null> {
   } finally {
     clearTimeout(t);
   }
+}
+
+/**
+ * Which of `toolIds` the live sandbox is NOT currently serving.
+ *
+ * The doctor asserts the catalog once at campaign start and nothing ever looks
+ * again — but upstream servers inside the sandbox die independently of the
+ * container (measured: desktop-commander flapping since 08/24 took 21 tools and
+ * left 10 of 55 tasks silently unsolvable, scoring as retrieval failures).
+ * `gold_coverage` cannot catch it: it is computed from the manifest, not from
+ * what the sandbox actually serves, so it reads 1.0 either way.
+ *
+ * Sandbox names are `<server>_<bare>`; canonicalise before comparing.
+ */
+export function missingFromSandbox(
+  sandboxTools: readonly AtlasTool[],
+  toolIds: readonly string[],
+  knownServers: readonly string[],
+): string[] {
+  const served = new Set(sandboxTools.map((t) => normalizeToolId(t.name, knownServers) ?? t.name));
+  return toolIds.filter((id) => !served.has(id));
+}
+
+/**
+ * Servers whose ratel-local registration disagrees with the manifest — either
+ * absent from telemetry entirely (the server never came up behind the gateway)
+ * or registered with a different tool count (partial drift). The complement of
+ * `missingFromSandbox` for the ratel arm: that check proves the SANDBOX was
+ * healthy before the cell; this one proves the GATEWAY actually registered
+ * what the manifest says, from the registration telemetry the cell itself
+ * produced.
+ */
+export function registrationMismatches(
+  telemetryText: string,
+  manifest: McpAtlasCatalogManifest,
+): string[] {
+  const counts = new Map<string, number>();
+  for (const e of parseTelemetry(telemetryText)) {
+    if (e.type === "ratel_tool_payload") {
+      const p = e as { server?: string; tool_count?: number };
+      if (typeof p.server === "string") counts.set(p.server, Number(p.tool_count) || 0);
+    }
+  }
+  // No payload events at all: an old ratel-local that predates the event, or a
+  // telemetry format change. Refusing here would fail every cell of such a
+  // version, so leave that failure mode to the empty-telemetry check.
+  if (counts.size === 0) return [];
+  const out: string[] = [];
+  for (const srv of manifest.servers) {
+    const got = counts.get(srv.server);
+    if (got === undefined) out.push(`${srv.server}: not registered`);
+    else if (got !== srv.tool_count) {
+      out.push(`${srv.server}: registered ${got} tools, manifest has ${srv.tool_count}`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -824,6 +889,32 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
   const knownServers = manifest.servers.map((s) => s.server);
 
   try {
+    // Catalog integrity, per cell, BEFORE any spend. The doctor asserts this
+    // once at campaign start; upstream servers inside the sandbox die
+    // independently of the container (desktop-commander did, mid-campaign,
+    // taking 21 tools and leaving 10/55 tasks silently unsolvable). A cell run
+    // against an incomplete catalog scores as a retrieval failure — the
+    // pool-contamination mode — so refuse the cell instead: the thrown error
+    // becomes a schema-valid row with `error` set, and no tokens are bought.
+    const sandboxTools = await deps.fetchSandboxTools(o.shim.sandboxUrl);
+    if (!sandboxTools) {
+      throw new Error(`catalog integrity: sandbox unreachable at ${o.shim.sandboxUrl}`);
+    }
+    const missing = missingFromSandbox(
+      sandboxTools,
+      manifest.servers.flatMap((s) => s.tool_ids),
+      // Normalise against the FULL scope's server names — under subsetting the
+      // per-task manifest may have dropped a server whose prefix still appears
+      // in sandbox tool names.
+      o.manifest.servers.map((s) => s.server),
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `catalog integrity: sandbox no longer serves ${missing.length} tool(s) in this cell's ` +
+          `catalog: ${missing.slice(0, 8).join(", ")}${missing.length > 8 ? ", ..." : ""}`,
+      );
+    }
+
     if (item.arm === "native") {
       writeFileSync(
         scratch.mcpConfigPath,
@@ -897,6 +988,20 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       // Hard row-level error, not a warning — an empty telemetry file on a
       // ratel cell means the retrieval measurement for this cell is dead.
       throw new Error("ratel cell produced empty telemetry — retrieval data for this cell is lost");
+    }
+
+    if (item.arm === "ratel") {
+      // The sandbox probe above proved the SANDBOX was healthy before the
+      // cell; this proves the GATEWAY registered what the manifest says, from
+      // the cell's own registration telemetry. A server that failed behind
+      // ratel-local mid-cell shows up here and nowhere else.
+      const regProblems = registrationMismatches(telemetryText, manifest);
+      if (regProblems.length > 0) {
+        throw new Error(
+          `catalog integrity: ratel-local registration disagrees with the manifest — ` +
+            regProblems.join("; "),
+        );
+      }
     }
 
     const ctx: CellContext = {
@@ -1291,6 +1396,16 @@ export async function main(): Promise<void> {
   const pinned = JSON.parse(
     readFileSync(resolveRepoPath("fixtures/mcpatlas/tasks-coding-v1.json"), "utf8"),
   ) as { task_list_hash: string; dataset_revision?: string };
+  // Not fatal — corpus CONTENT is guarded by task_list_hash below — but a
+  // moving revision means nobody can later recover which upstream state this
+  // corpus came from, so say it loudly rather than record it silently.
+  if (!isImmutableRevision(pinned.dataset_revision ?? "unpinned")) {
+    console.warn(
+      `warning: dataset_revision "${pinned.dataset_revision ?? "unpinned"}" is not an ` +
+        "immutable commit reference — provenance for this run cannot be reproduced from it. " +
+        "Re-run mcpatlas-ingest with a pinned --dataset-revision.",
+    );
+  }
   const allTasks = readJsonl<McpAtlasTask>(resolveRepoPath("test-data/mcpatlas-coding.jsonl"));
   // Offset first, then limit — so `--tasks 1 --task-offset 3` selects exactly
   // the 4th task rather than requiring a re-run of every task before it just
