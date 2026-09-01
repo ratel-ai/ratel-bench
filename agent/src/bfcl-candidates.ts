@@ -31,6 +31,8 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
 interface RetrievedHit {
   id: string;
   score: number;
+  /** [0,1] score from 0.13+ SDKs (bm25 ÷ Σidf, dense (cos+1)/2); absent on older SDKs. */
+  normalized?: number;
 }
 
 function arg(name: string, fallback: string): string {
@@ -133,10 +135,14 @@ async function main(): Promise<void> {
           execute: async () => ({}),
         })),
       });
-      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
-        id: h.toolId,
-        score: h.score,
-      }));
+      const hits = (await search(sc.prompt, poolSize)).map((h) => {
+        const normalized = (h as { normalized?: number }).normalized;
+        return {
+          id: h.toolId,
+          score: h.score,
+          ...(normalized === undefined ? {} : { normalized }),
+        };
+      });
 
       for (const k of kSlices) {
         if (k > poolSize) continue;
