@@ -244,10 +244,14 @@ async function main(): Promise<void> {
       const kValues = [...new Set([1, 3, 5, topK, poolSize])].filter((k) => k <= poolSize);
 
       const { search } = await buildSkillCatalog({ method, embedding, skills: pool });
-      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
-        id: h.skillId,
-        score: h.score,
-      }));
+      const hits = (await search(sc.prompt, poolSize)).map((h) => {
+        const normalized = (h as { normalized?: number }).normalized;
+        return {
+          id: h.skillId,
+          score: h.score,
+          ...(normalized === undefined ? {} : { normalized }),
+        };
+      });
 
       for (const k of kValues) {
         lines.push(
