@@ -12,7 +12,9 @@
 export type McpAtlasArm = "native" | "ratel";
 
 /** Which slice of the MCP-Atlas server registry is mounted. `coding` = the 11
- *  coding/data servers (79 tools); `full` = every servable server (36 / 195). */
+ *  coding/data servers — 127 tools as live-probed (the dataset itself references
+ *  only 79 of them; see EXPECTED_CODING_TOOLS). `full` = every servable server
+ *  (36 servers; 195 dataset-referenced tools — live count TBD, no full run yet). */
 export type McpAtlasScope = "coding" | "full";
 
 /** Canonical tool identity across every dialect we have to reconcile:
