@@ -1,13 +1,17 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as tomlParse } from "smol-toml";
 import { afterEach, describe, expect, it } from "vitest";
-import type { RunClaudeOutcome } from "./mcpatlas-agent.js";
+import { buildClaudeArgs, type RunClaudeOutcome } from "./mcpatlas-agent.js";
+import { CODEX_PRICING, codexLockdown } from "./mcpatlas-codex.js";
+import { SYSTEM_PROMPT_ADDENDUM } from "./mcpatlas-prompt.js";
 import {
   appendJsonl,
   buildQueue,
   buildRunConfig,
   type CampaignSummary,
+  cellKeyFor,
   collectNativeBaselineMs,
   computeConfigHash,
   drainNativeCache,
@@ -659,6 +663,9 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
@@ -695,6 +702,9 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
@@ -719,6 +729,9 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts(),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
@@ -741,6 +754,9 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts({ item: { task: task(), arm: "ratel", runIndex: 0 } }),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
@@ -764,6 +780,9 @@ describe("runCell", () => {
     const r = await runCell({
       ...baseOpts({ item: { task: task(), arm: "ratel", runIndex: 0 } }),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         // Write real telemetry the way ratel-local would: the telemetry path
         // is buried in the mcp.json this cell wrote, so recover it from there.
@@ -807,6 +826,9 @@ describe("runCell", () => {
       ...opts,
       keepArtifacts: false,
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: healthySandbox,
         runClaude: async () =>
           ({
@@ -929,6 +951,9 @@ describe("catalog integrity — runCell refuses rather than spends", () => {
     const r = await runCell({
       ...baseOptsShared(),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: async () => [{ name: "git_status" }], // github gone
         runClaude: async () => {
           claudeCalled = true;
@@ -948,6 +973,9 @@ describe("catalog integrity — runCell refuses rather than spends", () => {
     const r = await runCell({
       ...baseOptsShared(),
       deps: {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
         fetchSandboxTools: async () => null,
         runClaude: async () => {
           throw new Error("must not be reached");
@@ -958,5 +986,410 @@ describe("catalog integrity — runCell refuses rather than spends", () => {
       },
     });
     expect(r.cell.error).toMatch(/sandbox unreachable/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness byte-identity goldens.
+//
+// The harness feature's governing invariant is that the claude-code path is
+// BEHAVIORALLY BYTE-IDENTICAL to before it existed. These goldens were captured
+// from the pre-harness code and must never change: a diff here means the
+// claude path moved, which the invariant forbids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("harness byte-identity goldens", () => {
+  const GOLDEN_MANIFEST = {
+    scope: "coding" as const,
+    servers: [
+      {
+        server: "github",
+        tool_ids: ["github/get_issue", "github/list_issues"],
+        tool_count: 2,
+        required_env: ["GITHUB_TOKEN"],
+      },
+      { server: "git", tool_ids: ["git/git_status"], tool_count: 1, required_env: [] },
+    ],
+    server_count: 2,
+    tool_count: 3,
+    catalog_sha256: "cafebabe",
+  };
+
+  const GOLDEN_INPUT = {
+    scope: "coding" as const,
+    manifest: GOLDEN_MANIFEST,
+    ratelVersionLabel: "0.8.1",
+    ratelLocalVersion: "0.8.1",
+    ratelSdkVersion: "0.3.0",
+    claudeCodeVersion: "2.1.241",
+    benchGitSha: "deadbeef",
+    agentModel: "claude-haiku-4-5",
+    maxTurns: 256,
+    perCellTimeoutMs: 1_800_000,
+    permissionMode: "bypassPermissions",
+    judgeModel: "claude-haiku-4-5",
+    retrieverMethod: "bm25" as const,
+    topKTools: 5,
+    topKSkills: 3,
+    arms: ["native", "ratel"] as McpAtlasArm[],
+    evalKs: [1, 3, 5],
+    catalogTools: 0,
+    runsPerTask: 1,
+    seed: 0,
+    concurrency: 1,
+    datasetRevision: "rev-1234",
+    taskListHash: "tlh-5678",
+    taskIds: ["task-a", "task-b"],
+    sandboxUrl: "http://localhost:1984",
+    atlasImageDigests: {},
+    dollarCapGlobal: 50,
+    declaredLimitations: [],
+  };
+
+  it("claude config_hash matches the pre-harness golden", () => {
+    // Captured from the code as it stood BEFORE the harness feature, under
+    // vitest. The value is TRANSFORM-dependent (PROMPT_HASH hashes
+    // buildPrompt.toString(), which differs between vitest's transform and
+    // tsx's — the same input hashes to 32c9149b… under tsx), so this golden
+    // pins the claude path only within vitest; the cross-transform
+    // pre/post-change identity was verified separately under tsx.
+    expect(computeConfigHash(buildRunConfig(GOLDEN_INPUT))).toBe(
+      "47092966cd5e9da597ce137981b52cdf116c5b8f31f97d5d543c55b0b709e167",
+    );
+  });
+
+  it("an explicit harness: claude-code is byte-identical to the default", () => {
+    expect(buildRunConfig({ ...GOLDEN_INPUT, harness: "claude-code" })).toEqual(
+      buildRunConfig(GOLDEN_INPUT),
+    );
+  });
+
+  it("codex configs hash differently and carry the codex keys; claude configs carry none", () => {
+    const claude = buildRunConfig(GOLDEN_INPUT);
+    expect("codex_version" in claude).toBe(false);
+    expect("codex_pricing" in claude).toBe(false);
+    expect("codex_lockdown" in claude).toBe(false);
+    const codex = buildRunConfig({
+      ...GOLDEN_INPUT,
+      agentModel: "gpt-5.6-luna",
+      harness: "codex",
+      codexVersion: "0.153.0",
+      codexPricing: CODEX_PRICING["gpt-5.6-luna"],
+      codexLockdown: codexLockdown(),
+    });
+    expect(codex.agent_harness).toBe("codex");
+    expect(codex.codex_version).toBe("0.153.0");
+    expect(codex.codex_pricing?.model).toBe("gpt-5.6-luna");
+    expect(computeConfigHash(codex)).not.toBe(computeConfigHash(claude));
+  });
+
+  it("claude cell keys match the pre-harness golden; codex keys carry the suffix", () => {
+    const item = { task: task(), arm: "native" as const, runIndex: 0 };
+    expect(cellKeyFor(item, "coding")).toBe("t1__native__scoding__r0");
+    expect(cellKeyFor(item, "coding", "claude-code")).toBe("t1__native__scoding__r0");
+    expect(cellKeyFor(item, "coding", "codex")).toBe("t1__native__scoding__r0__hcodex");
+  });
+
+  it("nativeCacheKey separates harnesses and defaults legacy callers to claude-code", () => {
+    const base = {
+      taskId: "t1",
+      model: "m",
+      scope: "coding" as const,
+      catalogTools: 0,
+      runIndex: 0,
+      agentVersion: "unknown",
+      promptHash: "p",
+      taskListHash: "t",
+      datasetRevision: "r",
+    };
+    expect(nativeCacheKey(base)).toBe(nativeCacheKey({ ...base, harness: "claude-code" }));
+    // agentVersion identical ("unknown" — the --skip-doctor value on BOTH
+    // harnesses): only the explicit harness component separates them.
+    expect(nativeCacheKey({ ...base, harness: "codex" })).not.toBe(nativeCacheKey(base));
+  });
+
+  it("claude argv matches the pre-harness golden, token for token", () => {
+    expect(
+      buildClaudeArgs({
+        prompt: "Fix the bug in main.py",
+        mcpConfigPath: "/scratch/mcp.json",
+        allowedTools: ["mcp__ratel-local__search_tools", "mcp__ratel-local__invoke_tool"],
+        model: "claude-haiku-4-5",
+        maxTurns: 256,
+        permissionMode: "bypassPermissions",
+        appendSystemPrompt: "ADDENDUM",
+      }),
+    ).toEqual([
+      "-p",
+      "Fix the bug in main.py",
+      "--output-format",
+      "json",
+      "--mcp-config",
+      "/scratch/mcp.json",
+      "--strict-mcp-config",
+      "--model",
+      "claude-haiku-4-5",
+      "--max-turns",
+      "256",
+      "--permission-mode",
+      "bypassPermissions",
+      "--allowedTools",
+      "mcp__ratel-local__search_tools,mcp__ratel-local__invoke_tool",
+      "--disallowedTools",
+      "Bash,BashOutput,KillShell,Read,Grep,Glob,WebFetch,WebSearch,Write,Edit,NotebookEdit,Task,ToolSearch",
+      "--append-system-prompt",
+      "ADDENDUM",
+    ]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runCell, codex branch
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("runCell codex branch", () => {
+  let scratchRoot = "";
+  afterEach(() => {
+    if (scratchRoot) rmSync(scratchRoot, { recursive: true, force: true });
+    scratchRoot = "";
+  });
+
+  const CODEX_EVENTS = [
+    { type: "thread.started", thread_id: "th-1" },
+    { type: "turn.started" },
+    {
+      type: "item.completed",
+      item: {
+        type: "mcp_tool_call",
+        server: "ratel-local",
+        tool: "invoke_tool",
+        arguments: { toolId: "github__get_issue", args: {} },
+        status: "completed",
+      },
+    },
+    { type: "item.completed", item: { type: "agent_message", text: "the issue was found" } },
+    {
+      type: "turn.completed",
+      usage: {
+        input_tokens: 1000,
+        cached_input_tokens: 900,
+        cache_write_input_tokens: 50,
+        output_tokens: 40,
+        reasoning_output_tokens: 10,
+      },
+    },
+  ]
+    .map((e) => JSON.stringify(e))
+    .join("\n");
+
+  function codexConfig(): McpAtlasRunConfig {
+    const core = buildRunConfig({
+      ...RUN_CONFIG_BASE,
+      manifest: manifest(),
+      agentModel: "gpt-5.6-luna",
+      harness: "codex",
+      codexVersion: "0.153.0",
+      codexPricing: CODEX_PRICING["gpt-5.6-luna"],
+      codexLockdown: codexLockdown(),
+    });
+    return freezeConfig(core, "run-test-codex", "2026-09-03T00:00:00.000Z");
+  }
+
+  function codexOpts(arm: McpAtlasArm) {
+    scratchRoot = mkdtempSync(join(tmpdir(), "mcpatlas-run-codex-"));
+    return {
+      item: { task: task(), arm, runIndex: 0 },
+      cfg: codexConfig(),
+      manifest: manifest(),
+      shim: { shimPath: "/fake/shim.js", sandboxUrl: "http://localhost:1984" },
+      scratchRoot,
+      keepArtifacts: true,
+      nativeBaselineMs: new Map<string, number>(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      cacheSource: "live" as const,
+    };
+  }
+
+  const passJudge = async () => ({
+    claims: [],
+    coverage: 1,
+    verdict: "pass" as const,
+    judge_model: "",
+    judge_error: null,
+    judge_wall_ms: 0,
+    judge_input_tokens: 0,
+    judge_output_tokens: 0,
+    scored_by: [],
+    screens: [],
+    claims_auto_scored: 0,
+    claims_sent_to_llm: 0,
+    auto_rate: 1,
+  });
+
+  it("ratel arm: writes config.toml + AGENTS.md, unwraps the gateway trace, computes cost", async () => {
+    const opts = codexOpts("ratel");
+    const cellDir = join(scratchRoot, "t1__ratel__scoding__r0__hcodex");
+    const r = await runCell({
+      ...opts,
+      deps: {
+        runClaude: async () => {
+          throw new Error("runClaude must not be called on a codex cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runCodex: async (o) => {
+          // The TOML twin of the mcp.json fake: recover the telemetry path
+          // from the config this cell wrote, prove the format is parseable.
+          const cfg = tomlParse(readFileSync(join(o.codexHome, "config.toml"), "utf8")) as {
+            model: string;
+            mcp_servers: Record<string, { args: string[] }>;
+          };
+          expect(cfg.model).toBe("gpt-5.6-luna");
+          const args = cfg.mcp_servers["ratel-local"].args;
+          const telPath = args[args.indexOf("--telemetry-file") + 1];
+          writeFileSync(
+            telPath,
+            [
+              JSON.stringify({
+                type: "ratel_tool_payload",
+                server: "github",
+                tool_count: 1,
+                estimated_tokens: 10,
+              }),
+              JSON.stringify({
+                type: "ratel_tool_payload",
+                server: "git",
+                tool_count: 1,
+                estimated_tokens: 10,
+              }),
+            ].join("\n"),
+          );
+          return {
+            stdout: CODEX_EVENTS,
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 2000,
+          } satisfies RunClaudeOutcome;
+        },
+        judgeClaims: passJudge,
+      },
+    });
+    expect(r.cell.error).toBeNull();
+    expect(r.cell.cell_key).toBe("t1__ratel__scoding__r0__hcodex");
+    expect(r.cell.agent_harness).toBe("codex");
+    expect(r.cell.agent_version).toBe("0.153.0");
+    expect(r.cell.finish_reason).toBe("success");
+    // The gateway invoke was unwrapped to the underlying tool.
+    expect(r.cell.observed_tool_ids).toEqual(["github/get_issue"]);
+    expect(r.cell.gateway_calls).toBe(1);
+    // Usage mapped to the Anthropic shape; cost computed from the pinned table.
+    expect(r.cell.tokens.billed_input_tokens).toBe(100);
+    expect(r.cell.tokens.cache_read_tokens).toBe(900);
+    expect(r.cell.tokens.cache_creation_tokens).toBe(50);
+    expect(r.cell.tokens.cost_source).toBe("computed");
+    expect(r.cell.tokens.reasoning_output_tokens).toBe(10);
+    expect(r.cell.tokens.dollar_cost_total).toBeCloseTo(
+      (100 * 0.2 + 900 * 0.02 + 40 * 1.2 + 50 * 0.05) / 1e6,
+      12,
+    );
+    expect(r.dollarCost).toBeCloseTo(r.cell.tokens.dollar_cost_total, 12);
+    expect(r.cell.latency.turns).toBe(1);
+    // Codex artifacts written; the claude mcp.json is not.
+    expect(readFileSync(join(cellDir, "workspace", "AGENTS.md"), "utf8")).toBe(
+      SYSTEM_PROMPT_ADDENDUM,
+    );
+    expect(existsSync(join(cellDir, "mcp.json"))).toBe(false);
+    // ratel-local's own config is still written, byte-identical format.
+    expect(existsSync(join(cellDir, "ratel.json"))).toBe(true);
+  });
+
+  it("native arm: config.toml carries every shim entry; empty-telemetry gate stays ratel-only", async () => {
+    const opts = codexOpts("native");
+    const cellDir = join(scratchRoot, "t1__native__scoding__r0__hcodex");
+    const r = await runCell({
+      ...opts,
+      deps: {
+        runClaude: async () => {
+          throw new Error("runClaude must not be called on a codex cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runCodex: async (o) => {
+          const cfg = tomlParse(readFileSync(join(o.codexHome, "config.toml"), "utf8")) as {
+            mcp_servers: Record<string, { command: string }>;
+          };
+          expect(Object.keys(cfg.mcp_servers).sort()).toEqual(["git", "github"]);
+          return {
+            stdout: CODEX_EVENTS,
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 2000,
+          } satisfies RunClaudeOutcome;
+        },
+        judgeClaims: passJudge,
+      },
+    });
+    expect(r.cell.error).toBeNull();
+    expect(r.cell.agent_harness).toBe("codex");
+    expect(existsSync(join(cellDir, "mcp.json"))).toBe(false);
+    expect(existsSync(join(cellDir, "ratel.json"))).toBe(false);
+  });
+
+  it("ratel arm with empty telemetry is still a hard cell error under codex", async () => {
+    const opts = codexOpts("ratel");
+    const r = await runCell({
+      ...opts,
+      deps: {
+        runClaude: async () => {
+          throw new Error("runClaude must not be called on a codex cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runCodex: async () =>
+          ({
+            stdout: CODEX_EVENTS,
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 2000,
+          }) satisfies RunClaudeOutcome,
+        judgeClaims: async () => {
+          throw new Error("should not be reached — telemetry check must fail first");
+        },
+      },
+    });
+    expect(r.cell.error).toContain("empty telemetry");
+    expect(r.cell.agent_harness).toBe("codex");
+    expect(r.cell.agent_version).toBe("0.153.0");
+  });
+
+  it("unparseable codex output produces an error cell naming the codex failure", async () => {
+    const opts = codexOpts("native");
+    const r = await runCell({
+      ...opts,
+      deps: {
+        runClaude: async () => {
+          throw new Error("runClaude must not be called on a codex cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runCodex: async () =>
+          ({
+            stdout: "not json at all",
+            stderr: "codex: exploded",
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            wallMs: 500,
+          }) satisfies RunClaudeOutcome,
+        judgeClaims: async () => {
+          throw new Error("should not be reached");
+        },
+      },
+    });
+    expect(r.cell.error).toContain("codex produced no parseable events");
+    expect(r.cell.finish_reason).toBe("error");
   });
 });

@@ -19,7 +19,7 @@ import {
   normalizeToolId,
   requiredEnv,
 } from "./mcpatlas-servers.js";
-import type { McpAtlasCatalogManifest, McpAtlasScope } from "./mcpatlas-types.js";
+import type { AgentHarness, McpAtlasCatalogManifest, McpAtlasScope } from "./mcpatlas-types.js";
 
 export type Severity = "blocking" | "warning";
 
@@ -35,6 +35,8 @@ export interface CheckResult {
 /** Facts the doctor resolves for `mcpatlas-run` to consume rather than re-probe. */
 export interface ResolvedFacts {
   claude_code_version: string | null;
+  /** Probed only under --harness codex; null on claude-code runs. */
+  codex_version: string | null;
   ratel_local_version: string | null;
   ratel_sdk_version: string | null;
   sandbox_url: string;
@@ -45,6 +47,8 @@ export interface ResolvedFacts {
 export interface DoctorProbes {
   /** `claude --version`, or null when the binary is absent. */
   claudeVersion(): Promise<string | null>;
+  /** `codex --version`, or null when the binary is absent. */
+  codexVersion(): Promise<string | null>;
   /** True when a Docker daemon answers. On AWS a CUSTOM image does not start one
    *  automatically even under privileged mode — this is where that surfaces. */
   dockerRunning(): Promise<boolean>;
@@ -68,6 +72,9 @@ export interface DoctorOptions {
   probes: DoctorProbes;
   /** Skip the Docker checks when the caller manages the sandbox itself. */
   requireDocker?: boolean;
+  /** Which agent CLI the campaign will drive; selects the agent probe.
+   *  Defaults to claude-code so pre-harness callers behave identically. */
+  harness?: AgentHarness;
 }
 
 /**
@@ -244,16 +251,47 @@ export async function runChecks(o: DoctorOptions): Promise<{
   );
 
   // ── agent ──────────────────────────────────────────────────────────────────
-  const claude = await p.claudeVersion();
-  results.push(
-    claude
-      ? ok("claude code", claude)
-      : fail(
-          "claude code",
-          "`claude --version` produced nothing",
-          "install the Claude Code CLI and put it on PATH",
-        ),
-  );
+  // Probe only the harness that will actually run: a codex campaign must not
+  // fail because claude is absent, and vice versa.
+  const harness = o.harness ?? "claude-code";
+  let claude: string | null = null;
+  let codex: string | null = null;
+  if (harness === "codex") {
+    codex = await p.codexVersion();
+    results.push(
+      codex
+        ? ok("codex cli", codex)
+        : fail(
+            "codex cli",
+            "`codex --version` produced nothing",
+            "install the Codex CLI (`npm i -g @openai/codex`) and put it on PATH",
+          ),
+    );
+    // The agent authenticates via OPENAI_API_KEY in a throwaway CODEX_HOME —
+    // there is no auth.json to fall back on. ANTHROPIC_API_KEY is still
+    // required separately when --judge-model is set; that check lives with
+    // the judge wiring in mcpatlas-run.
+    results.push(
+      p.env.OPENAI_API_KEY && !isPlaceholder(p.env.OPENAI_API_KEY)
+        ? ok("openai api key", "OPENAI_API_KEY set")
+        : fail(
+            "openai api key",
+            "OPENAI_API_KEY is missing or a placeholder",
+            "codex exec authenticates via OPENAI_API_KEY in the cell's throwaway CODEX_HOME",
+          ),
+    );
+  } else {
+    claude = await p.claudeVersion();
+    results.push(
+      claude
+        ? ok("claude code", claude)
+        : fail(
+            "claude code",
+            "`claude --version` produced nothing",
+            "install the Claude Code CLI and put it on PATH",
+          ),
+    );
+  }
 
   // ── docker ─────────────────────────────────────────────────────────────────
   if (o.requireDocker !== false) {
@@ -329,6 +367,7 @@ export async function runChecks(o: DoctorOptions): Promise<{
     results,
     facts: {
       claude_code_version: claude,
+      codex_version: codex,
       ratel_local_version: rl?.version ?? null,
       ratel_sdk_version: rl?.sdkVersion ?? null,
       sandbox_url: o.sandboxUrl,
@@ -447,6 +486,7 @@ export function defaultProbes(env: Record<string, string | undefined> = process.
   return {
     env,
     claudeVersion: () => sh("claude", ["--version"]),
+    codexVersion: () => sh("codex", ["--version"]),
     dockerRunning: async () =>
       (await sh("docker", ["info", "--format", "{{.ServerVersion}}"])) !== null,
     composeAvailable: async () => (await sh("docker", ["compose", "version"])) !== null,
@@ -512,6 +552,7 @@ export async function main(): Promise<void> {
   const corpus = arg("--corpus", "test-data/mcpatlas-coding.jsonl");
   const sandboxUrl = arg("--sandbox-url", process.env.MCP_SANDBOX_URL ?? "http://localhost:1984");
   const pin = arg("--ratel-local", process.env.RATEL_LOCAL_VERSION ?? "0.8.1");
+  const harness = arg("--harness", "claude-code") as AgentHarness;
   const json = process.argv.includes("--json");
   const noDocker = process.argv.includes("--no-docker");
 
@@ -535,6 +576,7 @@ export async function main(): Promise<void> {
     ratelLocalPin: pin,
     probes: defaultProbes(),
     requireDocker: !noDocker,
+    harness,
   });
 
   if (json) console.log(JSON.stringify({ results, facts }, null, 2));

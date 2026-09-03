@@ -433,3 +433,72 @@ describe("cost comparison", () => {
     expect(r.costSummary).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness dimension. The summaries are append-only and rows from both
+// harnesses share one file, so the group keys must split on agent_harness —
+// with rows written before the field existed always reading as claude-code.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("harness dimension", () => {
+  it("splits task summaries by harness; legacy field-absent cells group as claude-code", () => {
+    const legacy = cell(); // no agent_harness field, as pre-harness rows
+    const explicit = cell({ agent_harness: "claude-code" });
+    const codex = cell({
+      agent_harness: "codex",
+      cell_key: "t1__native__codex",
+      model: "claude-haiku-4-5", // SAME model string — only harness separates
+      task_pass: false,
+    });
+    const rows = summarizeMcpAtlas(input({ cells: [legacy, explicit, codex] })).taskSummary.filter(
+      (s) => s.workload === "all",
+    );
+    expect(rows).toHaveLength(2);
+    const claudeRow = rows.find((s) => s.agent_harness === "claude-code");
+    const codexRow = rows.find((s) => s.agent_harness === "codex");
+    // Legacy and explicit claude cells merged into ONE group of 2.
+    expect(claudeRow?.tasks).toBe(2);
+    expect(claudeRow?.task_pass_rate).toBe(1);
+    expect(codexRow?.tasks).toBe(1);
+    expect(codexRow?.task_pass_rate).toBe(0);
+  });
+
+  it("splits the paired cost comparison by harness", () => {
+    const mk = (arm: "native" | "ratel", harness?: "codex") =>
+      cell({
+        arm,
+        cell_key: `t1__${arm}__${harness ?? "cc"}`,
+        ...(harness ? { agent_harness: harness } : {}),
+      });
+    const r = summarizeMcpAtlas(
+      input({ cells: [mk("native"), mk("ratel"), mk("native", "codex"), mk("ratel", "codex")] }),
+    );
+    const all = r.costSummary.filter((s) => s.workload === "all");
+    expect(all).toHaveLength(2);
+    expect(all.map((s) => s.agent_harness).sort()).toEqual(["claude-code", "codex"]);
+    for (const s of all) expect(s.tasks_paired).toBe(1);
+  });
+
+  it("stamps agent_harness and agent_version on failure summaries and splits by harness", () => {
+    const claudeCell = cell({ cell_key: "t1__native__cc" });
+    const codexCell = cell({
+      agent_harness: "codex",
+      agent_version: "0.153.0",
+      cell_key: "t1__native__cx",
+    });
+    const r = summarizeMcpAtlas(
+      input({
+        cells: [claudeCell, codexCell],
+        toolCalls: [
+          toolCall({ cell_key: "t1__native__cc" }),
+          toolCall({ cell_key: "t1__native__cx", agent_harness: "codex" }),
+        ],
+      }),
+    );
+    const all = r.failureSummary.filter((s) => s.workload === "all");
+    expect(all).toHaveLength(2);
+    const codexRow = all.find((s) => s.agent_harness === "codex");
+    expect(codexRow?.agent_version).toBe("0.153.0");
+    expect(codexRow?.tool_calls_total).toBe(1);
+  });
+});

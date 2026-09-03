@@ -48,6 +48,51 @@ export type McpAtlasAggregation = "first" | "best" | "union";
 export type ProgrammaticVerdict = "pass" | "fail" | "n/a";
 export type JudgeVerdict = "pass" | "fail" | "partial" | "n/a";
 
+/** Which agent CLI drives the cell. A harness is an EXPERIMENTAL DIMENSION:
+ *  cells from different harnesses never share a cache entry, a summary group,
+ *  or a report bucket. Rows written before this field existed are always
+ *  claude-code — readers default a missing value accordingly. */
+export type AgentHarness = "claude-code" | "codex";
+
+/** $/Mtok for a Codex model. Codex CLI reports tokens but no cost, while
+ *  `--dollar-global` budget enforcement needs a per-cell dollar figure — so
+ *  cost is computed from this table and the table is frozen into the run
+ *  config (hence part of config_hash: a price change is a different
+ *  experiment). Cache WRITES are not billed separately by OpenAI, unlike
+ *  Anthropic, so there is no cache-creation rate here. */
+export interface CodexPricing {
+  model: string;
+  input_usd_per_mtok: number;
+  cached_input_usd_per_mtok: number;
+  output_usd_per_mtok: number;
+  /** The gpt-5.6 family bills cache WRITES at 1.25x the input rate. Write
+   *  tokens are already inside input_tokens (billed at 1x via the uncached
+   *  bucket), so this carries only the 0.25x premium, charged per
+   *  cache-write token. Absent = no surcharge (codex-branded models). */
+  cache_write_surcharge_usd_per_mtok?: number;
+}
+
+/** The Codex counterpart of `disallowed_tools`/`permission_mode`: how the
+ *  built-in surface was locked down so the agent's only reachable tools are
+ *  the MCP catalog. Recorded (and hashed) because the lockdown is weaker than
+ *  Claude Code's `--disallowedTools` — `apply_patch` cannot be disabled, only
+ *  neutered by the read-only sandbox — and that asymmetry must travel with
+ *  the data. */
+export interface CodexLockdown {
+  sandbox_mode: "read-only";
+  shell_tool: false;
+  web_search: "disabled";
+  view_image: false;
+  error_on_tool_collisions: true;
+  /** Codex has no --max-turns equivalent; only the per-cell wall-clock
+   *  timeout bounds a runaway. */
+  max_turns_enforced: false;
+  /** SYSTEM_PROMPT_ADDENDUM is delivered via AGENTS.md in the workspace, not
+   *  a system-prompt flag (Codex has no --append-system-prompt). */
+  addendum_delivery: "agents_md";
+  tool_timeout_sec: number;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Corpus
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +172,12 @@ export interface McpAtlasRunConfig {
   bench_git_sha: string;
 
   // Agent under test
-  agent_harness: "claude-code";
+  agent_harness: AgentHarness;
+  /** Present ONLY on codex runs — conditionally spread, never null-filled, so
+   *  the config_hash of a claude-code run is unchanged by their existence. */
+  codex_version?: string;
+  codex_pricing?: CodexPricing;
+  codex_lockdown?: CodexLockdown;
   agent_model: string;
   backend: string | null;
   max_turns: number;
@@ -244,6 +294,16 @@ export interface McpAtlasTokenBreakdown {
   dollar_cost_total: number;
   /** Explains why occupancy savings outrun dollar savings. */
   cache_hit_ratio: number;
+  /** How dollar_cost_total was obtained. Absent on claude-code rows (Claude
+   *  Code's own accounting is authoritative = "reported"); "computed" on codex
+   *  rows, where the CLI reports no cost and it comes from the frozen
+   *  codex_pricing table. */
+  cost_source?: "reported" | "computed";
+  /** Codex-only: reasoning tokens as Codex reports them, carried separately
+   *  rather than folded into output_tokens — OpenAI's output figure may
+   *  already include them, and folding would double-count. Absent, not 0, on
+   *  claude-code rows (unmeasured is null/absent, never 0). */
+  reasoning_output_tokens?: number;
 }
 
 export interface McpAtlasLatencyBreakdown {
@@ -327,6 +387,9 @@ export interface McpAtlasCell {
   ratel_local_version: string;
   ratel_sdk_version: string | null;
   agent_version: string;
+  /** Optional because rows predating the field exist; a missing value always
+   *  means claude-code. New rows carry it explicitly on both harnesses. */
+  agent_harness?: AgentHarness;
   model: string;
 
   // Ground truth, carried so rows are self-describing
@@ -391,6 +454,8 @@ export interface McpAtlasToolCallRow {
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
   model: string;
+  /** Missing on legacy rows = claude-code. */
+  agent_harness?: AgentHarness;
   ratel_version_label: string;
   ratel_local_version: string;
   ratel_sdk_version: string | null;
@@ -449,6 +514,8 @@ export interface McpAtlasSearchEventRow {
   arm: "ratel";
   catalog_scope: McpAtlasScope;
   model: string;
+  /** Missing on legacy rows = claude-code. */
+  agent_harness?: AgentHarness;
   ratel_version_label: string;
   ratel_local_version: string;
   ratel_sdk_version: string | null;
@@ -478,6 +545,8 @@ export interface McpAtlasRetrievalRow {
   run_id: string;
   generated_at: string;
   model: string;
+  /** Missing on legacy rows = claude-code. */
+  agent_harness?: AgentHarness;
   ratel_version_label: string;
   ratel_local_version: string;
   retriever_method: string;

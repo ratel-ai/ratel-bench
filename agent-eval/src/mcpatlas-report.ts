@@ -35,6 +35,7 @@ export const GROUP_KEYS = new Set([
   "ratel_version_label",
   "ratel_local_version",
   "agent_version",
+  "agent_harness",
   "model",
   "arm",
   "catalog_scope",
@@ -61,6 +62,22 @@ function bucketLabel(r: {
 }): string {
   const size = r.catalog_tools ?? 0;
   return size > 0 ? `${r.catalog_scope}@${size}/${r.workload}` : `${r.catalog_scope}/${r.workload}`;
+}
+
+/**
+ * The report's first nesting level: bare model for claude-code (existing
+ * reports render byte-identically), `<harness>/<model>` for any other harness.
+ *
+ * Doing it as a composite label rather than a fourth nesting level serves two
+ * needs at once: `nest` and its `Nested` type stay three-deep, and — because
+ * the label participates in `latestGroups`' key — a codex run can never
+ * silently replace a claude row as the "newest" entry of the same group,
+ * which is the exact hazard bucketLabel's docstring describes for
+ * catalog_tools.
+ */
+function modelLabel(r: { model: string; agent_harness?: string }): string {
+  const h = r.agent_harness ?? "claude-code";
+  return h === "claude-code" ? r.model : `${h}/${r.model}`;
 }
 
 export function metricFields<T extends object>(row: T): Record<string, unknown> {
@@ -328,10 +345,16 @@ export function buildReport(input: ReportInput): McpAtlasReport {
     for (const [, group] of latestGroups(
       rt,
       (r) =>
-        `${r.catalog_scope}::${r.catalog_tools ?? 0}::${r.retriever_method}::${r.workload}::${r.aggregation}::${r.k}`,
+        `${r.catalog_scope}::${r.catalog_tools ?? 0}::${r.retriever_method}::${r.workload}::${r.aggregation}::${r.k}::${r.agent_harness ?? "claude-code"}`,
     )) {
       for (const r of group) {
-        const bucket = bucketLabel(r);
+        // Retrieval buckets have no model level to compose harness into, so
+        // non-claude rows get a bucket prefix instead; claude buckets keep
+        // their existing names.
+        const bucket =
+          (r.agent_harness ?? "claude-code") === "claude-code"
+            ? bucketLabel(r)
+            : `${r.agent_harness}:${bucketLabel(r)}`;
         const entry = (retriever_evaluation[bucket] ??= { timestamp: r.timestamp, metrics: [] });
         entry.metrics.push(metricFields(r));
         if (r.timestamp > entry.timestamp) entry.timestamp = r.timestamp;
@@ -352,19 +375,19 @@ export function buildReport(input: ReportInput): McpAtlasReport {
       retriever_evaluation,
       task_completion: nest(
         t,
-        (r) => r.model,
+        (r) => modelLabel(r),
         (r) => r.arm,
         (r) => bucketLabel(r),
       ),
       cost_comparison: nest(
         c,
-        (r) => r.model,
+        (r) => modelLabel(r),
         (r) => r.arm,
         (r) => bucketLabel(r),
       ),
       failures: nest(
         f,
-        (r) => r.model,
+        (r) => modelLabel(r),
         (r) => r.arm,
         (r) => bucketLabel(r),
       ),

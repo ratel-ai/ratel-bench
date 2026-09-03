@@ -10,6 +10,7 @@
 import { toolFailureRate } from "./mcpatlas-build.js";
 import { mean, median, percentile, proportionDelta, wilson } from "./mcpatlas-stats.js";
 import type {
+  AgentHarness,
   McpAtlasAggregation,
   McpAtlasArm,
   McpAtlasCell,
@@ -31,6 +32,11 @@ export interface McpAtlasTaskSummaryRow {
   ratel_version_label: string;
   ratel_local_version: string;
   agent_version: string;
+  /** A GROUP KEY like catalog_tools: the summaries are append-only and rows
+   *  from both harnesses coexist in one file, so without this a codex run
+   *  would merge into (and in report.json silently replace) claude rows.
+   *  Rows written before the field existed are claude-code. */
+  agent_harness: AgentHarness;
   model: string;
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
@@ -78,6 +84,10 @@ export interface McpAtlasRetrievalSummaryRow {
   source: "retriever_evaluation";
   ratel_version_label: string;
   ratel_local_version: string;
+  /** See McpAtlasTaskSummaryRow.agent_harness. Retrieval is measured from
+   *  gateway telemetry, but the AGENT triggered the searches — a codex agent
+   *  searching differently is a different measurement. */
+  agent_harness: AgentHarness;
   retriever_method: string;
   catalog_scope: McpAtlasScope;
   /** See McpAtlasTaskSummaryRow.catalog_tools. */
@@ -113,6 +123,9 @@ export interface McpAtlasFailureSummaryRow {
   source: "failures";
   ratel_version_label: string;
   ratel_local_version: string;
+  agent_version: string;
+  /** See McpAtlasTaskSummaryRow.agent_harness. */
+  agent_harness: AgentHarness;
   model: string;
   arm: McpAtlasArm;
   catalog_scope: McpAtlasScope;
@@ -138,6 +151,11 @@ export interface McpAtlasCostSummaryRow {
   source: "cost_comparison";
   ratel_version_label: string;
   ratel_local_version: string;
+  agent_version: string;
+  /** See McpAtlasTaskSummaryRow.agent_harness. Cost especially: codex costs
+   *  are computed from a pricing table, claude costs are agent-reported —
+   *  they must never share a comparison bucket. */
+  agent_harness: AgentHarness;
   model: string;
   arm: "native_vs_ratel";
   catalog_scope: McpAtlasScope;
@@ -219,6 +237,11 @@ function groupBy<T>(xs: readonly T[], key: (x: T) => string): Map<string, T[]> {
   return m;
 }
 
+/** Rows written before the harness dimension existed are always claude-code. */
+function harnessOf(row: { agent_harness?: AgentHarness }): AgentHarness {
+  return row.agent_harness ?? "claude-code";
+}
+
 export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   const wl = (taskId: string): McpAtlasWorkload => input.workloads.get(taskId) ?? "analysis";
   // Retrieval rows carry no catalog_tools of their own; take it from the cell
@@ -234,8 +257,10 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   );
   for (const [, rows] of groupBy(
     expanded,
+    // Harness appended at the END of every group key in this file, so the
+    // positional destructure in the failures section stays valid.
     (r) =>
-      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.arm}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}`,
+      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.arm}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}::${harnessOf(r.cell)}`,
   )) {
     const cells = rows.map((r) => r.cell);
     const first = cells[0];
@@ -252,6 +277,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       ratel_version_label: first.ratel_version_label,
       ratel_local_version: first.ratel_local_version,
       agent_version: first.agent_version,
+      agent_harness: harnessOf(first),
       model: first.model,
       arm: first.arm,
       catalog_scope: first.catalog_scope,
@@ -301,7 +327,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   for (const [, rows] of groupBy(
     rExpanded,
     (r) =>
-      `${r.row.ratel_version_label}::${r.row.catalog_scope}::${catalogToolsOf(r.row.cell_key)}::${r.bucket}::${r.row.aggregation}::${r.row.k}`,
+      `${r.row.ratel_version_label}::${r.row.catalog_scope}::${catalogToolsOf(r.row.cell_key)}::${r.bucket}::${r.row.aggregation}::${r.row.k}::${harnessOf(r.row)}`,
   )) {
     const all = rows.map((r) => r.row);
     const first = all[0];
@@ -317,6 +343,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       source: "retriever_evaluation",
       ratel_version_label: first.ratel_version_label,
       ratel_local_version: first.ratel_local_version,
+      agent_harness: harnessOf(first),
       retriever_method: first.retriever_method,
       catalog_scope: first.catalog_scope,
       catalog_tools: catalogToolsOf(first.cell_key),
@@ -360,7 +387,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   );
   for (const [key, rows] of groupBy(tcExpanded, (r) => {
     const c = cellByKey.get(r.row.cell_key);
-    return `${c?.ratel_version_label}::${c?.model}::${r.row.arm}::${r.row.catalog_scope}::${c?.catalog_tools ?? 0}::${r.bucket}`;
+    return `${c?.ratel_version_label}::${c?.model}::${r.row.arm}::${r.row.catalog_scope}::${c?.catalog_tools ?? 0}::${r.bucket}::${c ? harnessOf(c) : harnessOf(r.row)}`;
   })) {
     const calls = rows.map((r) => r.row);
     const cells = [...new Set(calls.map((c) => c.cell_key))]
@@ -395,6 +422,8 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       source: "failures",
       ratel_version_label,
       ratel_local_version: cells[0]?.ratel_local_version ?? "",
+      agent_version: cells[0]?.agent_version ?? "",
+      agent_harness: cells[0] ? harnessOf(cells[0]) : harnessOf(rows[0].row),
       model,
       arm: arm as McpAtlasArm,
       catalog_scope: catalog_scope as McpAtlasScope,
@@ -423,7 +452,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
   for (const [, rows] of groupBy(
     expanded,
     (r) =>
-      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}`,
+      `${r.cell.ratel_version_label}::${r.cell.model}::${r.cell.catalog_scope}::${r.cell.catalog_tools ?? 0}::${r.bucket}::${harnessOf(r.cell)}`,
   )) {
     const byArm = groupBy(rows, (r) => r.cell.arm);
     const native = (byArm.get("native") ?? []).map((r) => r.cell);
@@ -457,6 +486,8 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       source: "cost_comparison",
       ratel_version_label: first.ratel_version_label,
       ratel_local_version: r[0].ratel_local_version,
+      agent_version: first.agent_version,
+      agent_harness: harnessOf(first),
       model: first.model,
       arm: "native_vs_ratel",
       catalog_scope: first.catalog_scope,

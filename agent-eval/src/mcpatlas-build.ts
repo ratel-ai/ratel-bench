@@ -17,6 +17,7 @@ import {
   promptTokens,
   type RawToolUse,
   toolUsesFromTranscript,
+  type TurnUsage,
   turnUsagesFromTranscript,
 } from "./mcpatlas-agent.js";
 import {
@@ -34,6 +35,7 @@ import {
 } from "./mcpatlas-gateway.js";
 import { GATEWAY_TOOLS, normalizeToolId, serverOf } from "./mcpatlas-servers.js";
 import type {
+  AgentHarness,
   CanonicalToolId,
   ClaimRubricResult,
   McpAtlasAggregation,
@@ -196,6 +198,20 @@ export function selectionMetrics(
 // Rows
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A pre-parsed trace, injected by a harness whose trace does not live in a
+ * Claude-Code-shaped transcript. When absent, every consumer falls back to
+ * parsing `transcriptText` with the claude parsers — the claude path is
+ * byte-identical with or without this type existing.
+ */
+export interface ParsedTranscript {
+  uses: RawToolUse[];
+  turnUsages: TurnUsage[];
+  compactionEvents: number;
+  /** Codex-only; see McpAtlasTokenBreakdown.reasoning_output_tokens. */
+  reasoningOutputTokens?: number;
+}
+
 export interface CellContext {
   run_id: string;
   config_hash: string;
@@ -213,6 +229,9 @@ export interface CellContext {
   ratel_version_label: string;
   ratel_local_version: string;
   ratel_sdk_version: string | null;
+  /** Stamped on every row this ctx produces. Absent (older callers/fixtures)
+   *  means claude-code — the same default every reader applies. */
+  agent_harness?: AgentHarness;
 }
 
 export function buildToolCallRows(
@@ -237,6 +256,7 @@ export function buildToolCallRows(
     arm: ctx.arm,
     catalog_scope: ctx.catalog_scope,
     model: ctx.model,
+    agent_harness: ctx.agent_harness ?? "claude-code",
     ratel_version_label: ctx.ratel_version_label,
     ratel_local_version: ctx.ratel_local_version,
     ratel_sdk_version: ctx.ratel_sdk_version,
@@ -316,6 +336,7 @@ export function buildSearchEventRows(
       arm: "ratel",
       catalog_scope: ctx.catalog_scope,
       model: ctx.model,
+      agent_harness: ctx.agent_harness ?? "claude-code",
       ratel_version_label: ctx.ratel_version_label,
       ratel_local_version: ctx.ratel_local_version,
       ratel_sdk_version: ctx.ratel_sdk_version,
@@ -385,6 +406,7 @@ export function buildRetrievalRows(
         run_id: ctx.run_id,
         generated_at: ctx.generated_at,
         model: ctx.model,
+        agent_harness: ctx.agent_harness ?? "claude-code",
         ratel_version_label: ratelVersionLabel,
         ratel_local_version: ratelLocalVersion,
         retriever_method: retrieverMethod,
@@ -442,8 +464,15 @@ export function buildTokenBreakdown(input: {
   perToolTokens?: Map<string, number>;
   /** Needed to canonicalise telemetry tool ids before the map lookup. */
   knownServers?: readonly string[];
+  /** Harness-supplied trace, when the trace does not live in a claude
+   *  transcript. Absent on the claude path — the fallbacks below then run
+   *  exactly the code that ran before this field existed. */
+  parsed?: Pick<ParsedTranscript, "turnUsages" | "compactionEvents" | "reasoningOutputTokens">;
+  /** Spread into the row only when provided; see the field docs on
+   *  McpAtlasTokenBreakdown. */
+  costSource?: "reported" | "computed";
 }): McpAtlasTokenBreakdown {
-  const turns = turnUsagesFromTranscript(input.transcriptText);
+  const turns = input.parsed?.turnUsages ?? turnUsagesFromTranscript(input.transcriptText);
   const prompts = turns.map(promptTokens);
   const first = prompts[0] ?? 0;
   const u = input.result.usage;
@@ -481,7 +510,7 @@ export function buildTokenBreakdown(input: {
     system_prompt_tokens: Math.max(0, first - schema),
     first_turn_context_tokens: first,
     peak_context_tokens: prompts.length ? Math.max(...prompts) : 0,
-    compaction_events: countCompactions(input.transcriptText),
+    compaction_events: input.parsed?.compactionEvents ?? countCompactions(input.transcriptText),
     retrieval_overhead_tokens: retrievalOverhead,
     tool_result_tokens: 0,
     schema_share_of_prefix: first > 0 ? schema / first : 0,
@@ -495,6 +524,12 @@ export function buildTokenBreakdown(input: {
     // that the local pricing table does not.
     dollar_cost_total: input.result.total_cost_usd ?? 0,
     cache_hit_ratio: cacheDenom > 0 ? u.cache_read_input_tokens / cacheDenom : 0,
+    // Conditionally spread so a claude-path row is byte-identical to before
+    // these fields existed.
+    ...(input.costSource ? { cost_source: input.costSource } : {}),
+    ...(input.parsed?.reasoningOutputTokens !== undefined
+      ? { reasoning_output_tokens: input.parsed.reasoningOutputTokens }
+      : {}),
   };
 }
 
@@ -602,6 +637,10 @@ export interface AssembleCellInput {
   agentVersion: string;
   runIndex: number;
   cacheSource: "live" | "reused";
+  /** Harness-supplied trace; absent on the claude path (the transcript is
+   *  then parsed exactly as before — see the equivalence test). */
+  parsed?: ParsedTranscript;
+  costSource?: "reported" | "computed";
 }
 
 /**
@@ -619,7 +658,7 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
   const knownServers = [
     ...new Set(ctx.catalog_tool_ids.map(serverOf).filter((s): s is string => s !== null)),
   ];
-  const uses = parseUses(input.transcriptText);
+  const uses = input.parsed?.uses ?? parseUses(input.transcriptText);
   const { calls, offCatalog, gatewayCalls, nonGatewayCalls, searchCalls } = effectiveCalls(
     uses,
     knownServers,
@@ -640,6 +679,8 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     gatewaySchemaTokens: input.gatewaySchemaTokens,
     perToolTokens: input.perToolTokens,
     knownServers,
+    parsed: input.parsed,
+    costSource: input.costSource,
   });
   const latency = buildLatencyBreakdown({
     result: input.result,
@@ -674,6 +715,7 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     ratel_local_version: ctx.ratel_local_version,
     ratel_sdk_version: ctx.ratel_sdk_version,
     agent_version: input.agentVersion,
+    agent_harness: ctx.agent_harness ?? "claude-code",
     model: ctx.model,
 
     enabled_tool_ids: ctx.task.enabled_tool_ids,

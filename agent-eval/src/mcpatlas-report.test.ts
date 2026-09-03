@@ -24,6 +24,7 @@ function task(over: Partial<McpAtlasTaskSummaryRow> = {}): McpAtlasTaskSummaryRo
     ratel_version_label: "0.8.1",
     ratel_local_version: "0.8.1",
     agent_version: "cc-1",
+    agent_harness: "claude-code",
     model: "claude-haiku-4-5",
     arm: "native",
     catalog_scope: "coding",
@@ -69,6 +70,7 @@ function retrieval(over: Partial<McpAtlasRetrievalSummaryRow> = {}): McpAtlasRet
     source: "retriever_evaluation",
     ratel_version_label: "0.8.1",
     ratel_local_version: "0.8.1",
+    agent_harness: "claude-code",
     retriever_method: "bm25",
     catalog_scope: "coding",
     catalog_tools: 0,
@@ -101,6 +103,8 @@ function cost(over: Partial<McpAtlasCostSummaryRow> = {}): McpAtlasCostSummaryRo
     source: "cost_comparison",
     ratel_version_label: "0.8.1",
     ratel_local_version: "0.8.1",
+    agent_version: "cc-1",
+    agent_harness: "claude-code",
     model: "claude-haiku-4-5",
     arm: "native_vs_ratel",
     catalog_scope: "coding",
@@ -143,6 +147,8 @@ function failure(over: Partial<McpAtlasFailureSummaryRow> = {}): McpAtlasFailure
     source: "failures",
     ratel_version_label: "0.8.1",
     ratel_local_version: "0.8.1",
+    agent_version: "cc-1",
+    agent_harness: "claude-code",
     model: "claude-haiku-4-5",
     arm: "native",
     catalog_scope: "coding",
@@ -395,5 +401,77 @@ describe("a catalog-size sweep survives into one report", () => {
     expect(
       (metrics as { retriever_method?: string }[]).map((m) => m.retriever_method).sort(),
     ).toEqual(["bm25", "semantic"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness dimension. The hazard mirrors catalog_tools: without harness in the
+// keys, latestGroups keeps only the newest row and a codex run would silently
+// replace the claude section of report.json.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("harness dimension", () => {
+  const base: ReportInput = {
+    generatedAt: TS,
+    task: [task()],
+    retrieval: [retrieval()],
+    failures: [failure()],
+    cost: [cost()],
+  };
+
+  it("agent_harness is a group key, not a metric", () => {
+    expect(GROUP_KEYS.has("agent_harness")).toBe(true);
+    expect("agent_harness" in metricFields(task())).toBe(false);
+  });
+
+  it("a NEWER codex run lands under codex/<model> without evicting the claude section", () => {
+    const withCodex = buildReport({
+      ...base,
+      task: [task(), task({ agent_harness: "codex", agent_version: "0.153.0", timestamp: LATER })],
+    });
+    const tc = withCodex.ratel_local_versions["0.8.1"].task_completion;
+    expect(Object.keys(tc).sort()).toEqual(["claude-haiku-4-5", "codex/claude-haiku-4-5"]);
+    // The claude section deep-equals a claude-only report — codex is additive.
+    const claudeOnly = buildReport(base);
+    expect(tc["claude-haiku-4-5"]).toEqual(
+      claudeOnly.ratel_local_versions["0.8.1"].task_completion["claude-haiku-4-5"],
+    );
+  });
+
+  it("legacy rows with no agent_harness field render exactly as claude-code rows", () => {
+    const legacyTask = { ...task() } as Record<string, unknown>;
+    delete legacyTask.agent_harness;
+    const fromLegacy = buildReport({
+      ...base,
+      task: [legacyTask as unknown as McpAtlasTaskSummaryRow],
+    });
+    expect(Object.keys(fromLegacy.ratel_local_versions["0.8.1"].task_completion)).toEqual([
+      "claude-haiku-4-5",
+    ]);
+  });
+
+  it("retrieval buckets get a harness prefix for codex only", () => {
+    const r = buildReport({
+      ...base,
+      retrieval: [retrieval(), retrieval({ agent_harness: "codex", timestamp: LATER })],
+    });
+    const buckets = Object.keys(r.ratel_local_versions["0.8.1"].retriever_evaluation).sort();
+    expect(buckets).toEqual(["codex:coding/all", "coding/all"]);
+  });
+
+  it("cost and failure sections nest codex under the composite label too", () => {
+    const r = buildReport({
+      ...base,
+      cost: [cost(), cost({ agent_harness: "codex", timestamp: LATER })],
+      failures: [failure(), failure({ agent_harness: "codex", timestamp: LATER })],
+    });
+    expect(Object.keys(r.ratel_local_versions["0.8.1"].cost_comparison).sort()).toEqual([
+      "claude-haiku-4-5",
+      "codex/claude-haiku-4-5",
+    ]);
+    expect(Object.keys(r.ratel_local_versions["0.8.1"].failures).sort()).toEqual([
+      "claude-haiku-4-5",
+      "codex/claude-haiku-4-5",
+    ]);
   });
 });

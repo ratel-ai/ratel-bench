@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { LanguageModel } from "ai";
 import type { AtlasTool } from "./atlas-mcp-shim.js";
 import {
+  type ClaudeResult,
   DISALLOWED_TOOLS,
   effectiveCalls,
   parseClaudeResult,
@@ -37,8 +38,22 @@ import {
   buildSearchEventRows,
   buildToolCallRows,
   type CellContext,
+  type ParsedTranscript,
   parseUses,
 } from "./mcpatlas-build.js";
+import {
+  buildCodexArgs,
+  buildCodexConfigToml,
+  CODEX_PRICING,
+  CODEX_TOOL_TIMEOUT_SEC,
+  codexLockdown,
+  codexResultFromEvents,
+  codexRolloutPath,
+  countCodexCompactions,
+  parseCodexEvents,
+  type RunCodexOpts,
+  runCodex as realRunCodex,
+} from "./mcpatlas-codex.js";
 import {
   invokeSpans,
   parseTelemetry,
@@ -71,6 +86,9 @@ import {
   subsetManifest,
 } from "./mcpatlas-servers.js";
 import type {
+  AgentHarness,
+  CodexLockdown,
+  CodexPricing,
   McpAtlasArm,
   McpAtlasCatalogManifest,
   McpAtlasCell,
@@ -172,9 +190,17 @@ export interface BuildRunConfigInput {
   atlasImageDigests: Record<string, string>;
   dollarCapGlobal: number | null;
   declaredLimitations: string[];
+  /** Optional with a claude-code default so every pre-harness caller builds
+   *  the exact same object it always did — the config-hash golden test pins
+   *  this. */
+  harness?: AgentHarness;
+  codexVersion?: string | null;
+  codexPricing?: CodexPricing;
+  codexLockdown?: CodexLockdown;
 }
 
 export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
+  const harness = input.harness ?? "claude-code";
   return {
     run_type: "mcpatlas_config",
     ratel_version_label: input.ratelVersionLabel,
@@ -182,7 +208,16 @@ export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
     ratel_sdk_version: input.ratelSdkVersion,
     claude_code_version: input.claudeCodeVersion,
     bench_git_sha: input.benchGitSha,
-    agent_harness: "claude-code",
+    agent_harness: harness,
+    // Conditionally spread, never null-filled: their mere presence on a
+    // claude config would change every claude config_hash.
+    ...(harness === "codex"
+      ? {
+          codex_version: input.codexVersion ?? "unknown",
+          ...(input.codexPricing ? { codex_pricing: input.codexPricing } : {}),
+          ...(input.codexLockdown ? { codex_lockdown: input.codexLockdown } : {}),
+        }
+      : {}),
     agent_model: input.agentModel,
     backend: null,
     max_turns: input.maxTurns,
@@ -274,6 +309,9 @@ export interface NativeCacheKeyInput {
   promptHash: string;
   taskListHash: string;
   datasetRevision: string;
+  /** Defaulted to claude-code so pre-harness callers and legacy cells key
+   *  identically to before. */
+  harness?: AgentHarness;
 }
 
 /**
@@ -290,6 +328,12 @@ export interface NativeCacheKeyInput {
  * native-at-127: the gateway would appear to save far more context than it
  * does, with no error raised and a publishable-looking number. (ratel is
  * unaffected — it is never cached.)
+ *
+ * `harness` is an explicit component for the same reason as `catalogTools`:
+ * a codex cell and a claude cell at the same (task, model, scope) are
+ * different measurements. Relying on `agentVersion` to differ is not enough —
+ * both harnesses report "unknown" under --skip-doctor and would silently
+ * cross-serve.
  */
 export function nativeCacheKey(input: NativeCacheKeyInput): string {
   return [
@@ -303,6 +347,7 @@ export function nativeCacheKey(input: NativeCacheKeyInput): string {
     input.promptHash,
     input.taskListHash,
     input.datasetRevision,
+    input.harness ?? "claude-code",
   ].join("::");
 }
 
@@ -340,6 +385,8 @@ export function readNativeCacheIndex(
       catalogTools: c.catalog_tools ?? 0,
       runIndex: c.run_index,
       agentVersion: c.agent_version,
+      // Same legacy pattern: rows predating the field are claude-code.
+      harness: c.agent_harness ?? "claude-code",
       promptHash: context.promptHash,
       taskListHash: context.taskListHash,
       datasetRevision: context.datasetRevision,
@@ -536,6 +583,10 @@ export function teardownSandbox(handle: SandboxHandle, containerName: string, ke
 
 export interface RunCellDeps {
   runClaude: (o: RunClaudeOpts) => Promise<RunClaudeOutcome>;
+  /** The codex twin of runClaude, selected by cfg.agent_harness. REQUIRED for
+   *  the same reason fetchSandboxTools is: a unit test must supply a fake and
+   *  can never spawn a real process by omission. */
+  runCodex: (o: RunCodexOpts) => Promise<RunClaudeOutcome>;
   judgeClaims: typeof judgeClaims;
   /** Live catalog probe for the per-cell integrity check. REQUIRED (not
    *  defaulted per-field) so a unit test must supply a fake and can never make
@@ -545,6 +596,7 @@ export interface RunCellDeps {
 
 export const REAL_RUN_CELL_DEPS: RunCellDeps = {
   runClaude: realRunClaude,
+  runCodex: realRunCodex,
   judgeClaims,
   fetchSandboxTools,
 };
@@ -573,8 +625,17 @@ export interface RunCellResult {
   dollarCost: number;
 }
 
-function cellKeyFor(item: QueueItem, scope: McpAtlasScope): string {
-  return `${item.task.task_id}__${item.arm}__s${scope}__r${item.runIndex}`;
+/** Scratch-dir and row identity for one cell. Harness enters only as a
+ *  codex-only suffix: claude cell keys are persisted run output and must stay
+ *  byte-identical, while two harnesses at the same (task, arm, scope, run)
+ *  must not share a scratch dir (`makeScratch` rmSyncs it). */
+export function cellKeyFor(
+  item: QueueItem,
+  scope: McpAtlasScope,
+  harness: AgentHarness = "claude-code",
+): string {
+  const base = `${item.task.task_id}__${item.arm}__s${scope}__r${item.runIndex}`;
+  return harness === "codex" ? `${base}__hcodex` : base;
 }
 
 /** `process.env`, stripped of undefined entries. Passed to the spawned `claude`
@@ -884,9 +945,11 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
           .flatMap((s) => s.tool_ids)
           .reduce((n, id) => n + (o.perToolTokens?.get(id) ?? 0), 0)
       : o.nativeCatalogTokens;
-  const cellKey = cellKeyFor(item, cfg.catalogs[0].scope);
+  const cellKey = cellKeyFor(item, cfg.catalogs[0].scope, cfg.agent_harness);
   const scratch = makeScratch(cellKey, o.scratchRoot);
   const knownServers = manifest.servers.map((s) => s.server);
+  const isCodex = cfg.agent_harness === "codex";
+  const codexHomeDir = join(scratch.homeDir, ".codex");
 
   try {
     // Catalog integrity, per cell, BEFORE any spend. The doctor asserts this
@@ -915,34 +978,81 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       );
     }
 
-    if (item.arm === "native") {
-      writeFileSync(
-        scratch.mcpConfigPath,
-        JSON.stringify(buildNativeMcpConfig(manifest, o.shim, subsetting)),
-      );
+    if (!isCodex) {
+      if (item.arm === "native") {
+        writeFileSync(
+          scratch.mcpConfigPath,
+          JSON.stringify(buildNativeMcpConfig(manifest, o.shim, subsetting)),
+        );
+      } else {
+        writeFileSync(
+          scratch.serveConfigPath,
+          JSON.stringify(buildRatelServeConfig(manifest, o.shim, cfg.retriever_method, subsetting)),
+        );
+        writeFileSync(
+          scratch.mcpConfigPath,
+          JSON.stringify(
+            buildRatelMcpConfig({
+              ratelLocalPin: cfg.ratel_local_version,
+              serveConfigPath: scratch.serveConfigPath,
+              telemetryPath: scratch.telemetryPath,
+              // Must go in mcp.json, not just the parent process env: Claude Code
+              // does not propagate its own environment to spawned stdio MCP
+              // servers, so HF_HOME set on `claude` never reached ratel-local and
+              // the embedding cache stayed cold (verified: a full semantic k=3 run
+              // still produced zero searches with HF_HOME set only on the parent).
+              // PATH is included because a server-level `env` may replace rather
+              // than merge, and npx needs it.
+              env: { ...embeddingCacheEnv(), PATH: process.env.PATH ?? "" },
+            }),
+          ),
+        );
+      }
     } else {
+      // Codex takes its MCP config from $CODEX_HOME/config.toml rather than a
+      // per-invocation flag. The entries are rendered from the SAME builders
+      // as the claude mcp.json — including ratel.json, which is ratel-local's
+      // own config and must be byte-identical across harnesses — so the arms
+      // differ across harnesses only in host-config serialization.
+      let mcpServers: ReturnType<typeof buildNativeMcpConfig>["mcpServers"];
+      if (item.arm === "native") {
+        mcpServers = buildNativeMcpConfig(manifest, o.shim, subsetting).mcpServers;
+      } else {
+        writeFileSync(
+          scratch.serveConfigPath,
+          JSON.stringify(buildRatelServeConfig(manifest, o.shim, cfg.retriever_method, subsetting)),
+        );
+        mcpServers = buildRatelMcpConfig({
+          ratelLocalPin: cfg.ratel_local_version,
+          serveConfigPath: scratch.serveConfigPath,
+          telemetryPath: scratch.telemetryPath,
+          // Same env lesson as the claude mcp.json above: HF_HOME must ride on
+          // the server entry itself, and PATH because a server-level env may
+          // replace rather than merge.
+          env: { ...embeddingCacheEnv(), PATH: process.env.PATH ?? "" },
+        }).mcpServers;
+      }
+      mkdirSync(codexHomeDir, { recursive: true });
       writeFileSync(
-        scratch.serveConfigPath,
-        JSON.stringify(buildRatelServeConfig(manifest, o.shim, cfg.retriever_method, subsetting)),
+        join(codexHomeDir, "config.toml"),
+        buildCodexConfigToml({
+          model: cfg.agent_model,
+          mcpServers,
+          // The claude driver passes the same budget via the MCP_TIMEOUT env
+          // var; Codex takes it per-server as startup_timeout_sec.
+          startupTimeoutSec: MCP_STARTUP_TIMEOUT_MS / 1000,
+          toolTimeoutSec: cfg.codex_lockdown?.tool_timeout_sec ?? CODEX_TOOL_TIMEOUT_SEC,
+          // Only the ratel gateway is required — it IS the tool surface and is
+          // npx-slow to start. Native shims stay optional so one flaky shim
+          // does not abort the session. See buildCodexConfigToml.
+          requiredServers: item.arm === "ratel" ? ["ratel-local"] : [],
+        }),
       );
-      writeFileSync(
-        scratch.mcpConfigPath,
-        JSON.stringify(
-          buildRatelMcpConfig({
-            ratelLocalPin: cfg.ratel_local_version,
-            serveConfigPath: scratch.serveConfigPath,
-            telemetryPath: scratch.telemetryPath,
-            // Must go in mcp.json, not just the parent process env: Claude Code
-            // does not propagate its own environment to spawned stdio MCP
-            // servers, so HF_HOME set on `claude` never reached ratel-local and
-            // the embedding cache stayed cold (verified: a full semantic k=3 run
-            // still produced zero searches with HF_HOME set only on the parent).
-            // PATH is included because a server-level `env` may replace rather
-            // than merge, and npx needs it.
-            env: { ...embeddingCacheEnv(), PATH: process.env.PATH ?? "" },
-          }),
-        ),
-      );
+      // Codex has no --append-system-prompt. The addendum arrives as the
+      // workspace's AGENTS.md project doc instead — same frozen text, hashed
+      // into system_prompt_addendum_hash; the delivery difference is recorded
+      // in codex_lockdown.addendum_delivery.
+      writeFileSync(join(scratch.workspaceDir, "AGENTS.md"), SYSTEM_PROMPT_ADDENDUM);
     }
 
     const allowedTools =
@@ -952,32 +1062,69 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
           )
         : GATEWAY_TOOLS.map((t) => `mcp__ratel-local__${t}`);
 
-    const outcome = await deps.runClaude({
-      prompt: buildPrompt(item.task.prompt),
-      mcpConfigPath: scratch.mcpConfigPath,
-      allowedTools,
-      model: cfg.agent_model,
-      maxTurns: cfg.max_turns,
-      permissionMode: cfg.permission_mode,
-      cwd: scratch.workspaceDir,
-      homeDir: scratch.homeDir,
-      env: {
-        ...inheritedEnv(),
-        ...embeddingCacheEnv(),
-        MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
-      },
-      timeoutMs: cfg.per_cell_timeout_ms,
-      appendSystemPrompt: SYSTEM_PROMPT_ADDENDUM,
-    });
+    const outcome = isCodex
+      ? await deps.runCodex({
+          args: buildCodexArgs({
+            prompt: buildPrompt(item.task.prompt),
+            cwd: scratch.workspaceDir,
+          }),
+          cwd: scratch.workspaceDir,
+          codexHome: codexHomeDir,
+          env: { ...inheritedEnv(), ...embeddingCacheEnv() },
+          timeoutMs: cfg.per_cell_timeout_ms,
+        })
+      : await deps.runClaude({
+          prompt: buildPrompt(item.task.prompt),
+          mcpConfigPath: scratch.mcpConfigPath,
+          allowedTools,
+          model: cfg.agent_model,
+          maxTurns: cfg.max_turns,
+          permissionMode: cfg.permission_mode,
+          cwd: scratch.workspaceDir,
+          homeDir: scratch.homeDir,
+          env: {
+            ...inheritedEnv(),
+            ...embeddingCacheEnv(),
+            MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
+          },
+          timeoutMs: cfg.per_cell_timeout_ms,
+          appendSystemPrompt: SYSTEM_PROMPT_ADDENDUM,
+        });
 
-    const result = parseClaudeResult(outcome.stdout);
-    if (!result) {
-      throw new Error(
-        `claude produced no parseable result envelope (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}, signal=${outcome.signal}): ${outcome.stderr.slice(0, 500)}`,
-      );
+    let result: ClaudeResult;
+    let tPath: string | null;
+    let parsed: ParsedTranscript | undefined;
+    if (isCodex) {
+      const events = parseCodexEvents(outcome.stdout);
+      if (!events) {
+        throw new Error(
+          `codex produced no parseable events (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}, signal=${outcome.signal}): ${outcome.stderr.slice(0, 500)}`,
+        );
+      }
+      const pricing = cfg.codex_pricing;
+      if (!pricing) {
+        throw new Error("codex run config is missing codex_pricing — cannot compute cell cost");
+      }
+      result = codexResultFromEvents(events, outcome.wallMs, outcome.timedOut, pricing);
+      // The rollout file is the codex "transcript": provenance, and the only
+      // place compaction is visible (the --json stream carries no signal).
+      tPath = codexRolloutPath(codexHomeDir, events.threadId);
+      parsed = {
+        uses: events.uses,
+        turnUsages: events.turnUsages,
+        compactionEvents: countCodexCompactions(readTranscript(tPath)),
+        reasoningOutputTokens: events.reasoningOutputTokens,
+      };
+    } else {
+      const claudeResult = parseClaudeResult(outcome.stdout);
+      if (!claudeResult) {
+        throw new Error(
+          `claude produced no parseable result envelope (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}, signal=${outcome.signal}): ${outcome.stderr.slice(0, 500)}`,
+        );
+      }
+      result = claudeResult;
+      tPath = transcriptPath(scratch.homeDir, scratch.workspaceDir, result.session_id);
     }
-
-    const tPath = transcriptPath(scratch.homeDir, scratch.workspaceDir, result.session_id);
     const transcriptText = readTranscript(tPath);
     const telemetryText =
       item.arm === "ratel" && existsSync(scratch.telemetryPath)
@@ -1020,6 +1167,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       ratel_version_label: cfg.ratel_version_label,
       ratel_local_version: cfg.ratel_local_version,
       ratel_sdk_version: cfg.ratel_sdk_version,
+      agent_harness: cfg.agent_harness,
     };
 
     const claimRubric = await deps.judgeClaims({
@@ -1042,12 +1190,13 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       gatewaySchemaTokens: o.gatewaySchemaTokens,
       perToolTokens: o.perToolTokens,
       nativeBaselineMs: o.nativeBaselineMs,
-      agentVersion: cfg.claude_code_version,
+      agentVersion: isCodex ? (cfg.codex_version ?? "unknown") : cfg.claude_code_version,
       runIndex: item.runIndex,
       cacheSource: o.cacheSource,
+      ...(parsed ? { parsed, costSource: "computed" as const } : {}),
     });
 
-    const uses = parseUses(transcriptText);
+    const uses = parsed?.uses ?? parseUses(transcriptText);
     const { calls, offCatalog } = effectiveCalls(uses, knownServers);
     const spans = invokeSpans(parseTelemetry(telemetryText), knownServers);
     const toolCallRows = buildToolCallRows(ctx, calls, offCatalog, spans);
@@ -1100,7 +1249,9 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       ratel_version_label: cfg.ratel_version_label,
       ratel_local_version: cfg.ratel_local_version,
       ratel_sdk_version: cfg.ratel_sdk_version,
-      agent_version: cfg.claude_code_version,
+      agent_version:
+        cfg.agent_harness === "codex" ? (cfg.codex_version ?? "unknown") : cfg.claude_code_version,
+      agent_harness: cfg.agent_harness,
       model: cfg.agent_model,
       enabled_tool_ids: item.task.enabled_tool_ids,
       gold_tool_ids: item.task.gold_tool_ids,
@@ -1389,6 +1540,40 @@ export async function main(): Promise<void> {
     return;
   }
   const retrieverMethod = retrieverMethodArg as "bm25" | "semantic" | "hybrid";
+  // Which agent CLI drives the cells. An experimental dimension, not a
+  // convenience switch: harness is part of cell keys, the native cache key,
+  // every summary group key, and the report nesting.
+  const harnessArg = arg("--harness", "claude-code");
+  if (!["claude-code", "codex"].includes(harnessArg)) {
+    console.error(`--harness must be one of claude-code, codex — got "${harnessArg}"`);
+    process.exitCode = 1;
+    return;
+  }
+  const harness = harnessArg as AgentHarness;
+  let codexPricing: CodexPricing | undefined;
+  if (harness === "codex") {
+    // No silent claude-model default on a codex run: the model names an
+    // OpenAI model and doubles as the pricing-table key.
+    const modelExplicit =
+      process.argv.includes("--model") || Boolean(process.env.RATEL_BENCH_MODEL);
+    if (!modelExplicit) {
+      console.error(
+        "--harness codex requires an explicit --model (e.g. gpt-5.6-luna); " +
+          "the claude default does not apply",
+      );
+      process.exitCode = 1;
+      return;
+    }
+    codexPricing = CODEX_PRICING[model];
+    if (!codexPricing) {
+      console.error(
+        `no pricing entry for codex model "${model}" — add it to CODEX_PRICING in ` +
+          "mcpatlas-codex.ts (cost enforcement for --dollar-global depends on it)",
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
 
   const manifest = JSON.parse(
     readFileSync(resolveRepoPath(`fixtures/mcpatlas/catalog-${scope}.json`), "utf8"),
@@ -1424,6 +1609,7 @@ export async function main(): Promise<void> {
       sandboxUrl,
       ratelLocalPin,
       probes: defaultProbes(),
+      harness,
     });
     if (doctorExitCode(results) !== 0) {
       console.error(formatResults(results));
@@ -1435,6 +1621,7 @@ export async function main(): Promise<void> {
   } else {
     await runMain({
       claude_code_version: "unknown",
+      codex_version: harness === "codex" ? "unknown" : null,
       ratel_local_version: ratelLocalPin,
       ratel_sdk_version: null,
       sandbox_url: sandboxUrl,
@@ -1480,6 +1667,14 @@ export async function main(): Promise<void> {
       atlasImageDigests: {},
       dollarCapGlobal: dollarCap,
       declaredLimitations: [],
+      harness,
+      ...(harness === "codex"
+        ? {
+            codexVersion: facts.codex_version ?? "unknown",
+            codexPricing,
+            codexLockdown: codexLockdown(),
+          }
+        : {}),
     });
 
     const priorOutput = readJsonl<McpAtlasCell>(outputPath);
@@ -1566,10 +1761,14 @@ export async function main(): Promise<void> {
           scope,
           catalogTools: cfg.catalog_tools,
           runIndex: item.runIndex,
-          agentVersion: cfg.claude_code_version,
+          agentVersion:
+            cfg.agent_harness === "codex"
+              ? (cfg.codex_version ?? "unknown")
+              : cfg.claude_code_version,
           promptHash: PROMPT_HASH,
           taskListHash: pinned.task_list_hash,
           datasetRevision: cfg.corpus.dataset_revision,
+          harness: cfg.agent_harness,
         }),
       cacheIndex.reuse,
       refreshNative,
@@ -1578,7 +1777,7 @@ export async function main(): Promise<void> {
         run_id: cfg.run_id,
         config_hash: cfg.config_hash,
         generated_at: cfg.generated_at,
-        cell_key: cellKeyFor(item, scope),
+        cell_key: cellKeyFor(item, scope, cfg.agent_harness),
         cache_source: "reused",
       }),
     );

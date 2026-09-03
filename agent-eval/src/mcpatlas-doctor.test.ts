@@ -38,6 +38,7 @@ function probes(over: Partial<DoctorProbes> = {}): DoctorProbes {
   return {
     env: { GITHUB_TOKEN: "x", AIRTABLE_API_KEY: "y", E2B_API_KEY: "z" },
     claudeVersion: async () => "2.1.237 (Claude Code)",
+    codexVersion: async () => "codex-cli 0.153.0",
     dockerRunning: async () => true,
     composeAvailable: async () => true,
     sandboxHealthy: async () => true,
