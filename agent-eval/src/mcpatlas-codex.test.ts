@@ -14,6 +14,7 @@ import {
   buildCodexConfigToml,
   CODEX_PRICING,
   codexLockdown,
+  codexInvokeSpans,
   codexResultFromEvents,
   codexRolloutPath,
   countCodexCompactions,
@@ -50,7 +51,7 @@ describe("CODEX_PRICING", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("buildCodexArgs", () => {
-  it("golden argv: exec + json + read-only sandbox + strict config", () => {
+  it("golden argv: exec + json + danger-full-access sandbox + strict config", () => {
     expect(buildCodexArgs({ prompt: "Fix the bug", cwd: "/scratch/workspace" })).toEqual([
       "exec",
       "Fix the bug",
@@ -58,7 +59,7 @@ describe("buildCodexArgs", () => {
       "-C",
       "/scratch/workspace",
       "-s",
-      "read-only",
+      "danger-full-access",
       "--skip-git-repo-check",
       "--strict-config",
     ]);
@@ -231,6 +232,12 @@ describe("parseCodexEvents", () => {
     // Stamped with the in-progress turn (completed count + 1).
     expect(p?.uses.map((u) => u.turn)).toEqual([1, 1]);
     expect(p?.uses[1].input).toEqual({ toolId: "github__get_issue", args: { n: 1 } });
+    // No shell in the clean fixture; both calls succeeded.
+    expect(p?.commandExecutions).toBe(0);
+    expect(p?.callOutcomes).toEqual([
+      { name: "mcp__ratel-local__search_tools", error: null },
+      { name: "mcp__ratel-local__invoke_tool", error: null },
+    ]);
     // Anthropic-shape mapping: uncached input = input - cached.
     expect(p?.usage).toEqual({
       input_tokens: 100,
@@ -264,6 +271,92 @@ describe("parseCodexEvents", () => {
     expect(parseCodexEvents("not json at all")).toBeNull();
     expect(parseCodexEvents("")).toBeNull();
     expect(parseCodexEvents('{"type":"something_else"}')).toBeNull();
+  });
+
+  it("captures a denied MCP call as a call outcome error, not a silent success", () => {
+    // The exact shape codex emits under a restricted sandbox — the failure the
+    // native arm used to mask by defaulting to failure_class 'ok'.
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "th-x" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "mcp_tool_call",
+          server: "filesystem",
+          tool: "list_directory",
+          arguments: { path: "/" },
+          status: "failed",
+          error: { message: "MCP tool call requires approval, but approval policy is never" },
+        },
+      }),
+      JSON.stringify({ type: "turn.completed", usage: {} }),
+    ].join("\n");
+    const p = parseCodexEvents(stdout);
+    expect(p?.callOutcomes).toEqual([
+      {
+        name: "mcp__filesystem__list_directory",
+        error: "MCP tool call requires approval, but approval policy is never",
+      },
+    ]);
+  });
+
+  it("counts command_execution items — the shell contamination signal", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "th-s" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "/bin/sh -c 'curl localhost:1984'",
+          status: "completed",
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", command: "echo hi", status: "completed" },
+      }),
+      JSON.stringify({ type: "turn.completed", usage: {} }),
+    ].join("\n");
+    expect(parseCodexEvents(stdout)?.commandExecutions).toBe(2);
+  });
+});
+
+describe("codexInvokeSpans", () => {
+  const servers = ["filesystem", "github"];
+  it("turns per-call outcomes into spans so the native arm classifies failures", () => {
+    const p = parseCodexEvents(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "t" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "mcp_tool_call",
+            server: "filesystem",
+            tool: "list_directory",
+            arguments: {},
+            status: "completed",
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "mcp_tool_call",
+            server: "github",
+            tool: "get_issue",
+            arguments: {},
+            status: "failed",
+            error: { message: "boom" },
+          },
+        }),
+        JSON.stringify({ type: "turn.completed", usage: {} }),
+      ].join("\n"),
+    );
+    if (!p) throw new Error("fixture must parse");
+    const spans = codexInvokeSpans(p, servers);
+    expect(spans).toEqual([
+      { tool_id: "filesystem/list_directory", args_size_bytes: 0, took_ms: null, error: null },
+      { tool_id: "github/get_issue", args_size_bytes: 0, took_ms: null, error: "boom" },
+    ]);
   });
 });
 
@@ -349,8 +442,10 @@ describe("rollout", () => {
 describe("codexLockdown", () => {
   it("records the frozen lockdown including the documented asymmetries", () => {
     const l = codexLockdown();
-    expect(l.sandbox_mode).toBe("read-only");
+    expect(l.sandbox_mode).toBe("danger-full-access");
     expect(l.shell_tool).toBe(false);
+    // The known validity gap: shell is reachable under full access.
+    expect(l.shell_reachable).toBe(true);
     expect(l.max_turns_enforced).toBe(false);
     expect(l.addendum_delivery).toBe("agents_md");
     expect(l.tool_timeout_sec).toBeGreaterThan(60);

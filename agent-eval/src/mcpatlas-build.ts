@@ -641,6 +641,13 @@ export interface AssembleCellInput {
    *  then parsed exactly as before — see the equivalence test). */
   parsed?: ParsedTranscript;
   costSource?: "reported" | "computed";
+  /** Invoke spans supplied by the caller instead of derived from ratel
+   *  telemetry. The native codex arm uses this — it has no telemetry, so
+   *  without it every tool call would default to "ok". Absent on the claude
+   *  path, where telemetry (ratel) or its absence (native) is authoritative. */
+  invokeSpansOverride?: InvokeSpan[];
+  /** Codex-only contamination signal; stamped onto the cell verbatim. */
+  shellCommandExecutions?: number;
 }
 
 /**
@@ -664,7 +671,8 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     knownServers,
   );
   const observedIds = calls.map((c) => c.tool_id);
-  const spans = invokeSpans(parseTelemetry(input.telemetryText), knownServers);
+  const spans =
+    input.invokeSpansOverride ?? invokeSpans(parseTelemetry(input.telemetryText), knownServers);
   const toolCallRows = buildToolCallRows(ctx, calls, offCatalog, spans);
   const failures = tallyFailures(toolCallRows);
   const sel = selectionMetrics(ctx.task.gold_tool_ids, observedIds);
@@ -751,6 +759,9 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     gateway_calls: gatewayCalls,
     non_gateway_calls: nonGatewayCalls,
     search_count: searchCalls,
+    ...(input.shellCommandExecutions !== undefined
+      ? { shell_command_executions: input.shellCommandExecutions }
+      : {}),
 
     final_text: input.result.result,
     finish_reason: input.result.subtype,

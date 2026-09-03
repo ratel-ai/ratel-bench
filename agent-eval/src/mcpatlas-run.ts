@@ -46,6 +46,7 @@ import {
   buildCodexConfigToml,
   CODEX_PRICING,
   CODEX_TOOL_TIMEOUT_SEC,
+  codexInvokeSpans,
   codexLockdown,
   codexResultFromEvents,
   codexRolloutPath,
@@ -1094,6 +1095,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
     let result: ClaudeResult;
     let tPath: string | null;
     let parsed: ParsedTranscript | undefined;
+    let codexEvents: ReturnType<typeof parseCodexEvents> = null;
     if (isCodex) {
       const events = parseCodexEvents(outcome.stdout);
       if (!events) {
@@ -1101,6 +1103,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
           `codex produced no parseable events (timedOut=${outcome.timedOut}, exitCode=${outcome.exitCode}, signal=${outcome.signal}): ${outcome.stderr.slice(0, 500)}`,
         );
       }
+      codexEvents = events;
       const pricing = cfg.codex_pricing;
       if (!pricing) {
         throw new Error("codex run config is missing codex_pricing — cannot compute cell cost");
@@ -1178,6 +1181,14 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       model: o.judgeModel,
     });
 
+    // The native codex arm has no ratel telemetry, so its tool-call
+    // success/failure comes from codex's own event stream instead — otherwise
+    // every call would default to "ok" and mask denials/upstream errors.
+    const codexNativeSpans =
+      codexEvents && item.arm === "native"
+        ? codexInvokeSpans(codexEvents, knownServers)
+        : undefined;
+
     const cell = assembleCell({
       ctx,
       result,
@@ -1194,11 +1205,13 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       runIndex: item.runIndex,
       cacheSource: o.cacheSource,
       ...(parsed ? { parsed, costSource: "computed" as const } : {}),
+      ...(codexNativeSpans ? { invokeSpansOverride: codexNativeSpans } : {}),
+      ...(codexEvents ? { shellCommandExecutions: codexEvents.commandExecutions } : {}),
     });
 
     const uses = parsed?.uses ?? parseUses(transcriptText);
     const { calls, offCatalog } = effectiveCalls(uses, knownServers);
-    const spans = invokeSpans(parseTelemetry(telemetryText), knownServers);
+    const spans = codexNativeSpans ?? invokeSpans(parseTelemetry(telemetryText), knownServers);
     const toolCallRows = buildToolCallRows(ctx, calls, offCatalog, spans);
 
     let searchEventRows: McpAtlasSearchEventRow[] = [];

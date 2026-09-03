@@ -73,17 +73,27 @@ export interface CodexPricing {
 }
 
 /** The Codex counterpart of `disallowed_tools`/`permission_mode`: how the
- *  built-in surface was locked down so the agent's only reachable tools are
- *  the MCP catalog. Recorded (and hashed) because the lockdown is weaker than
- *  Claude Code's `--disallowedTools` — `apply_patch` cannot be disabled, only
- *  neutered by the read-only sandbox — and that asymmetry must travel with
- *  the data. */
+ *  built-in surface was locked down. Recorded (and hashed) because the lockdown
+ *  is materially WEAKER than Claude Code's `--disallowedTools`: `codex exec`
+ *  must run under `danger-full-access` to execute MCP tools at all, so the
+ *  built-in `exec` shell stays reachable and `apply_patch` stays
+ *  write-capable. That asymmetry must travel with the data — hence
+ *  `shell_reachable` here and the per-cell shell-usage count on the cell. */
 export interface CodexLockdown {
-  sandbox_mode: "read-only";
+  /** danger-full-access, NOT read-only — forced by codex-cli 0.153.0, which
+   *  auto-denies MCP tool calls under any restricted sandbox in headless
+   *  `codex exec` (see buildCodexArgs). */
+  sandbox_mode: "danger-full-access";
   shell_tool: false;
   web_search: "disabled";
   view_image: false;
   error_on_tool_collisions: true;
+  /** The known validity gap: danger-full-access re-exposes codex's built-in
+   *  `exec` shell despite shell_tool=false, so the agent's reachable surface
+   *  is NOT strictly the MCP catalog (unlike the claude arm's
+   *  --disallowedTools). Actual shell use is measured per cell via
+   *  McpAtlasCell.shell_command_executions rather than assumed absent. */
+  shell_reachable: true;
   /** Codex has no --max-turns equivalent; only the per-cell wall-clock
    *  timeout bounds a runaway. */
   max_turns_enforced: false;
@@ -431,6 +441,13 @@ export interface McpAtlasCell {
   gateway_calls: number;
   non_gateway_calls: number;
   search_count: number;
+  /** Codex only: count of built-in `exec` shell invocations
+   *  (`command_execution` items). A CONTAMINATION signal — the codex arm runs
+   *  under danger-full-access, which re-exposes the shell, so a non-zero count
+   *  means the agent may have bypassed the MCP catalog and the cell's
+   *  tool-routing measurement is suspect. Absent on claude cells, where
+   *  --disallowedTools makes it structurally zero. */
+  shell_command_executions?: number;
 
   // Health
   final_text: string;

@@ -35,6 +35,8 @@ import type {
   RunClaudeOutcome,
   TurnUsage,
 } from "./mcpatlas-agent.js";
+import type { InvokeSpan } from "./mcpatlas-gateway.js";
+import { normalizeToolId } from "./mcpatlas-servers.js";
 import type { CodexLockdown, CodexPricing } from "./mcpatlas-types.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,16 +91,21 @@ export const CODEX_TOOL_TIMEOUT_SEC = 600;
 
 /** The frozen lockdown descriptor recorded in the run config. Codex has no
  *  `--disallowedTools`; the built-in surface is closed off via config feature
- *  flags plus the read-only sandbox instead, and this object is the record of
- *  exactly how. `apply_patch` is the known gap: it cannot be disabled (its
- *  availability is model-catalog-driven), only neutered by `-s read-only`. */
+ *  flags, and this object is the record of exactly how. It is a WEAKER lockdown
+ *  than the claude arm's: `codex exec` requires `-s danger-full-access` to run
+ *  MCP tools at all (see buildCodexArgs), which re-exposes the built-in `exec`
+ *  shell and leaves `apply_patch` write-capable. Neither reaches the task data
+ *  (which lives behind the MCP servers, not on codex's throwaway workspace),
+ *  but `exec` with network could bypass the gateway — so its use is measured
+ *  per cell (McpAtlasCell.shell_command_executions) rather than assumed zero. */
 export function codexLockdown(): CodexLockdown {
   return {
-    sandbox_mode: "read-only",
+    sandbox_mode: "danger-full-access",
     shell_tool: false,
     web_search: "disabled",
     view_image: false,
     error_on_tool_collisions: true,
+    shell_reachable: true,
     max_turns_enforced: false,
     addendum_delivery: "agents_md",
     tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC,
@@ -200,7 +207,26 @@ export interface CodexArgsOpts {
 
 /** Argv for `codex exec`. Constant across arms — model and lockdown live in
  *  config.toml. `--strict-config` makes a typo'd config key fail the cell
- *  loudly instead of silently running unlocked. */
+ *  loudly instead of silently running unlocked.
+ *
+ *  `-s danger-full-access` is forced by codex, not chosen freely. Measured on
+ *  codex-cli 0.153.0: `codex exec` hard-overrides `approval_policy` to `never`
+ *  (the config value is ignored), and under ANY restricted sandbox
+ *  (`read-only`, `workspace-write`) an MCP tool call "requires approval" and is
+ *  then auto-DENIED — "MCP tool call requires approval, but approval policy is
+ *  never". Every task fails with zero successful tool calls. Only
+ *  `danger-full-access` lets MCP tool calls execute unattended. Per-server
+ *  `default_tools_approval_mode`, trusted-project trust_level, and the
+ *  on-request/on-failure policies were all verified NOT to lift the denial
+ *  under exec.
+ *
+ *  The cost is real and is why `command_execution` items are counted as a
+ *  contamination signal (see parseCodexEvents): full access re-exposes codex's
+ *  built-in `exec` shell, which `features.shell_tool=false` suppresses only
+ *  under a restricted sandbox. Unlike Claude Code's `--disallowedTools`, codex
+ *  headless cannot both run MCP tools and hide the shell; the codex arm's
+ *  validity therefore rests on the agent NOT shelling out, which the harness
+ *  now measures per cell instead of assuming. */
 export function buildCodexArgs(o: CodexArgsOpts): string[] {
   return [
     "exec",
@@ -209,7 +235,7 @@ export function buildCodexArgs(o: CodexArgsOpts): string[] {
     "-C",
     o.cwd,
     "-s",
-    "read-only",
+    "danger-full-access",
     "--skip-git-repo-check",
     "--strict-config",
   ];
@@ -328,6 +354,13 @@ export interface CodexParsedEvents {
   /** Run totals, Anthropic shape. */
   usage: ClaudeUsage;
   reasoningOutputTokens: number;
+  /** Count of built-in `exec` shell invocations (`command_execution` items).
+   *  The contamination signal — see McpAtlasCell.shell_command_executions. */
+  commandExecutions: number;
+  /** Per mcp_tool_call outcome, in call order, aligned 1:1 with `uses`. Lets
+   *  the native arm classify tool failures from the event stream, since it has
+   *  no ratel telemetry to provide invoke spans. */
+  callOutcomes: Array<{ name: string; error: string | null }>;
 }
 
 interface CodexUsage {
@@ -379,6 +412,8 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
   const uses: RawToolUse[] = [];
   const turnUsages: TurnUsage[] = [];
   let reasoningOutputTokens = 0;
+  let commandExecutions = 0;
+  const callOutcomes: Array<{ name: string; error: string | null }> = [];
   let sawAny = false;
 
   for (const line of stdout.split("\n")) {
@@ -426,12 +461,20 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
           const server = typeof item.server === "string" ? item.server : "";
           const tool = typeof item.tool === "string" ? item.tool : "";
           if (server && tool) {
-            uses.push({
-              name: `mcp__${server}__${tool}`,
-              input: parseArguments(item.arguments),
-              turn: numTurns + 1,
-            });
+            const name = `mcp__${server}__${tool}`;
+            uses.push({ name, input: parseArguments(item.arguments), turn: numTurns + 1 });
+            // status: "failed" or an `error` object both mean the call did not
+            // succeed. Captured so the native arm — which has no ratel telemetry
+            // — can still classify tool failures instead of defaulting to "ok".
+            const err =
+              item.status === "failed" || item.error
+                ? codexCallError(item.error) || "codex tool call failed"
+                : null;
+            callOutcomes.push({ name, error: err });
           }
+        } else if (item.type === "command_execution") {
+          // Built-in shell — the contamination signal.
+          commandExecutions++;
         } else if (item.type === "agent_message" && typeof item.text === "string") {
           finalMessage = item.text;
         }
@@ -464,7 +507,42 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
     turnUsages,
     usage,
     reasoningOutputTokens,
+    commandExecutions,
+    callOutcomes,
   };
+}
+
+/** The text of an mcp_tool_call `error`, which codex emits either as
+ *  `{message}` or, for a tool that returned isError content, as the result
+ *  envelope. Kept small — only the message matters for classification. */
+function codexCallError(error: unknown): string {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (typeof error === "object") {
+    const m = (error as { message?: unknown }).message;
+    if (typeof m === "string") return m;
+    return JSON.stringify(error).slice(0, 300);
+  }
+  return String(error);
+}
+
+/**
+ * Synthesize invoke spans from codex's per-call outcomes so the native arm can
+ * classify tool failures. The ratel arm gets richer spans from ratel-local's
+ * telemetry (timings included); this covers the native arm, which has none.
+ * `took_ms` is null — codex's event stream carries no per-call duration.
+ */
+export function codexInvokeSpans(
+  p: CodexParsedEvents,
+  knownServers: readonly string[],
+): InvokeSpan[] {
+  const out: InvokeSpan[] = [];
+  for (const c of p.callOutcomes) {
+    const id = normalizeToolId(c.name, knownServers);
+    if (!id) continue; // off-catalog names are handled by effectiveCalls
+    out.push({ tool_id: id, args_size_bytes: 0, took_ms: null, error: c.error });
+  }
+  return out;
 }
 
 /** mcp_tool_call `arguments` — an object in current codex, but tolerate a

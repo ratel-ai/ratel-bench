@@ -1334,6 +1334,8 @@ describe("runCell codex branch", () => {
     });
     expect(r.cell.error).toBeNull();
     expect(r.cell.agent_harness).toBe("codex");
+    // Contamination signal present and clean (no command_execution items).
+    expect(r.cell.shell_command_executions).toBe(0);
     expect(existsSync(join(cellDir, "mcp.json"))).toBe(false);
     expect(existsSync(join(cellDir, "ratel.json"))).toBe(false);
   });
