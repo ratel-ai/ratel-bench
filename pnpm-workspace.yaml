@@ -1,4 +1,5 @@
 packages:
   - 'agent'
+  - 'agent-eval'
   - 'bfcl-loaded'
   - 'mcpverse'

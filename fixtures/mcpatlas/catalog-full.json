@@ -1,0 +1,463 @@
+{
+  "scope": "full",
+  "servers": [
+    {
+      "server": "airtable",
+      "tool_ids": [
+        "airtable/get_record",
+        "airtable/list_bases",
+        "airtable/list_records",
+        "airtable/list_tables",
+        "airtable/search_records"
+      ],
+      "tool_count": 5,
+      "required_env": [
+        "AIRTABLE_API_KEY"
+      ]
+    },
+    {
+      "server": "alchemy",
+      "tool_ids": [
+        "alchemy/fetchTokenPriceHistoryBySymbol"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "arxiv",
+      "tool_ids": [
+        "arxiv/read_paper",
+        "arxiv/search_papers"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "brave-search",
+      "tool_ids": [
+        "brave-search/brave_web_search"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "calculator",
+      "tool_ids": [
+        "calculator/calculate"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "cli-mcp-server",
+      "tool_ids": [
+        "cli-mcp-server/run_command",
+        "cli-mcp-server/show_security_rules"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "clinicaltrialsgov-mcp-server",
+      "tool_ids": [
+        "clinicaltrialsgov-mcp-server/clinicaltrials_analyze_trends",
+        "clinicaltrialsgov-mcp-server/clinicaltrials_get_study",
+        "clinicaltrialsgov-mcp-server/clinicaltrials_list_studies",
+        "clinicaltrialsgov-mcp-server/clinicaltrials_search_studies"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "context7",
+      "tool_ids": [
+        "context7/get-library-docs",
+        "context7/resolve-library-id"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "ddg-search",
+      "tool_ids": [
+        "ddg-search/fetch_content",
+        "ddg-search/search"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "desktop-commander",
+      "tool_ids": [
+        "desktop-commander/get_config",
+        "desktop-commander/get_file_info",
+        "desktop-commander/get_usage_stats",
+        "desktop-commander/give_feedback_to_desktop_commander",
+        "desktop-commander/interact_with_process",
+        "desktop-commander/list_directory",
+        "desktop-commander/read_file",
+        "desktop-commander/read_multiple_files",
+        "desktop-commander/read_process_output",
+        "desktop-commander/search_code",
+        "desktop-commander/search_files",
+        "desktop-commander/start_process"
+      ],
+      "tool_count": 12,
+      "required_env": []
+    },
+    {
+      "server": "e2b-server",
+      "tool_ids": [
+        "e2b-server/run_code"
+      ],
+      "tool_count": 1,
+      "required_env": [
+        "E2B_API_KEY"
+      ]
+    },
+    {
+      "server": "exa",
+      "tool_ids": [
+        "exa/web_search_exa"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "fetch",
+      "tool_ids": [
+        "fetch/fetch"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "filesystem",
+      "tool_ids": [
+        "filesystem/directory_tree",
+        "filesystem/get_file_info",
+        "filesystem/list_allowed_directories",
+        "filesystem/list_directory",
+        "filesystem/list_directory_with_sizes",
+        "filesystem/read_file",
+        "filesystem/read_media_file",
+        "filesystem/read_multiple_files",
+        "filesystem/read_text_file",
+        "filesystem/search_files"
+      ],
+      "tool_count": 10,
+      "required_env": []
+    },
+    {
+      "server": "git",
+      "tool_ids": [
+        "git/git_diff",
+        "git/git_diff_staged",
+        "git/git_diff_unstaged",
+        "git/git_log",
+        "git/git_show",
+        "git/git_status"
+      ],
+      "tool_count": 6,
+      "required_env": []
+    },
+    {
+      "server": "github",
+      "tool_ids": [
+        "github/add_issue_comment",
+        "github/create_issue",
+        "github/create_or_update_file",
+        "github/create_repository",
+        "github/get_commit",
+        "github/get_file_contents",
+        "github/get_issue",
+        "github/get_issue_comments",
+        "github/get_pull_request",
+        "github/get_pull_request_comments",
+        "github/get_pull_request_files",
+        "github/get_pull_request_review_comments",
+        "github/get_pull_request_status",
+        "github/get_repository",
+        "github/get_tag",
+        "github/list_branches",
+        "github/list_commits",
+        "github/list_issues",
+        "github/list_pull_requests",
+        "github/list_tags",
+        "github/push_files",
+        "github/search_code",
+        "github/search_issues",
+        "github/search_repositories",
+        "github/search_users",
+        "github/update_issue"
+      ],
+      "tool_count": 26,
+      "required_env": [
+        "GITHUB_TOKEN"
+      ]
+    },
+    {
+      "server": "google-maps",
+      "tool_ids": [
+        "google-maps/maps_directions",
+        "google-maps/maps_distance_matrix",
+        "google-maps/maps_elevation",
+        "google-maps/maps_geocode",
+        "google-maps/maps_place_details",
+        "google-maps/maps_reverse_geocode",
+        "google-maps/maps_search_places"
+      ],
+      "tool_count": 7,
+      "required_env": []
+    },
+    {
+      "server": "google-workspace",
+      "tool_ids": [
+        "google-workspace/list_events"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "lara-translate",
+      "tool_ids": [
+        "lara-translate/list_languages",
+        "lara-translate/translate"
+      ],
+      "tool_count": 2,
+      "required_env": []
+    },
+    {
+      "server": "mcp-code-executor",
+      "tool_ids": [
+        "mcp-code-executor/check_installed_packages",
+        "mcp-code-executor/execute_code",
+        "mcp-code-executor/get_environment_config",
+        "mcp-code-executor/read_code_file"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "mcp-server-code-runner",
+      "tool_ids": [
+        "mcp-server-code-runner/run-code"
+      ],
+      "tool_count": 1,
+      "required_env": []
+    },
+    {
+      "server": "memory",
+      "tool_ids": [
+        "memory/open_nodes",
+        "memory/read_graph",
+        "memory/search_nodes"
+      ],
+      "tool_count": 3,
+      "required_env": []
+    },
+    {
+      "server": "met-museum",
+      "tool_ids": [
+        "met-museum/get-museum-object",
+        "met-museum/list-departments",
+        "met-museum/search-museum-objects"
+      ],
+      "tool_count": 3,
+      "required_env": []
+    },
+    {
+      "server": "mongodb",
+      "tool_ids": [
+        "mongodb/aggregate",
+        "mongodb/collection-indexes",
+        "mongodb/collection-schema",
+        "mongodb/collection-storage-size",
+        "mongodb/count",
+        "mongodb/db-stats",
+        "mongodb/explain",
+        "mongodb/find",
+        "mongodb/list-collections",
+        "mongodb/list-databases"
+      ],
+      "tool_count": 10,
+      "required_env": [
+        "MONGODB_CONNECTION_STRING"
+      ]
+    },
+    {
+      "server": "national-parks",
+      "tool_ids": [
+        "national-parks/findParks",
+        "national-parks/getCampgrounds",
+        "national-parks/getParkDetails",
+        "national-parks/getVisitorCenters"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "notion",
+      "tool_ids": [
+        "notion/API-get-block-children",
+        "notion/API-get-self",
+        "notion/API-get-user",
+        "notion/API-get-users",
+        "notion/API-post-database-query",
+        "notion/API-post-search",
+        "notion/API-retrieve-a-block",
+        "notion/API-retrieve-a-comment",
+        "notion/API-retrieve-a-database",
+        "notion/API-retrieve-a-page",
+        "notion/API-retrieve-a-page-property"
+      ],
+      "tool_count": 11,
+      "required_env": []
+    },
+    {
+      "server": "open-library",
+      "tool_ids": [
+        "open-library/get_author_info",
+        "open-library/get_author_photo",
+        "open-library/get_authors_by_name",
+        "open-library/get_book_by_id",
+        "open-library/get_book_by_title",
+        "open-library/get_book_cover"
+      ],
+      "tool_count": 6,
+      "required_env": []
+    },
+    {
+      "server": "osm-mcp-server",
+      "tool_ids": [
+        "osm-mcp-server/analyze_commute",
+        "osm-mcp-server/analyze_neighborhood",
+        "osm-mcp-server/explore_area",
+        "osm-mcp-server/find_ev_charging_stations",
+        "osm-mcp-server/find_nearby_places",
+        "osm-mcp-server/find_parking_facilities",
+        "osm-mcp-server/find_schools_nearby",
+        "osm-mcp-server/geocode_address",
+        "osm-mcp-server/get_route_directions",
+        "osm-mcp-server/reverse_geocode",
+        "osm-mcp-server/search_category",
+        "osm-mcp-server/suggest_meeting_point"
+      ],
+      "tool_count": 12,
+      "required_env": []
+    },
+    {
+      "server": "oxylabs",
+      "tool_ids": [
+        "oxylabs/amazon_search_scraper",
+        "oxylabs/google_search_scraper",
+        "oxylabs/universal_scraper"
+      ],
+      "tool_count": 3,
+      "required_env": []
+    },
+    {
+      "server": "pubmed",
+      "tool_ids": [
+        "pubmed/download_pubmed_pdf",
+        "pubmed/get_pubmed_article_metadata",
+        "pubmed/search_pubmed_advanced",
+        "pubmed/search_pubmed_key_words"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "slack",
+      "tool_ids": [
+        "slack/channels_list",
+        "slack/conversations_add_message",
+        "slack/conversations_history",
+        "slack/conversations_replies",
+        "slack/conversations_search_messages"
+      ],
+      "tool_count": 5,
+      "required_env": []
+    },
+    {
+      "server": "twelvedata",
+      "tool_ids": [
+        "twelvedata/GetCryptocurrencies",
+        "twelvedata/GetCryptocurrencyExchanges",
+        "twelvedata/GetExchanges",
+        "twelvedata/GetForexPairs",
+        "twelvedata/GetSymbolSearch",
+        "twelvedata/GetTimeSeries",
+        "twelvedata/GetTimeSeriesAdx",
+        "twelvedata/GetTimeSeriesAtr",
+        "twelvedata/GetTimeSeriesBBands",
+        "twelvedata/GetTimeSeriesCross",
+        "twelvedata/GetTimeSeriesEma",
+        "twelvedata/GetTimeSeriesMacd",
+        "twelvedata/GetTimeSeriesRsi",
+        "twelvedata/GetTimeSeriesSma"
+      ],
+      "tool_count": 14,
+      "required_env": []
+    },
+    {
+      "server": "weather",
+      "tool_ids": [
+        "weather/find_weather_stations",
+        "weather/get_current_weather",
+        "weather/get_hourly_forecast",
+        "weather/get_local_time",
+        "weather/get_weather_alerts",
+        "weather/get_weather_forecast"
+      ],
+      "tool_count": 6,
+      "required_env": []
+    },
+    {
+      "server": "weather-data",
+      "tool_ids": [
+        "weather-data/weather_airquality",
+        "weather-data/weather_alerts",
+        "weather-data/weather_astronomy",
+        "weather-data/weather_current",
+        "weather-data/weather_forecast",
+        "weather-data/weather_history",
+        "weather-data/weather_search",
+        "weather-data/weather_sports",
+        "weather-data/weather_timezone"
+      ],
+      "tool_count": 9,
+      "required_env": []
+    },
+    {
+      "server": "whois",
+      "tool_ids": [
+        "whois/whois_as",
+        "whois/whois_domain",
+        "whois/whois_ip",
+        "whois/whois_tld"
+      ],
+      "tool_count": 4,
+      "required_env": []
+    },
+    {
+      "server": "wikipedia",
+      "tool_ids": [
+        "wikipedia/extract_key_facts",
+        "wikipedia/get_article",
+        "wikipedia/get_links",
+        "wikipedia/get_related_topics",
+        "wikipedia/get_sections",
+        "wikipedia/get_summary",
+        "wikipedia/search_wikipedia",
+        "wikipedia/summarize_article_for_query",
+        "wikipedia/summarize_article_section"
+      ],
+      "tool_count": 9,
+      "required_env": []
+    }
+  ],
+  "server_count": 36,
+  "tool_count": 195,
+  "catalog_sha256": "b27f6516ad0890a027693245a73e0e35b6f85dcab7ba273e3469b926d5b557e9"
+}
