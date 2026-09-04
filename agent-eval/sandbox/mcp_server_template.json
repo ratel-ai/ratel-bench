@@ -37,6 +37,8 @@
     "calculator": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.12.1",
         "mcp-server-calculator==0.2.0"
       ]
     },
@@ -74,6 +76,8 @@
     "ddg-search": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.12.1",
         "duckduckgo-mcp-server==0.5.0"
       ]
     },
@@ -104,6 +108,8 @@
     "fetch": {
       "command": "uvx",
       "args": [
+        "--with",
+        "mcp==1.12.1",
         "mcp-server-fetch==2025.4.7"
       ]
     },
