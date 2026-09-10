@@ -76,6 +76,7 @@ import {
   SYSTEM_PROMPT_ADDENDUM_HASH,
 } from "./mcpatlas-prompt.js";
 import {
+  allowedToolsFor,
   buildNativeMcpConfig,
   buildRatelMcpConfig,
   buildRatelServeConfig,
@@ -1056,12 +1057,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       writeFileSync(join(scratch.workspaceDir, "AGENTS.md"), SYSTEM_PROMPT_ADDENDUM);
     }
 
-    const allowedTools =
-      item.arm === "native"
-        ? manifest.servers.flatMap((s) =>
-            s.tool_ids.map((id) => `mcp__${id.split("/")[0]}__${id.split("/").slice(1).join("/")}`),
-          )
-        : GATEWAY_TOOLS.map((t) => `mcp__ratel-local__${t}`);
+    const allowedTools = allowedToolsFor(item.arm, manifest);
 
     const outcome = isCodex
       ? await deps.runCodex({

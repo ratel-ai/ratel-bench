@@ -155,15 +155,21 @@ export function invokeSpans(
   knownServers: readonly string[],
 ): InvokeSpan[] {
   const spans: InvokeSpan[] = [];
-  const open = new Map<string, { args: number }>();
+  // A FIFO queue per tool_id, not a single slot — overlapping calls to the
+  // same tool (a rapid retry, two turns racing) must each keep their own
+  // args/timing rather than the later invoke_start clobbering the earlier one.
+  const open = new Map<string, Array<{ args: number }>>();
   for (const e of invokeEvents(events)) {
     const id = normalizeToolId(e.tool_id ?? "", knownServers) ?? e.tool_id ?? "";
     if (e.type === "invoke_start") {
-      open.set(id, { args: Number(e.args_size_bytes) || 0 });
+      const queue = open.get(id) ?? [];
+      queue.push({ args: Number(e.args_size_bytes) || 0 });
+      open.set(id, queue);
       continue;
     }
-    const started = open.get(id);
-    open.delete(id);
+    const queue = open.get(id);
+    const started = queue?.shift();
+    if (queue && queue.length === 0) open.delete(id);
     spans.push({
       tool_id: id,
       args_size_bytes: started?.args ?? 0,
@@ -171,9 +177,11 @@ export function invokeSpans(
       error: e.type === "invoke_error" ? (e.error ?? "unknown error") : null,
     });
   }
-  // An invoke that never terminated (process killed mid-call) still happened.
-  for (const [id, s] of open) {
-    spans.push({ tool_id: id, args_size_bytes: s.args, took_ms: null, error: "no invoke_end" });
+  // Invokes that never terminated (process killed mid-call) still happened.
+  for (const [id, queue] of open) {
+    for (const s of queue) {
+      spans.push({ tool_id: id, args_size_bytes: s.args, took_ms: null, error: "no invoke_end" });
+    }
   }
   return spans;
 }

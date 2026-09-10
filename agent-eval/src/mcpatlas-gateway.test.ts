@@ -241,6 +241,21 @@ describe("invokeSpans", () => {
     const events = parseTelemetry(JSON.stringify({ type: "invoke_start", tool_id: "git__status" }));
     expect(invokeSpans(events, SERVERS)[0]).toMatchObject({ error: "no invoke_end" });
   });
+
+  it("pairs overlapping calls to the same tool FIFO instead of clobbering", () => {
+    const events = parseTelemetry(
+      [
+        JSON.stringify({ type: "invoke_start", tool_id: "git__status", args_size_bytes: 10 }),
+        JSON.stringify({ type: "invoke_start", tool_id: "git__status", args_size_bytes: 20 }),
+        JSON.stringify({ type: "invoke_end", tool_id: "git__status", took_ms: 5 }),
+        JSON.stringify({ type: "invoke_end", tool_id: "git__status", took_ms: 8 }),
+      ].join("\n"),
+    );
+    expect(invokeSpans(events, SERVERS)).toEqual([
+      { tool_id: "git/status", args_size_bytes: 10, took_ms: 5, error: null },
+      { tool_id: "git/status", args_size_bytes: 20, took_ms: 8, error: null },
+    ]);
+  });
 });
 
 describe("schemaTokenEstimate", () => {
