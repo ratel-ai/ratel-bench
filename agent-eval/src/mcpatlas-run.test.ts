@@ -532,6 +532,43 @@ describe("runCampaign", () => {
     });
     expect(delivered).toHaveLength(3);
   });
+
+  it("actually dispatches `concurrency` workers in parallel, not sequentially", async () => {
+    const queue = [1, 2, 3];
+    const log: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const runOne = async (i: unknown) => {
+      log.push(`start:${i}`);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+      log.push(`end:${i}`);
+      return fakeResult(0.1);
+    };
+
+    const done = runCampaign(queue, {
+      concurrency: 2,
+      dollarCap: null,
+      quiet: true,
+      runOne,
+      onCell: () => {},
+    });
+
+    // Both workers reach their first `runOne` call synchronously, before either
+    // resolves — a sequential-dispatch bug would only have logged "start:1" here.
+    expect(log).toEqual(["start:1", "start:2"]);
+
+    resolvers[0]();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The freed worker picked up the next queue item promptly (pool reuse, not
+    // a fixed 1:1 worker:item mapping).
+    expect(log).toContain("end:1");
+    expect(log).toContain("start:3");
+
+    resolvers[1]();
+    resolvers[2]();
+    const summary = await done;
+    expect(summary.cells_run).toBe(3);
+  });
 });
 
 describe("formatDoneLine", () => {
