@@ -6,11 +6,6 @@ import { join } from "node:path";
 import { normalizeToolId } from "./mcpatlas-servers.js";
 import type { CanonicalToolId, McpAtlasToolCall } from "./mcpatlas-types.js";
 
-/** Built-ins that must be off. With `Bash` the agent can `gh api` around the
- *  GitHub server and with `WebFetch` it can bypass Airtable — which converts a
- *  tool-routing benchmark into a shell benchmark, and does so UNEQUALLY: the
- *  native arm sees more MCP tools and has less incentive to shell out. Frozen
- *  and identical across arms. */
 /**
  * The agent's entire reachable surface must be the frozen MCP catalog — any
  * built-in that reads, searches, or executes outside it turns a tool-routing

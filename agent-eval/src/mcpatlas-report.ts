@@ -316,7 +316,9 @@ function nest<T extends { timestamp: string }>(
   const out: Nested = {};
   for (const [, group] of latestGroups(rows, (r) => `${a(r)}::${b(r)}::${c(r)}`)) {
     for (const r of group) {
+      // biome-ignore lint/suspicious/noAssignInExpressions: single-lookup nested-map upsert
       const A = (out[a(r)] ??= {});
+      // biome-ignore lint/suspicious/noAssignInExpressions: single-lookup nested-map upsert
       const B = (A[b(r)] ??= {});
       B[c(r)] = { timestamp: r.timestamp, metrics: metricFields(r) };
     }
@@ -355,6 +357,7 @@ export function buildReport(input: ReportInput): McpAtlasReport {
           (r.agent_harness ?? "claude-code") === "claude-code"
             ? bucketLabel(r)
             : `${r.agent_harness}:${bucketLabel(r)}`;
+        // biome-ignore lint/suspicious/noAssignInExpressions: single-lookup nested-map upsert
         const entry = (retriever_evaluation[bucket] ??= { timestamp: r.timestamp, metrics: [] });
         entry.metrics.push(metricFields(r));
         if (r.timestamp > entry.timestamp) entry.timestamp = r.timestamp;
