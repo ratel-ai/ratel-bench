@@ -289,6 +289,7 @@ pnpm version-reset
 ```
 retrieval/    # Rust crate — BM25 retrieval eval (modes a, b, d)
 agent/        # TypeScript — MetaTool agent campaign + report (mode c)
+agent-eval/   # TypeScript — MCP-Atlas benchmark: ratel-local gateway vs native MCP tool wiring
 fixtures/     # Raw upstream downloads (gitignored)
 test-data/    # Normalized JSONL from ingest (gitignored)
 results/      # Outputs + REPORT.md (gitignored)
