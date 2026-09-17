@@ -133,6 +133,17 @@
       }
     },
     {
+      "id": "gpt-6-astra",
+      "pricing": {
+        "openai": {
+          "inputPer1M": 10,
+          "outputPer1M": 50,
+          "cachedInputPer1M": 1,
+          "cacheCreationPer1M": 12.5
+        }
+      }
+    },
+    {
       "id": "qwen3-4b",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
     },
