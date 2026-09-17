@@ -135,6 +135,12 @@
     {
       "id": "gpt-6-astra",
       "pricing": {
+        "bedrock": {
+          "inputPer1M": 10,
+          "outputPer1M": 50,
+          "cachedInputPer1M": 1,
+          "cacheCreationPer1M": 12.5
+        },
         "openai": {
           "inputPer1M": 10,
           "outputPer1M": 50,
