@@ -163,6 +163,14 @@ describe("nativeCacheKey", () => {
     const keys = new Set([nativeCacheKey(base), ...variants.map(nativeCacheKey)]);
     expect(keys.size).toBe(5);
   });
+
+  // [guard] Existing cache files key by this exact string; any drift silently
+  // turns every prior native cell into a cache miss (and a re-spend).
+  it("key string for an existing cell is unchanged", () => {
+    expect(nativeCacheKey(base)).toBe(
+      "t1::native::claude-haiku-4-5::coding::0::0::2.1.241::ph1::th1::dr1::claude-code",
+    );
+  });
 });
 
 describe("readNativeCacheIndex / drainNativeCache", () => {
@@ -379,6 +387,129 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
       ...context,
     });
     expect(reuse.get(key)?.cell_key).toBe("old");
+  });
+
+  // An errored native reused from the cache is an error served for ever: the
+  // native arm would score it as a fail in every later campaign while ratel
+  // re-runs live. Infra/request errors and judge failures re-run instead; the
+  // model's own final outcomes (timeout, max-turns, a judge that omitted
+  // claims) are measurements and stay reusable.
+  it("readNativeCacheIndex skips infra/request-errored natives and natives whose judge_error starts 'judge failed:'; keeps 'judge omitted…' and timeout/max-turns", () => {
+    const context = { promptHash: "ph1", taskListHash: "th1", datasetRevision: "dr1" };
+    const judged = (judge_error: string) => ({
+      claim_rubric: {
+        ...cell().claim_rubric,
+        coverage: null,
+        verdict: "n/a" as const,
+        judge_error,
+      },
+    });
+    const failed = (error: string, over: Partial<McpAtlasCell> = {}) =>
+      cell({ error, finish_reason: "error", task_pass: false, ...over });
+    // Mirrors runCell's catch: a thrown message lands in both error and judge_error.
+    const thrown = (error: string) =>
+      cell({
+        error,
+        finish_reason: "error",
+        task_pass: false,
+        claim_rubric: {
+          ...cell().claim_rubric,
+          claims: [],
+          coverage: null,
+          verdict: "n/a",
+          judge_error: error,
+        },
+      });
+    const skipped = [
+      failed(
+        'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+        {
+          finish_reason: "success",
+        },
+      ),
+      // Verbatim from the pinned Claude Code 2.1.246 on Bedrock.
+      failed(
+        "API Error: Request rejected (429) · Too many tokens, please wait before trying again.",
+        {
+          finish_reason: "success",
+        },
+      ),
+      failed("API Error: Connection dropped (EPIPE)", { finish_reason: "success" }),
+      // codex-cli 0.153.0
+      failed("exceeded retry limit, last status: 429 Too Many Requests", {
+        finish_reason: "error_during_execution",
+        agent_harness: "codex",
+      }),
+      failed(
+        "rate limit exceeded: Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s.",
+        { finish_reason: "error_during_execution", agent_harness: "codex" },
+      ),
+      failed("API Error: 403 You don't have access to the model with the specified model ID.", {
+        finish_reason: "success",
+      }),
+      failed("API Error: 400 messages.0.content: tool_use ids must be unique", {
+        finish_reason: "success",
+      }),
+      thrown("catalog integrity: sandbox unreachable at http://localhost:1984"),
+      thrown(
+        "claude produced no parseable result envelope (timedOut=false, exitCode=1, signal=null): TypeError: fetch failed",
+      ),
+      thrown(
+        "claude produced no parseable result envelope (timedOut=false, exitCode=null, signal=SIGKILL): ",
+      ),
+      thrown("spawn ENOMEM"),
+      cell(judged("judge failed: Failed after 3 attempts. Last error: Overloaded")),
+    ];
+    const kept = [
+      failed("", { finish_reason: "error_max_turns" }),
+      thrown(
+        "claude produced no parseable result envelope (timedOut=true, exitCode=null, signal=SIGKILL): ",
+      ),
+      thrown("codex produced no parseable events (timedOut=true, exitCode=null, signal=SIGKILL): "),
+      failed("codex timed out", { finish_reason: "error_timeout" }),
+      failed('API Error: 400 {"message":"prompt is too long: 210000 tokens > 200000 maximum"}', {
+        finish_reason: "success",
+      }),
+      cell(judged("judge omitted 1 of 3 claim(s)")),
+    ];
+    const withRun = (cs: McpAtlasCell[], offset: number) =>
+      cs.map((c, i) => ({ ...c, run_index: offset + i, cell_key: `run${offset + i}` }));
+    const skippedCells = withRun(skipped, 0);
+    const keptCells = withRun(kept, skipped.length);
+    const { current, reuse } = readNativeCacheIndex([...skippedCells, ...keptCells], context);
+    const keyFor = (c: McpAtlasCell) =>
+      nativeCacheKey({
+        taskId: c.task_id,
+        model: c.model,
+        scope: c.catalog_scope,
+        catalogTools: 0,
+        runIndex: c.run_index,
+        agentVersion: c.agent_version,
+        harness: c.agent_harness ?? "claude-code",
+        ...context,
+      });
+    for (const c of skippedCells) {
+      expect(reuse.has(keyFor(c)), c.error ?? c.claim_rubric.judge_error ?? "").toBe(false);
+      expect(current.has(keyFor(c))).toBe(false);
+    }
+    for (const c of keptCells) {
+      expect(reuse.get(keyFor(c))?.cell_key, c.error ?? c.claim_rubric.judge_error ?? "").toBe(
+        c.cell_key,
+      );
+    }
+  });
+
+  it("an earlier infra-errored native does not shadow a later good one on the same key", () => {
+    const context = { promptHash: "ph1", taskListHash: "th1", datasetRevision: "dr1" };
+    const erroredFirst = cell({
+      generated_at: "2026-08-01T00:00:00.000Z",
+      cell_key: "errored",
+      error: "catalog integrity: sandbox unreachable at http://localhost:1984",
+      finish_reason: "error",
+    });
+    const goodLater = cell({ generated_at: "2026-08-20T00:00:00.000Z", cell_key: "good" });
+    const { reuse } = readNativeCacheIndex([erroredFirst, goodLater], context);
+    expect(reuse.get(keyOf({ task: task(), runIndex: 0 }))?.cell_key).toBe("good");
   });
 
   it("a cell recorded under a different pinned corpus does not collide with the current one", () => {

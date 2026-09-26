@@ -104,6 +104,14 @@ export interface ClaudeResult {
   duration_api_ms: number;
   num_turns: number;
   result: string;
+  /** The harness's failure text when `result` does not carry it. Codex: the
+   *  turn failure, while `result` keeps the agent's last message. Claude Code:
+   *  a `success` + `is_error` envelope's error is its `result` (no error_text);
+   *  the error subtypes (`error_during_execution`, `error_max_turns`, …) have
+   *  no `result`, and parseClaudeResult copies their `errors[]` here. */
+  error_text?: string;
+  /** Claude Code error subtypes' failure lines. */
+  errors?: string[];
   session_id: string;
   total_cost_usd: number;
   usage: ClaudeUsage;
@@ -156,7 +164,16 @@ export function parseClaudeResult(stdout: string): ClaudeResult | null {
   // Defaulting here means every downstream consumer (claim screening chief
   // among them — it calls .toLowerCase() on this unconditionally) can trust
   // the type instead of re-guessing whether this specific field might lie.
-  return { ...r, result: r.result ?? "", usage: { ...ZERO_USAGE, ...(r.usage ?? {}) } };
+  // Error subtypes put their text in `errors[]`, never in `result`: surface it
+  // as error_text (one entry per line) so the cell's error is not "".
+  const errorText =
+    r.is_error && r.subtype !== "success" && r.errors?.length ? r.errors.join("\n") : undefined;
+  return {
+    ...r,
+    result: r.result ?? "",
+    ...(errorText !== undefined ? { error_text: errorText } : {}),
+    usage: { ...ZERO_USAGE, ...(r.usage ?? {}) },
+  };
 }
 
 export function totalTokens(u: ClaudeUsage): number {

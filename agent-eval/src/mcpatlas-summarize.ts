@@ -8,6 +8,7 @@
 // the emitted object is cheaper than arguing about it later.
 
 import { toolFailureRate } from "./mcpatlas-build.js";
+import { isInfraErrorCell } from "./mcpatlas-cell-errors.js";
 import { mean, median, percentile, proportionDelta, wilson } from "./mcpatlas-stats.js";
 import type {
   AgentHarness,
@@ -74,6 +75,10 @@ export interface McpAtlasTaskSummaryRow {
   mean_search_ms_total: number;
   mean_turns: number;
   errored: number;
+  /** Cells that errored on infra (transient|access; see mcpatlas-cell-errors).
+   *  COUNTED ONLY: unlike bfcl/sragents, they stay in every denominator above
+   *  as fails, so a non-zero value marks a group whose rates infra depressed. */
+  excluded_cells: number;
   no_search_rate: number;
   /** k=1: false everywhere until a repeat subset runs. */
   variance_measured: boolean;
@@ -313,6 +318,7 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       mean_search_ms_total: mean(cells.map((c) => c.latency.search_ms_total)),
       mean_turns: mean(cells.map((c) => c.latency.turns)),
       errored: cells.filter((c) => c.error !== null).length,
+      excluded_cells: cells.filter(isInfraErrorCell).length,
       no_search_rate:
         first.arm === "ratel" ? cells.filter((c) => c.search_count === 0).length / n : 0,
       variance_measured: false,

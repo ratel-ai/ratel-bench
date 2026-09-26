@@ -408,7 +408,11 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
   let threadId: string | null = null;
   let numTurns = 0;
   let finalMessage = "";
-  let failed: { message: string } | null = null;
+  let turnFailed: { message: string } | null = null;
+  // A bare `error` event is also a stream retry ("Reconnecting... n/m") that
+  // the turn may recover from; turn.completed clears it. A fatal one is
+  // followed by turn.failed, which wins.
+  let errorEvent: { message: string } | null = null;
   const uses: RawToolUse[] = [];
   const turnUsages: TurnUsage[] = [];
   let reasoningOutputTokens = 0;
@@ -441,17 +445,18 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
         const u = (ev.usage ?? {}) as CodexUsage;
         turnUsages.push(mapUsage(numTurns, u));
         reasoningOutputTokens += u.reasoning_output_tokens ?? 0;
+        errorEvent = null;
         break;
       }
       case "turn.failed": {
         sawAny = true;
         const e = ev.error as { message?: string } | undefined;
-        failed = { message: e?.message ?? "turn failed" };
+        turnFailed = { message: e?.message ?? "turn failed" };
         break;
       }
       case "error": {
         sawAny = true;
-        failed ??= { message: typeof ev.message === "string" ? ev.message : "error" };
+        errorEvent ??= { message: typeof ev.message === "string" ? ev.message : "error" };
         break;
       }
       case "item.completed": {
@@ -502,7 +507,7 @@ export function parseCodexEvents(stdout: string): CodexParsedEvents | null {
     threadId,
     numTurns,
     finalMessage,
-    failed,
+    failed: turnFailed ?? errorEvent,
     uses,
     turnUsages,
     usage,
@@ -654,6 +659,7 @@ export function codexResultFromEvents(
     duration_api_ms: 0,
     num_turns: p.numTurns,
     result: p.failed && !p.finalMessage ? p.failed.message : p.finalMessage,
+    ...(p.failed ? { error_text: p.failed.message } : {}),
     session_id: p.threadId ?? "",
     total_cost_usd: cost,
     usage: { ...u },

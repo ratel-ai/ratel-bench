@@ -765,7 +765,9 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
 
     final_text: input.result.result,
     finish_reason: input.result.subtype,
-    error: input.result.is_error ? (input.result.result ?? "error") : null,
+    error: input.result.is_error
+      ? (input.result.error_text ?? input.result.result ?? "error")
+      : null,
 
     transcript_path: input.transcriptPath,
     telemetry_path: input.telemetryPath,

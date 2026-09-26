@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ClaudeResult } from "./mcpatlas-agent.js";
+import { type ClaudeResult, parseClaudeResult } from "./mcpatlas-agent.js";
 import {
   assembleCell,
   buildLatencyBreakdown,
@@ -16,6 +16,7 @@ import {
   tallyFailures,
   toolFailureRate,
 } from "./mcpatlas-build.js";
+import { cellErrorClass } from "./mcpatlas-cell-errors.js";
 import { CODING_SERVERS } from "./mcpatlas-servers.js";
 import type { ClaimRubricResult, McpAtlasTask, McpAtlasToolCallRow } from "./mcpatlas-types.js";
 
@@ -598,6 +599,86 @@ describe("assembleCell", () => {
     expect(cell.programmatic_verdict).toBe("pass"); // hit, not strict pass
     expect(cell.cache_source).toBe("live");
     expect(cell.telemetry_binding).toBe("none");
+  });
+
+  it("an errored cell's error prefers the harness error_text; final_text keeps the agent's prose", () => {
+    const base = {
+      ctx: ctx({ arm: "native" as const }),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "0.146.0",
+      runIndex: 0,
+      cacheSource: "live" as const,
+    };
+    const failed = {
+      ...result(),
+      is_error: true,
+      subtype: "error_during_execution",
+      result: "Checking the issue now.",
+    };
+    const withText = assembleCell({
+      ...base,
+      result: { ...failed, error_text: "stream disconnected before completion: eof" },
+    });
+    expect(withText.error).toBe("stream disconnected before completion: eof");
+    expect(withText.final_text).toBe("Checking the issue now.");
+    // A Claude Code success + is_error envelope carries no error_text: its result is the error.
+    const ccFailed = {
+      ...result(),
+      is_error: true,
+      subtype: "success",
+      result: "API Error: 529 Overloaded",
+    };
+    expect(assembleCell({ ...base, result: ccFailed }).error).toBe("API Error: 529 Overloaded");
+  });
+
+  it("a Claude Code error subtype's errors[] reaches cell.error and is classified", () => {
+    const base = {
+      ctx: ctx({ arm: "native" as const }),
+      transcriptText: "",
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.246",
+      runIndex: 0,
+      cacheSource: "live" as const,
+    };
+    const envelope = (subtype: string, errors: string[]) => {
+      const r = parseClaudeResult(
+        JSON.stringify({ type: "result", is_error: true, subtype, session_id: "s", errors }),
+      );
+      if (!r) throw new Error("fixture must parse");
+      return r;
+    };
+    const connection = assembleCell({
+      ...base,
+      result: envelope("error_during_execution", [
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+        "API Error: Connection error.",
+      ]),
+    });
+    expect(connection.error).toContain("API Error: Connection error.");
+    expect(connection.final_text).toBe("");
+    expect(cellErrorClass(connection)).toBe("transient");
+    const timedOut = assembleCell({
+      ...base,
+      result: envelope("error_during_execution", ["[ede_diagnostic] …", "Request timed out"]),
+    });
+    expect(cellErrorClass(timedOut)).toBe("transient");
+    const maxTurns = assembleCell({
+      ...base,
+      result: envelope("error_max_turns", ["Reached maximum number of turns (40)"]),
+    });
+    expect(maxTurns.error).toBe("Reached maximum number of turns (40)");
+    expect(cellErrorClass(maxTurns)).toBe("outcome");
   });
 
   it("catalog_size is the full catalog for native and the gateway tool count for ratel", () => {

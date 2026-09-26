@@ -41,6 +41,7 @@ import {
   type ParsedTranscript,
   parseUses,
 } from "./mcpatlas-build.js";
+import { isReusableCell } from "./mcpatlas-cell-errors.js";
 import {
   buildCodexArgs,
   buildCodexConfigToml,
@@ -360,16 +361,21 @@ export interface NativeCacheIndex {
   reuse: Map<string, McpAtlasCell>;
 }
 
-/** Scans a prior `agent.jsonl`-shaped file for native-arm cells, keeping the
- *  earliest `generated_at` on a key collision. `current` and `reuse` overlap by
- *  design — a caller who wants literal reuse-without-restamp can check `current`
- *  first. */
 /**
- * Indexes prior native cells for reuse, keyed by exactly the same inputs
- * `drainNativeCache`'s caller uses to key the live queue — `promptHash`,
- * `taskListHash`, and `datasetRevision` must be the CURRENT run's values here,
- * not the cell's own recorded ones, or a cache built from a different pinned
- * corpus would collide on task_id/model/scope alone and reuse a stale row.
+ * Indexes prior native cells (agent.jsonl rows) for reuse, keyed by exactly the
+ * same inputs `drainNativeCache`'s caller uses to key the live queue —
+ * `promptHash`, `taskListHash`, and `datasetRevision` must be the CURRENT run's
+ * values here, not the cell's own recorded ones, or a cache built from a
+ * different pinned corpus would collide on task_id/model/scope alone and reuse
+ * a stale row.
+ *
+ * Keeps the earliest `generated_at` on a key collision. `current` and `reuse`
+ * overlap by design — a caller who wants literal reuse-without-restamp can
+ * check `current` first.
+ *
+ * Cells that are not `isReusableCell` (a re-runnable infra/request error, or a
+ * failed judge) are skipped before the collision check, so they run live and
+ * never shadow a later good cell.
  */
 export function readNativeCacheIndex(
   cells: readonly McpAtlasCell[],
@@ -378,7 +384,7 @@ export function readNativeCacheIndex(
   const reuse = new Map<string, McpAtlasCell>();
   const current = new Set<string>();
   for (const c of cells) {
-    if (c.arm !== "native") continue;
+    if (c.arm !== "native" || !isReusableCell(c)) continue;
     const key = nativeCacheKey({
       taskId: c.task_id,
       model: c.model,

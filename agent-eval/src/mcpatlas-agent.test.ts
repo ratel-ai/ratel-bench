@@ -192,6 +192,34 @@ describe("parseClaudeResult", () => {
     expect(r?.is_error).toBe(true);
     expect(r?.subtype).toBe("error_max_turns");
   });
+
+  // Claude Code's error subtypes carry no `result`: their text is `errors[]`.
+  it("an error subtype's errors[] becomes error_text, one entry per line; result stays empty", () => {
+    const { result: _omit, ...base } = envelope;
+    const r = parseClaudeResult(
+      JSON.stringify({
+        ...base,
+        is_error: true,
+        subtype: "error_during_execution",
+        errors: [
+          "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+          "API Error: Connection error.",
+        ],
+      }),
+    );
+    expect(r?.result).toBe("");
+    expect(r?.error_text).toBe(
+      "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null\nAPI Error: Connection error.",
+    );
+  });
+
+  it("a success envelope with is_error keeps its error in result, with no error_text", () => {
+    const r = parseClaudeResult(
+      JSON.stringify({ ...envelope, is_error: true, result: "API Error: 529 Overloaded" }),
+    );
+    expect(r?.result).toBe("API Error: 529 Overloaded");
+    expect(r?.error_text).toBeUndefined();
+  });
 });
 
 describe("token helpers", () => {
