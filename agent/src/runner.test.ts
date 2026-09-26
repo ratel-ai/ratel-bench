@@ -1,8 +1,17 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { APICallError } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendRow, type RunCellFn, type RunnerConfig, run } from "./runner.js";
+import { descriptor as controlBaseline } from "./agents/control-baseline.js";
+import {
+  appendRow,
+  makeRegistryRunCell,
+  type RunCellFn,
+  type RunnerConfig,
+  run,
+} from "./runner.js";
 import type { AgentDescriptor, CellResult, Scenario } from "./types.js";
 
 /** Stub descriptor — `runCell` is what the runner actually invokes; this only carries flags (e.g. `poolSizeAgnostic`). */
@@ -745,5 +754,104 @@ describe("runner", () => {
     });
     expect(summary.stopped_reason).toBe("global_cap");
     expect(summary.cells_run).toBeLessThan(3);
+  });
+});
+
+describe("makeRegistryRunCell on an errored cell", () => {
+  // Step 1 calls the gold tool with the gold args; step 2 fails. The partial
+  // trace must not score: errored cells stay fail/fail, as before the error
+  // taxonomy, while keeping the usage and cost of step 1.
+  const goldScenario: Scenario = {
+    ...scenario,
+    candidate_pool: [
+      {
+        ...scenario.candidate_pool[0],
+        input_schema: { type: "object", properties: { path: { type: "string" } } },
+      },
+    ],
+    gold_calls: [{ tool: "fs.read_file", args: { path: ["/etc/hosts"] } }],
+  };
+
+  function modelFailingStep2(step2: () => Promise<never>): MockLanguageModelV3 {
+    let call = 0;
+    return new MockLanguageModelV3({
+      doGenerate: async () => {
+        call++;
+        if (call > 1) return step2();
+        return {
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "c1",
+              toolName: "fs_read_file",
+              input: JSON.stringify({ path: "/etc/hosts" }),
+            },
+          ],
+          finishReason: { unified: "tool-calls", raw: "tool_use" },
+          usage: {
+            inputTokens: { total: 120, noCache: 120, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 30, text: 30, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+  }
+
+  async function runCell(model: MockLanguageModelV3, perRunTimeoutMs: number) {
+    const registry = new Map([[controlBaseline.id, controlBaseline]]);
+    return makeRegistryRunCell(registry)({
+      scenario: goldScenario,
+      arm: controlBaseline.id,
+      model: { id: "priced-model", model },
+      runIndex: 0,
+      pool: goldScenario.candidate_pool,
+      poolSize: 1,
+      config: {
+        ...baseConfig("unused", "unused"),
+        perRunTimeoutMs,
+        pricing: {
+          "priced-model": {
+            inputPer1M: 1,
+            outputPer1M: 5,
+            cachedInputPer1M: 0,
+            cacheCreationPer1M: 0,
+          },
+        },
+      },
+    });
+  }
+
+  function expectUnscoredButMetered(cell: CellResult): void {
+    expect(cell.programmatic_verdict).toBe("fail");
+    expect(cell.ast_verdict).toBe("fail");
+    expect(cell.effective_tool_ids).toEqual([]);
+    expect(cell.tool_calls).toEqual([]);
+    expect(cell.turns).toBe(0);
+    expect(cell.input_tokens).toBeGreaterThan(0);
+    expect(cell.dollar_cost).toBeGreaterThan(0);
+  }
+
+  it("stays fail/fail when step 2 throws a non-retryable 400", async () => {
+    const model = modelFailingStep2(async () => {
+      // Non-retryable, so the SDK's real backoff never runs.
+      throw new APICallError({
+        message: "tools: too many tools",
+        url: "https://api.test/v1",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    });
+    const cell = await runCell(model, 5_000);
+    expect(cell.error_class).toBe("request");
+    expectUnscoredButMetered(cell);
+  });
+
+  it("stays fail/fail when step 2 hangs past the deadline", async () => {
+    const model = modelFailingStep2(() => new Promise<never>(() => {}));
+    const cell = await runCell(model, 50);
+    expect(cell.error_class).toBe("timeout");
+    expectUnscoredButMetered(cell);
   });
 });

@@ -10,6 +10,7 @@
 // report from the summary history (latest timestamp per version × dataset).
 
 import type { BfclRetrievalRow, GoldSimilarity } from "./bfcl-types.js";
+import type { ErrorClass } from "./cell-errors.js";
 
 // The Rust skill-retrieval row is structurally identical to the BFCL retrieval
 // row (same `RetrievalRow` struct in `retrieval/src/runner.rs`), carrying
@@ -70,6 +71,8 @@ export interface SragentsSelectCell {
   category: string;
   arm: string;
   model: string;
+  /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
+  provider?: string;
   run_index: number;
   /** Candidate-pool size the arm drew from; `null` for the pool-agnostic oracle arm. */
   pool_size: number | null;
@@ -83,6 +86,13 @@ export interface SragentsSelectCell {
   dollar_cost: number;
   wall_ms: number;
   error: string | null;
+  /**
+   * Taxonomy class of `error` (see `cell-errors.ts`). Set only on errored rows;
+   * legacy rows lack it and are classified from the message instead.
+   */
+  error_class?: ErrorClass;
+  /** The call's finish reason (`length` = truncated output); `error` when the call threw without one. */
+  finish_reason?: string;
 }
 
 /** Per-row skill-selection record (`results/raw/sragents/task-completion-rows.jsonl`). */

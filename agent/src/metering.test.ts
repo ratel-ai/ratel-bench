@@ -1,3 +1,4 @@
+import { APICallError } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   type AgentLikeResult,
@@ -5,6 +6,7 @@ import {
   dollarCost,
   meter,
   SDK_VERSION,
+  StepRecorder,
   summarize,
 } from "./metering.js";
 
@@ -96,7 +98,14 @@ describe("dollarCost", () => {
     const cost = dollarCost(
       "some-model",
       { input: 0, output: 0, cachedInput: 1_000_000, cacheCreation: 1_000_000 },
-      { "some-model": { inputPer1M: 0, outputPer1M: 0, cachedInputPer1M: 0.3, cacheCreationPer1M: 3.75 } },
+      {
+        "some-model": {
+          inputPer1M: 0,
+          outputPer1M: 0,
+          cachedInputPer1M: 0.3,
+          cacheCreationPer1M: 3.75,
+        },
+      },
     );
     expect(cost).toBeCloseTo(4.05, 5);
   });
@@ -206,5 +215,123 @@ describe("meter", () => {
     expect(cell.error).toMatch(/provider blew up/);
     expect(cell.finish_reason).toBe("error");
     expect(cell.input_tokens).toBe(0);
+  });
+});
+
+describe("meter error taxonomy", () => {
+  const ctx = {
+    scenarioId: "x",
+    arm: "control-baseline",
+    model: "priced-model",
+    runIndex: 0,
+    catalogSize: 5,
+    poolSize: 30,
+    seed: 1,
+  };
+
+  it("stamps error_class on errored rows", async () => {
+    const { cell } = await meter(ctx, async () => {
+      throw new APICallError({
+        message: "tools: too many tools",
+        url: "https://api.test/v1",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    });
+    expect(cell.error).toMatch(/too many tools/);
+    expect(cell.error_class).toBe("request");
+  });
+
+  it("leaves error_class unset on successful rows", async () => {
+    const { cell } = await meter(ctx, async () => fakeResult);
+    expect(cell.error_class).toBeUndefined();
+  });
+
+  it("keeps usage and cost of the steps recorded before a later step threw", async () => {
+    const recorder = new StepRecorder();
+    const { cell } = await meter(
+      ctx,
+      async () => {
+        recorder.record(fakeResult.steps[0]);
+        recorder.record({
+          toolCalls: [],
+          finishReason: "length",
+          usage: { inputTokens: 0, outputTokens: 70, totalTokens: 70 },
+        });
+        throw new Error("boom");
+      },
+      {
+        "priced-model": {
+          inputPer1M: 1,
+          outputPer1M: 5,
+          cachedInputPer1M: 0,
+          cacheCreationPer1M: 0,
+        },
+      },
+      recorder,
+    );
+    expect(cell.error).toBe("boom");
+    expect(cell.input_tokens).toBe(100);
+    expect(cell.output_tokens).toBe(120);
+    expect(cell.dollar_cost).toBeCloseTo((100 * 1 + 120 * 5) / 1_000_000, 12);
+    // Truncation also comes from the recorded steps (70 ≠ step 0's 50: max, not first/sum).
+    expect(cell.truncated_steps).toBe(1);
+    expect(cell.max_step_output_tokens).toBe(70);
+    // Only usage, cost and truncation come from the recorded steps; the scored trace stays empty.
+    expect(cell.tool_calls_total).toBe(0);
+    expect(cell.tool_calls).toEqual([]);
+    expect(cell.turns).toBe(0);
+  });
+
+  it("stamps the provider from the context", async () => {
+    const { cell } = await meter(
+      { ...ctx, provider: "anthropic.messages" },
+      async () => fakeResult,
+    );
+    expect(cell.provider).toBe("anthropic.messages");
+  });
+});
+
+describe("summarize truncation", () => {
+  it("counts finishReason 'length' steps as truncated_steps and records max_step_output_tokens", () => {
+    const result: AgentLikeResult = {
+      steps: [
+        { finishReason: "tool-calls", usage: { inputTokens: 10, outputTokens: 40 } },
+        { finishReason: "length", usage: { inputTokens: 10, outputTokens: 4096 } },
+        { finishReason: "length", usage: { inputTokens: 10, outputTokens: 12 } },
+        { finishReason: "stop" },
+      ],
+    };
+    const s = summarize(result);
+    expect(s.truncatedSteps).toBe(2);
+    expect(s.maxStepOutputTokens).toBe(4096);
+  });
+
+  it("reports zero for a null result", () => {
+    const s = summarize(null);
+    expect(s.truncatedSteps).toBe(0);
+    expect(s.maxStepOutputTokens).toBe(0);
+  });
+
+  it("meter stamps truncated_steps and max_step_output_tokens on the row", async () => {
+    const { cell } = await meter(
+      {
+        scenarioId: "x",
+        arm: "control-baseline",
+        model: "m",
+        runIndex: 0,
+        catalogSize: 1,
+        poolSize: 30,
+        seed: 1,
+      },
+      async () => ({
+        text: "",
+        finishReason: "length",
+        steps: [{ finishReason: "length", usage: { inputTokens: 5, outputTokens: 16 } }],
+      }),
+    );
+    expect(cell.truncated_steps).toBe(1);
+    expect(cell.max_step_output_tokens).toBe(16);
   });
 });
