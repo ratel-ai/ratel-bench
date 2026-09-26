@@ -17,6 +17,9 @@ function task(over: Partial<SragentsTaskSummaryRow>): SragentsTaskSummaryRow {
     precision: 0.6,
     mean_total_tokens: 1200,
     latency_p50_ms: 800,
+    excluded_cells: 0,
+    errored_cells: 0,
+    truncated_cells: 0,
     ...over,
   };
 }
@@ -134,5 +137,36 @@ describe("buildReport (sragents)", () => {
       report.ratel_versions["0.2.0"].task_completion["gpt-5.4-mini"]["ratel-full"].toolqa;
     expect(entry.timestamp).toBe("2026-06-25T00:00:00.000Z");
     expect(entry.metrics).toMatchObject({ task_completion_accuracy: 0.9 });
+  });
+
+  it("on a timestamp tie the last appended summary row wins", () => {
+    const first = task({ selection_accuracy: 0.5 });
+    const resummary = task({ selection_accuracy: 0.9, excluded_cells: 3 });
+    const report = buildReport([], [first, resummary], NOW);
+    const entry =
+      report.ratel_versions["0.2.0"].task_completion["gpt-5.4-mini"]["ratel-full"].toolqa;
+    expect(entry.metrics).toMatchObject({ selection_accuracy: 0.9, excluded_cells: 3 });
+  });
+
+  it("tied retrieval re-summary rows appear once per (pool_size, k), last appended wins", () => {
+    const report = buildReport(
+      [
+        retr({ pool_size: 100, k: 5, mean_precision: 0.1 }),
+        retr({ pool_size: 50, k: 5 }),
+        retr({ pool_size: 100, k: 5, mean_precision: 0.2 }), // same timestamp: a re-summary
+      ],
+      [],
+      NOW,
+    );
+    const metrics = report.ratel_versions["0.2.0"].retriever_evaluation.bigcodebench
+      .metrics as Array<{
+      pool_size: number;
+      k: number;
+      mean_precision: number;
+    }>;
+    expect(metrics.map((m) => [m.pool_size, m.k, m.mean_precision])).toEqual([
+      [50, 5, 1],
+      [100, 5, 0.2],
+    ]);
   });
 });

@@ -10,6 +10,7 @@ import {
   savingsByModel,
   statsByArmModel,
   subsetOf,
+  versionSplitCells,
 } from "./report.js";
 import type { Arm, CellResult } from "./types.js";
 
@@ -253,6 +254,50 @@ describe("statsByArmModel", () => {
     expect(ratel180?.mean_input_tokens).toBe(800);
     expect(ratel30?.mean_input_tokens).toBe(200);
   });
+
+  it("token/cost/latency means ignore request/timeout/outcome rows", () => {
+    const timedOut = {
+      programmatic_verdict: "fail",
+      error: "run timed out after 180000ms",
+      input_tokens: 50_000,
+      total_tokens: 60_000,
+      turns: 9,
+      dollar_cost: 1,
+      wall_ms: 180_000,
+    } as const;
+    const cells = [
+      cell({ scenario_id: "s1" }),
+      cell({ scenario_id: "s1", run_index: 1, ...timedOut }),
+      // Every run of s2 errored: no per-scenario means, so it can't drag the group toward 0.
+      cell({ scenario_id: "s2", ...timedOut }),
+    ];
+    const [s] = statsByArmModel(cells);
+    expect(s).toMatchObject({
+      scenarios: 2,
+      n: 3,
+      success_rate: 0.25, // selection still scores every kept row: s1 1/2, s2 0/1
+      mean_input_tokens: 1000,
+      mean_total_tokens: 1200,
+      mean_turns: 1,
+      mean_dollar_cost: 0.01,
+      mean_wall_ms: 100,
+    });
+  });
+
+  it("a group whose rows all errored has null token/cost/latency means", () => {
+    const [s] = statsByArmModel([
+      cell({ programmatic_verdict: "fail", error: "400 Bad Request", error_class: "request" }),
+    ]);
+    expect(s).toMatchObject({
+      success_rate: 0,
+      mean_catalog_size: 5,
+      mean_input_tokens: null,
+      mean_total_tokens: null,
+      mean_turns: null,
+      mean_dollar_cost: null,
+      mean_wall_ms: null,
+    });
+  });
 });
 
 describe("savingsByModel", () => {
@@ -333,6 +378,25 @@ describe("savingsByModel", () => {
     // Oracle's mean_input is shown identically next to every pool row for the model.
     expect(rows[0].oracle_mean_input).toBe(100);
     expect(rows[1].oracle_mean_input).toBe(100);
+  });
+
+  it("savings are null when one side has no non-errored rows", () => {
+    const cells = [
+      cell({ arm: "control-baseline", programmatic_verdict: "fail", error: "run timed out" }),
+      cell({ arm: "ratel-full", input_tokens: 250 }),
+    ];
+    const [s] = savingsByModel(cells);
+    expect(s).toMatchObject({
+      control_mean_input: null,
+      ratel_mean_input: 250,
+      oracle_mean_input: null,
+      control_mean_turns: null,
+      oracle_mean_turns: null,
+      input_savings_pct: null,
+      total_savings_pct: null,
+      dollar_savings_pct: null,
+      wall_savings_pct: null,
+    });
   });
 });
 
@@ -811,5 +875,106 @@ describe("renderReport", () => {
     expect(md).toContain("### sragents / champ / skill-retrieval");
     expect(md).toContain("### sragents / toolqa / skill-retrieval");
     expect(md).toContain("### sragents / all / skill-retrieval");
+  });
+
+  it("renderReport uses superseded, non-excluded rows", () => {
+    const transient = "Failed after 3 attempts. Last error: Internal server error";
+    const failed = { programmatic_verdict: "fail", error: transient } as const;
+    const cells = [
+      cell({ scenario_id: "s1", ...failed }), // superseded by the re-run below
+      cell({ scenario_id: "s1", generated_at: "2026-06-24T00:00:00.000Z" }),
+      cell({ scenario_id: "s2", ...failed }), // final infra error → excluded
+      cell({ scenario_id: "s3", programmatic_verdict: "fail", error: "run timed out after 1ms" }),
+    ];
+    const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
+    // Headline: s1 (pass) + s3 (scored timeout fail) → 2 scenarios, 50% selection.
+    expect(md).toMatch(
+      /\| control-baseline \| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| [^|]+ \| 2 \| 2 \| 50\.0% \|/,
+    );
+    // Failure taxonomy: pass 1 | fail 1 | errored 1 (the timeout; the infra rows are gone).
+    expect(md).toMatch(
+      /\| control-baseline \| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| 1 \| 1 \| 1 \|/,
+    );
+    expect(md).toContain("Cells: **2**");
+    expect(md).toContain("**1** infra-errored (transient/access) excluded");
+    expect(md).toContain("**1** superseded");
+  });
+
+  it("renderReport savings read only the superseded, non-excluded rows", () => {
+    const transient = "Failed after 3 attempts. Last error: Internal server error";
+    const cells = [
+      // A clean row superseded by a later re-run of the same cell (e.g. `--force`):
+      // not errored, so only supersede keeps its tokens/cost out of the means.
+      cell({ scenario_id: "s1", input_tokens: 99_999, dollar_cost: 9 }),
+      cell({ scenario_id: "s1", generated_at: "2026-06-24T00:00:00.000Z" }),
+      cell({ scenario_id: "s2", programmatic_verdict: "fail", error: transient }), // excluded
+      cell({ scenario_id: "s1", arm: "ratel-full" as Arm, input_tokens: 500 }),
+    ];
+    const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
+    expect(md).toContain("| gpt-5.4-mini | (uncategorized) | 30 | 1000 → 500.0 | **50.0%** |");
+    expect(md).toContain("$0.0100 → $0.0100 | **0.0%**");
+  });
+
+  it("renderReport shows — for means and savings with no non-errored rows", () => {
+    const timedOut = { programmatic_verdict: "fail", error: "run timed out after 1ms" } as const;
+    const cells = [cell({ ...timedOut }), cell({ arm: "ratel-full" as Arm, input_tokens: 500 })];
+    const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
+    expect(md).toMatch(
+      /\| control-baseline \| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| [^|]+ \| 1 \| 1 \| 0\.0% \| — \| — \| — \| — \| — \| — \|/,
+    );
+    expect(md).toContain("| gpt-5.4-mini | (uncategorized) | 30 | — → 500.0 | **—** |");
+    // Row end: oracle input (no oracle arm) and turns Δ (no clean control row).
+    expect(md).toMatch(
+      /\| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| — → 500\.0 \|[^\n]*\| — \| — \|\n/,
+    );
+  });
+
+  it("renderReport flags label cells counted once per ratel_version", () => {
+    const cells = [
+      cell({ ratel_version: "0.3.0-rc.1", programmatic_verdict: "fail" }),
+      cell({ ratel_version: "0.1.5" }),
+    ];
+    const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
+    expect(md).toContain("Cells: **2**");
+    expect(md).toContain("**1** cell appears under more than one `ratel_version`");
+  });
+
+  it("renderReport adds no version-split line when every cell has one ratel_version", () => {
+    const md = renderReport({
+      cells: [cell({}), cell({ run_index: 1 })],
+      retrieval: [],
+      generatedAt: new Date("2026-05-01"),
+    });
+    expect(md).not.toContain("more than one `ratel_version`");
+  });
+});
+
+describe("versionSplitCells", () => {
+  it("lists label cells (label + scenario/arm/model/run/pool) with rows at >1 ratel_version", () => {
+    const cells = [
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "0.3.0-rc.1" }),
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "0.1.5" }),
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "0.1.5" }),
+      cell({ ratel_ai_core_version: "0.2.0", ratel_version: "0.1.5" }), // other label
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "x", run_index: 1 }),
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "y", pool_size: null }),
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ratel_version: "z", model: "m2" }),
+    ];
+    expect(versionSplitCells(cells)).toEqual([
+      {
+        label: "0.3.0-rc.1",
+        arm: "control-baseline",
+        model: "gpt-5.4-mini",
+        scenario_id: "s1",
+        versions: { "0.3.0-rc.1": 1, "0.1.5": 2 },
+      },
+    ]);
+  });
+
+  it("counts a row without ratel_version as `unset`", () => {
+    const { ratel_version: _, ...legacy } = cell({});
+    expect(versionSplitCells([legacy, cell({})]).map((c) => c.versions)).toEqual([
+      { unset: 1, test: 1 },
+    ]);
   });
 });

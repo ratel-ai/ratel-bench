@@ -110,8 +110,7 @@ export function buildReport(
     const [version, dataset] = key.split("::");
     ensureVersion(report, version).retriever_evaluation[dataset] = {
       timestamp: rows[0]?.timestamp ?? "",
-      metrics: rows
-        .slice()
+      metrics: lastPerPoolK(rows)
         .sort((a, b) => a.pool_size - b.pool_size || a.k - b.k)
         .map((r) => metricFields(r as unknown as Record<string, unknown>)),
     };
@@ -124,14 +123,24 @@ export function buildReport(
   )) {
     const [version, model, arm, dataset] = key.split("::");
     const modelBucket = bucket(ensureVersion(report, version).task_completion, model);
+    // Ties (a re-summary of the same rows) go to the last appended summary row.
+    const latestRow = rows[rows.length - 1];
     const armBucket = bucket(modelBucket, arm);
     armBucket[dataset] = {
-      timestamp: rows[0].timestamp,
-      metrics: metricFields(rows[0] as unknown as Record<string, unknown>),
+      timestamp: latestRow.timestamp,
+      metrics: metricFields(latestRow as unknown as Record<string, unknown>),
     };
   }
 
   return report;
+}
+
+/**
+ * One row per (pool_size, k): a re-summary of unchanged retrieval rows ties on
+ * timestamp and would otherwise append a duplicate batch. The last appended wins.
+ */
+function lastPerPoolK<T extends { pool_size: number; k: number }>(rows: T[]): T[] {
+  return [...new Map(rows.map((r) => [`${r.pool_size}::${r.k}`, r])).values()];
 }
 
 // ── CLI shell ─────────────────────────────────────────────────────────────────

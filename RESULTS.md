@@ -26,6 +26,7 @@ This document consolidates the agent benchmark across four model families on the
   - `ratel-full` — Ratel discovery + selection. The model sees ~5 BM25-prefetched tools plus the 2 gateway tools (`search_tools` + `invoke_tool`) — ~7 total — regardless of pool size.
 - **Pool sizes**: 30, 50, 100, 180. Real-world MCP setups land in the 100–200 range.
 - **Hardware**: cloud APIs for Claude / glm-5.1:cloud; local Ollama on **MacBook Pro M4 24 GB** for qwen3.5.
+- **Errored cells** (applies to reports rendered from now on; the tables below predate it): each cell counts once — its last final row supersedes earlier attempts. Final infra errors (provider outage/overload, gated model: `transient|access`) are excluded and reported as a count, since they say nothing about the model; request errors, timeouts and model failures stay scored fails. Token / cost / latency means now cover non-errored cells only (a slight redefinition: they used to average errored cells too). Output-limit cut-offs are kept and scored on their verdict (a truncated cell can still pass). BFCL / SR-Agents summaries expose `excluded_cells`, `errored_cells` and `truncated_cells` per group.
 
 ## Results by model family
 

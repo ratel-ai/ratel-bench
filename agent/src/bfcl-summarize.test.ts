@@ -204,10 +204,12 @@ describe("summarizeBfcl — task completion", () => {
     const s = taskSummary[0];
     expect(s.recall).toBe(0.5);
     expect(s.latency_p50_ms).toBe(700);
-    // exactly the five metrics (+ identity/dims + n), nothing extra
+    // exactly the five metrics (+ identity/dims + n + error counters), nothing extra
     expect(Object.keys(s).sort()).toEqual(
       [
         "arm",
+        "errored_cells",
+        "excluded_cells",
         "latency_p50_ms",
         "mean_total_tokens",
         "model",
@@ -218,6 +220,7 @@ describe("summarizeBfcl — task completion", () => {
         "source",
         "task_completion_accuracy",
         "timestamp",
+        "truncated_cells",
         "type",
       ].sort(),
     );
@@ -235,5 +238,242 @@ describe("summarizeBfcl — task completion", () => {
         .map((r) => [r.arm, r.task_completion_accuracy]),
     );
     expect(byArm).toEqual({ "ratel-full": 1, "control-baseline": 0 });
+  });
+});
+
+describe("summarizeBfcl — errored cells", () => {
+  const LATER = "2026-06-23T00:00:00.000Z";
+  const TRANSIENT = "Failed after 3 attempts. Last error: Internal server error";
+  const failed: Partial<CellResult> = {
+    programmatic_verdict: "fail",
+    ast_verdict: "fail",
+    tool_calls: [],
+  };
+
+  it("(a) supersedes a transient row with a later good row of the same cell", () => {
+    const cells = [
+      cell({ ...failed, error: TRANSIENT }),
+      cell({ generated_at: LATER }), // re-run, passes
+    ];
+    const { taskRows, taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskRows).toHaveLength(1);
+    expect(taskRows[0].error_class).toBeNull();
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 1,
+      selection_accuracy: 1,
+      excluded_cells: 0,
+    });
+  });
+
+  it.each<Partial<CellResult>>([
+    { ratel_ai_core_version: "0.3.0-rc.1" },
+    { ratel_version: "other" },
+    { model: "claude-sonnet-4-6" },
+    { run_index: 1 },
+    { pool_size: 30 },
+    { pool_size: null },
+  ])("(a) keys supersede on label/version/model/run/pool: %o is its own cell", (variant) => {
+    const cells = [cell({}), cell({ ...failed, ...variant })];
+    const { taskRows } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskRows).toHaveLength(2);
+  });
+
+  it("(a) keys supersede on the label too: same cell under two labels counts in both", () => {
+    const cells = [
+      cell({ ratel_ai_core_version: "0.2.0" }),
+      cell({ ratel_ai_core_version: "0.3.0-rc.1", ...failed }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary.map((s) => [s.ratel_ai_core_version, s.scenarios])).toEqual([
+      ["0.2.0", 1],
+      ["0.3.0-rc.1", 1],
+    ]);
+  });
+
+  it("(b) excludes final transient|access rows from every metric and counts them", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0" }),
+      // A step cut off by the output limit before the throw: excluded, so not counted as truncated.
+      cell({
+        scenario_id: "bfcl-simple-1",
+        ...failed,
+        error: TRANSIENT,
+        total_tokens: 9,
+        truncated_steps: 1,
+      }),
+      cell({ scenario_id: "bfcl-simple-2", ...failed, error: "boom", error_class: "access" }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 1,
+      excluded_cells: 2,
+      errored_cells: 0,
+      truncated_cells: 0,
+      selection_accuracy: 1,
+      task_completion_accuracy: 1,
+      mean_total_tokens: 1050,
+    });
+  });
+
+  it("(c) request|timeout|outcome rows stay scored fails and are counted as errored", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0" }),
+      cell({ scenario_id: "bfcl-simple-1", ...failed, error: "400", error_class: "request" }),
+      cell({ scenario_id: "bfcl-simple-2", ...failed, error: "run timed out after 180000ms" }),
+      cell({
+        scenario_id: "bfcl-simple-3",
+        ...failed,
+        error: "Output blocked by content filtering policy",
+      }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 4,
+      errored_cells: 3,
+      excluded_cells: 0,
+      selection_accuracy: 0.25,
+    });
+  });
+
+  it("(d) token and latency means use only non-errored rows", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0", total_tokens: 1000, wall_ms: 800 }),
+      cell({
+        scenario_id: "bfcl-simple-1",
+        ...failed,
+        error: "run timed out after 180000ms",
+        total_tokens: 50_000,
+        wall_ms: 180_000,
+      }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 2,
+      mean_total_tokens: 1000,
+      latency_p50_ms: 800,
+    });
+  });
+
+  it("(e) counts truncated cells (truncated_steps, or legacy finish_reason 'length'), kept and scored on their verdict", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0", ...failed, truncated_steps: 1 }),
+      cell({ scenario_id: "bfcl-simple-1", ...failed, finish_reason: "length" }),
+      cell({ scenario_id: "bfcl-simple-2", truncated_steps: 0 }),
+    ];
+    const { taskRows, taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskRows.map((r) => r.truncated)).toEqual([true, true, false]);
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 3,
+      truncated_cells: 2,
+      errored_cells: 0,
+      selection_accuracy: 1 / 3,
+    });
+  });
+
+  it("(e) a truncated cell with passing verdicts counts as truncated AND as a pass", () => {
+    const cells = [cell({ finish_reason: "length" })];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({
+      truncated_cells: 1,
+      errored_cells: 0,
+      selection_accuracy: 1,
+      task_completion_accuracy: 1,
+    });
+  });
+
+  it("(f) the group timestamp covers every row, excluded ones included", () => {
+    const cells = [
+      cell({ scenario_id: "bfcl-simple-0" }),
+      cell({ scenario_id: "bfcl-simple-1", ...failed, error: TRANSIENT, generated_at: LATER }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0].timestamp).toBe(LATER);
+  });
+
+  it("(f2) the group timestamp covers superseded rows too", () => {
+    const cells = [cell({}), cell({ ...failed, error: TRANSIENT, generated_at: LATER })];
+    const { taskRows, taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskRows).toHaveLength(1);
+    expect(taskRows[0].error_class).toBeNull();
+    expect(taskSummary[0].timestamp).toBe(LATER);
+  });
+
+  it("(g) a group with no kept rows emits null metrics", () => {
+    const cells = [cell({ ...failed, error: TRANSIENT })];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({
+      scenarios: 0,
+      excluded_cells: 1,
+      task_completion_accuracy: null,
+      selection_accuracy: null,
+      recall: null,
+      mean_total_tokens: null,
+      latency_p50_ms: null,
+    });
+  });
+});
+
+describe("summarizeBfcl — version-split cells", () => {
+  it("flags label cells whose rows span more than one ratel_version (each counted once per version)", () => {
+    const cells = [
+      cell({
+        ratel_version: "0.3.0-rc.1",
+        error: "Failed after 3 attempts. Last error: overloaded",
+      }),
+      cell({ ratel_version: "0.1.5", generated_at: "2026-06-23T00:00:00.000Z" }),
+      cell({ scenario_id: "bfcl-simple-1" }),
+      cell({ scenario_id: "bfcl-simple-1", run_index: 1 }), // --runs 2: not a split
+      cell({ scenario_id: "bfcl-simple-1", ratel_ai_core_version: "0.4.0" }), // other label
+    ];
+    const { taskSummary, versionSplitCells } = summarizeBfcl({
+      retrievalRows: [],
+      cells,
+      scenarios,
+    });
+    // The re-drain at another SDK version did not supersede the transient row.
+    expect(taskSummary.find((s) => s.ratel_ai_core_version === CORE)).toMatchObject({
+      scenarios: 3,
+      excluded_cells: 1,
+    });
+    expect(versionSplitCells).toEqual([
+      {
+        label: CORE,
+        arm: "ratel-full",
+        model: "claude-haiku-4-5",
+        scenario_id: "bfcl-simple-0",
+        versions: { "0.3.0-rc.1": 1, "0.1.5": 1 },
+      },
+    ]);
+  });
+
+  it("checks only the selected rows", () => {
+    const cells = [cell({ ratel_version: "a" }), cell({ ratel_version: "b" })];
+    expect(
+      summarizeBfcl({ retrievalRows: [], cells, scenarios, label: "0.4.0" }).versionSplitCells,
+    ).toEqual([]);
+  });
+});
+
+describe("summarizeBfcl — label filter", () => {
+  it("emits only the given label's task and retrieval groups", () => {
+    const cells = [
+      cell({ ratel_ai_core_version: "0.2.0" }),
+      cell({ ratel_ai_core_version: "0.4.0-sparse" }),
+    ];
+    const retrievalRows = [
+      retrievalRow({ ratel_ai_core_version: "0.2.0" }),
+      retrievalRow({ ratel_ai_core_version: "0.4.0-sparse", hit_at_k: false }),
+    ];
+    const { retrievalSummary, taskRows, taskSummary } = summarizeBfcl({
+      retrievalRows,
+      cells,
+      scenarios,
+      label: "0.4.0-sparse",
+    });
+    expect(taskRows.map((r) => r.ratel_ai_core_version)).toEqual(["0.4.0-sparse"]);
+    expect(taskSummary.map((r) => r.ratel_ai_core_version)).toEqual(["0.4.0-sparse"]);
+    expect(retrievalSummary.map((r) => [r.ratel_ai_core_version, r.accuracy])).toEqual([
+      ["0.4.0-sparse", 0],
+    ]);
   });
 });

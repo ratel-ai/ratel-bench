@@ -220,3 +220,188 @@ describe("summarizeSragents — skill selection (task)", () => {
     expect(ratel?.selection_accuracy).toBe(1);
   });
 });
+
+describe("summarizeSragents — errored cells", () => {
+  const LATER = "2026-06-23T00:00:00.000Z";
+  const TRANSIENT = "Failed after 3 attempts. Last error: Overloaded";
+  const miss = { selected_skill_ids: [] as string[] };
+  const toolqa = (cells: SragentsSelectCell[]) =>
+    summarizeSragents({ retrievalRows: [], cells }).taskSummary.find((r) => r.dataset === "toolqa");
+
+  it("(a) supersedes a transient row with a later good row of the same cell", () => {
+    const cells = [cell({ ...miss, error: TRANSIENT }), cell({ generated_at: LATER })];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(taskRows).toHaveLength(1);
+    expect(taskRows[0].error_class).toBeNull();
+    expect(toolqa(cells)).toMatchObject({ scenarios: 1, selection_accuracy: 1, excluded_cells: 0 });
+  });
+
+  it.each<Partial<SragentsSelectCell>>([
+    { ratel_ai_core_version: "0.3.0-rc.1" },
+    { model: "claude-haiku-4-5" },
+    { pool_size: 100 },
+    { pool_size: null },
+    { run_index: 1 },
+  ])("(a) keys supersede on label/model/pool_size/run_index: %o is its own cell", (variant) => {
+    const cells = [cell({}), cell({ ...miss, ...variant })];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(taskRows).toHaveLength(2);
+  });
+
+  it("(a) keys supersede on the label too: same cell under two labels counts in both", () => {
+    const cells = [cell({}), cell({ ratel_ai_core_version: "0.3.0-rc.1", ...miss })];
+    const { taskSummary } = summarizeSragents({ retrievalRows: [], cells });
+    expect(
+      taskSummary
+        .filter((s) => s.dataset === "toolqa")
+        .map((s) => [s.ratel_ai_core_version, s.scenarios]),
+    ).toEqual([
+      ["0.2.0", 1],
+      ["0.3.0-rc.1", 1],
+    ]);
+  });
+
+  it("duplicate ratel-full rows count once", () => {
+    const cells = [cell({ ...miss }), cell({ generated_at: LATER })];
+    expect(toolqa(cells)).toMatchObject({ scenarios: 1, selection_accuracy: 1 });
+  });
+
+  it("(b) excludes final transient|access rows from every metric and counts them", () => {
+    const cells = [
+      cell({ scenario_id: "sragents-toolqa_0" }),
+      cell({
+        scenario_id: "sragents-toolqa_1",
+        ...miss,
+        error: TRANSIENT,
+        total_tokens: 9,
+        finish_reason: "length", // excluded, so not counted as truncated
+      }),
+      cell({ scenario_id: "sragents-toolqa_2", ...miss, error: "gated", error_class: "access" }),
+    ];
+    expect(toolqa(cells)).toMatchObject({
+      scenarios: 1,
+      excluded_cells: 2,
+      errored_cells: 0,
+      truncated_cells: 0,
+      selection_accuracy: 1,
+      task_completion_accuracy: 1,
+      mean_total_tokens: 1020,
+    });
+  });
+
+  it("(c) request|timeout|outcome rows stay scored fails and are counted as errored", () => {
+    const cells = [
+      cell({ scenario_id: "sragents-toolqa_0" }),
+      cell({ scenario_id: "sragents-toolqa_1", ...miss, error: "400", error_class: "request" }),
+      cell({ scenario_id: "sragents-toolqa_2", ...miss, error: "run timed out after 300000ms" }),
+      cell({
+        scenario_id: "sragents-toolqa_3",
+        ...miss,
+        error: "No object generated: could not parse the response.",
+      }),
+    ];
+    expect(toolqa(cells)).toMatchObject({
+      scenarios: 4,
+      errored_cells: 3,
+      excluded_cells: 0,
+      selection_accuracy: 0.25,
+    });
+  });
+
+  it("(d) token and latency means use only non-errored rows", () => {
+    const cells = [
+      cell({ scenario_id: "sragents-toolqa_0", total_tokens: 1000, wall_ms: 800 }),
+      cell({
+        scenario_id: "sragents-toolqa_1",
+        ...miss,
+        error: "No object generated: response did not match schema.",
+        total_tokens: 50_000,
+        wall_ms: 90_000,
+      }),
+    ];
+    expect(toolqa(cells)).toMatchObject({
+      scenarios: 2,
+      mean_total_tokens: 1000,
+      latency_p50_ms: 800,
+    });
+  });
+
+  it("(e) counts finish_reason 'length' cells as truncated, kept and scored on their verdict", () => {
+    const cells = [
+      cell({
+        scenario_id: "sragents-toolqa_0",
+        ...miss,
+        finish_reason: "length",
+        error: "No object generated: could not parse the response.",
+        error_class: "outcome",
+      }),
+      cell({ scenario_id: "sragents-toolqa_1", finish_reason: "stop" }),
+    ];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(taskRows.map((r) => r.truncated)).toEqual([true, false]);
+    expect(toolqa(cells)).toMatchObject({
+      scenarios: 2,
+      truncated_cells: 1,
+      selection_accuracy: 0.5,
+    });
+  });
+
+  it("(f) the group timestamp covers every row, excluded ones included", () => {
+    const cells = [
+      cell({ scenario_id: "sragents-toolqa_0" }),
+      cell({ scenario_id: "sragents-toolqa_1", ...miss, error: TRANSIENT, generated_at: LATER }),
+    ];
+    expect(toolqa(cells)?.timestamp).toBe(LATER);
+    const all = summarizeSragents({ retrievalRows: [], cells }).taskSummary.find(
+      (r) => r.dataset === "all",
+    );
+    expect(all?.timestamp).toBe(LATER);
+  });
+
+  it("(f2) the group timestamp covers superseded rows too", () => {
+    const cells = [cell({}), cell({ ...miss, error: TRANSIENT, generated_at: LATER })];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(taskRows).toHaveLength(1);
+    expect(taskRows[0].error_class).toBeNull();
+    expect(toolqa(cells)?.timestamp).toBe(LATER);
+  });
+
+  it("(g) a group with no kept rows emits null metrics", () => {
+    const cells = [cell({ ...miss, error: TRANSIENT })];
+    expect(toolqa(cells)).toMatchObject({
+      scenarios: 0,
+      excluded_cells: 1,
+      task_completion_accuracy: null,
+      selection_accuracy: null,
+      recall: null,
+      precision: null,
+      mean_total_tokens: null,
+      latency_p50_ms: null,
+    });
+  });
+});
+
+describe("summarizeSragents — label filter", () => {
+  it("emits only the given label's task and retrieval groups", () => {
+    const cells = [
+      cell({ ratel_ai_core_version: "0.2.0" }),
+      cell({ ratel_ai_core_version: "0.4.0-sparse" }),
+    ];
+    const retrievalRows = [
+      retrievalRow({ ratel_ai_core_version: "0.2.0" }),
+      retrievalRow({ ratel_ai_core_version: "0.4.0-sparse", hit_at_k: false }),
+    ];
+    const { retrievalSummary, taskRows, taskSummary } = summarizeSragents({
+      retrievalRows,
+      cells,
+      label: "0.4.0-sparse",
+    });
+    expect(taskRows.map((r) => r.ratel_ai_core_version)).toEqual(["0.4.0-sparse"]);
+    expect(new Set(taskSummary.map((r) => r.ratel_ai_core_version))).toEqual(
+      new Set(["0.4.0-sparse"]),
+    );
+    expect(
+      new Set(retrievalSummary.map((r) => [r.ratel_ai_core_version, r.accuracy].join())),
+    ).toEqual(new Set(["0.4.0-sparse,0"]));
+  });
+});
