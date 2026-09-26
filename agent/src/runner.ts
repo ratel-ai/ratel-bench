@@ -30,6 +30,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { LanguageModel } from "ai";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { descriptor as controlOracle } from "./agents/control-oracle.js";
+import { errorClassOf, isRerunnable } from "./cell-errors.js";
+import { cellKeyOf, cellKeyString, controlKeyOf, controlKeyString } from "./cell-key.js";
 import { loadScenarios } from "./corpus.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
@@ -55,7 +57,7 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
  * canonical run's `agent.jsonl` and emits them into the current output without
  * paying for another live agent loop.
  */
-const CACHEABLE_ARMS: ReadonlySet<Arm> = new Set(["control-baseline", "control-oracle"]);
+export const CACHEABLE_ARMS: ReadonlySet<Arm> = new Set(["control-baseline", "control-oracle"]);
 
 export interface RunnerModel {
   /** Stable id used in the JSONL row (e.g. "gpt-5.4-mini"). */
@@ -121,21 +123,21 @@ export interface RunnerConfig {
    */
   registry?: Map<string, AgentDescriptor>;
   /**
-   * `@ratel-ai/sdk` version this campaign is measuring. Embedded in every
-   * row's `ratel_version` field and used as a cache-key dimension so a row
-   * written under v0.1.5 never satisfies a v0.1.6 request. Defaults to the
-   * resolved SDK version at module-load time; tests override.
+   * Version this run is filed under: stamped on every live and reused row and
+   * part of the resume key (`cellKeyOf`). The control cache is version-agnostic,
+   * so it ignores this. Defaults to the installed SDK version; `--ratel-version`
+   * overrides it for control-only re-drains of a label.
    */
   ratelVersion?: string;
   /**
-   * Persistent canonical `agent.jsonl` to consult for cached control-arm
-   * rows. When set and different from `outputPath`, the runner reads
-   * cacheable-arm rows whose `ratel_version` matches and emits them into
-   * `outputPath` without re-running the cell. Ephemeral runs set this to the
-   * canonical file so iteration on ratel arms doesn't re-pay for controls.
-   * `force: true` disables the cache.
+   * JSONL files to consult for cached control-arm rows (e.g. the canonical
+   * `agent.jsonl` plus a controls backfill). The runner reuses the earliest
+   * eligible cacheable-arm row per key across all of them (re-stamped) instead
+   * of re-running the cell. Ephemeral runs point this at the canonical file so
+   * iteration on ratel arms doesn't re-pay for controls. When unset or empty,
+   * `outputPath` is the source. `force: true` disables the cache.
    */
-  cacheSourcePath?: string;
+  cacheSourcePaths?: string[];
 }
 
 export type RunCellFn = (args: {
@@ -155,53 +157,11 @@ export type RunCellFn = (args: {
 export interface RunnerSummary {
   cells_run: number;
   cells_skipped: number;
-  /** Cells served from `cacheSourcePath` (control arms, matching ratel_version) instead of running live. */
+  /** Control cells served from the cache sources (re-stamped) instead of running live. */
   cells_cached: number;
   scenarios: number;
   total_dollars: number;
   stopped_reason: "completed" | "global_cap";
-}
-
-interface CellKey {
-  ratelVersion: string;
-  scenarioId: string;
-  arm: Arm;
-  model: string;
-  runIndex: number;
-  /** `null` for pool-size-agnostic arms — drops the `::p<n>` suffix from the key. */
-  poolSize: number | null;
-}
-
-function cellKeyString(k: CellKey): string {
-  const base = `${k.ratelVersion}::${k.scenarioId}::${k.arm}::${k.model}::${k.runIndex}`;
-  return k.poolSize === null ? base : `${base}::p${k.poolSize}`;
-}
-
-function cellKeyOf(cell: CellResult): string {
-  return cellKeyString({
-    ratelVersion: cell.ratel_version,
-    scenarioId: cell.scenario_id,
-    arm: cell.arm,
-    model: cell.model,
-    runIndex: cell.run_index,
-    poolSize: cell.pool_size,
-  });
-}
-
-/** Version-agnostic identity for a control cell — reused across ratel versions. */
-function controlKeyString(k: Omit<CellKey, "ratelVersion">): string {
-  const base = `${k.scenarioId}::${k.arm}::${k.model}::${k.runIndex}`;
-  return k.poolSize === null ? base : `${base}::p${k.poolSize}`;
-}
-
-function controlKeyOf(cell: CellResult): string {
-  return controlKeyString({
-    scenarioId: cell.scenario_id,
-    arm: cell.arm,
-    model: cell.model,
-    runIndex: cell.run_index,
-    poolSize: cell.pool_size,
-  });
 }
 
 function readCompletedKeys(path: string): Set<string> {
@@ -225,29 +185,43 @@ function readCompletedKeys(path: string): Set<string> {
 }
 
 /**
- * Index control-arm rows from a source file, keyed by a VERSION-AGNOSTIC key.
+ * Index control-arm rows from the source files, keyed by a VERSION-AGNOSTIC key.
  * Control arms don't use Ratel retrieval, so a control cell produced under any
  * version is a valid result for every other version — reused (re-stamped) instead
- * of re-run. The earliest-produced cell per key wins (the original baseline).
+ * of re-run. The earliest-produced cell per key across ALL sources wins (the
+ * original baseline); missing sources are skipped.
+ *
+ * Rerunnable errors (transient|access|request) are never eligible: they say
+ * nothing about the model, so serving them would re-count an outage as a fail
+ * forever. A key whose only rows are such errors is absent and runs live.
+ * Timeout/outcome errors are final, scored results and stay reusable.
  */
-function readControlCacheIndex(path: string): Map<string, CellResult> {
-  if (!existsSync(path)) return new Map();
+function readControlCacheIndex(paths: readonly string[]): Map<string, CellResult> {
   const out = new Map<string, CellResult>();
-  const text = readFileSync(path, "utf-8");
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const cell = JSON.parse(line) as CellResult;
-      if (typeof cell.ratel_version !== "string") continue;
-      if (!CACHEABLE_ARMS.has(cell.arm)) continue;
-      const key = controlKeyOf(cell);
-      const prev = out.get(key);
-      if (!prev || (cell.generated_at ?? "") < (prev.generated_at ?? "")) out.set(key, cell);
-    } catch {
-      // Ignore malformed rows.
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf-8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const cell = JSON.parse(line) as CellResult;
+        if (typeof cell.ratel_version !== "string") continue;
+        if (!CACHEABLE_ARMS.has(cell.arm)) continue;
+        if (isRerunnable(cell)) continue;
+        const key = controlKeyOf(cell);
+        const prev = out.get(key);
+        if (!prev || (cell.generated_at ?? "") < (prev.generated_at ?? "")) out.set(key, cell);
+      } catch {
+        // Ignore malformed rows.
+      }
     }
   }
   return out;
+}
+
+/** Control-cache sources: `cacheSourcePaths`, else the output itself. */
+function controlSources(config: RunnerConfig): string[] {
+  return config.cacheSourcePaths?.length ? config.cacheSourcePaths : [config.outputPath];
 }
 
 /**
@@ -265,7 +239,7 @@ export function appendRow(path: string, cell: CellResult): void {
 }
 
 function verdictBadge(cell: CellResult): string {
-  if (cell.error) return "ERROR";
+  if (cell.error != null) return "ERROR";
   if (cell.programmatic_verdict === "pass") return "PASS";
   if (cell.programmatic_verdict === "fail") return "FAIL";
   if (cell.judge_verdict === "pass") return "PASS*";
@@ -290,7 +264,7 @@ function logCell(
   const finish = cell.finish_reason;
   const cost = `$${cell.dollar_cost.toFixed(4)}`;
   console.log(`${tag} ${verdict.padEnd(5)} ${tokens} ${calls} ${turns} ${finish} ${cost}`);
-  if (cell.error) {
+  if (cell.error != null) {
     console.log(`  ↳ error: ${cell.error}`);
   }
   if (level === "verbose") {
@@ -414,7 +388,14 @@ export function makeRegistryRunCell(
       cell.ast_verdict = judgeAst(scenario.gold_calls, effectiveCalls(cell.tool_calls)).verdict;
     }
 
-    if (judgeModel && (programmatic.verdict === "n/a" || programmatic.verdict === "fail")) {
+    // An errored cell has no answer to judge (its trace is empty by design), so
+    // the judge would only spend money scoring the error. Any non-null error
+    // counts, even "" (an APICallError built from an empty statusText).
+    if (
+      judgeModel &&
+      errorClassOf(cell) === null &&
+      (programmatic.verdict === "n/a" || programmatic.verdict === "fail")
+    ) {
       const judged = await judgeLLM({
         prompt: scenario.prompt,
         judgeCriteria: scenario.judge_criteria,
@@ -600,14 +581,12 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   const ratelVersion = config.ratelVersion ?? SDK_VERSION;
   // Control-arm reuse (default-on): control cells are version-independent, so reuse
   // prior cells (from any version) re-stamped to this run instead of re-running them.
-  // Source defaults to this run's own output (its prior-version controls); --ephemeral
-  // points it at the canonical file. `--force` disables it. Same-version controls are
+  // Sources default to this run's own output (its prior-version controls); --ephemeral
+  // points them at the canonical file. `--force` disables it. Same-version controls are
   // already handled by the `completed` resume set, so there's no double-write.
-  const controlSource = config.cacheSourcePath ?? config.outputPath;
-  const cacheIndex =
-    !config.force && existsSync(controlSource)
-      ? readControlCacheIndex(controlSource)
-      : new Map<string, CellResult>();
+  const cacheIndex = config.force
+    ? new Map<string, CellResult>()
+    : readControlCacheIndex(controlSources(config));
 
   const { tasks, cellsSkipped: initialSkipped } = buildTaskQueue(
     scenarios,
@@ -643,6 +622,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         ratel_ai_core_version: RATEL_AI_CORE_VERSION,
         run_id: runId,
         generated_at: runTimestamp,
+        cache_source: "reused",
       });
       cellsCached++;
     } else {
@@ -734,10 +714,14 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         config,
       });
       // Tag with this run's identity before persisting (single write path, so
-      // every fresh row is stamped; cached/older rows keep their own tags).
+      // every fresh row is stamped; cached/older rows keep their own tags). The
+      // version is the one this run measures (and resumes by), not whatever the
+      // arm stamped — `--ratel-version` re-stamps control runs this way.
       cell.run_type = "task_completion";
       cell.run_id = runId;
       cell.generated_at = runTimestamp;
+      cell.ratel_version = ratelVersion;
+      cell.cache_source = "live";
       // Synchronous tail: append + counters happen without yielding, so two
       // workers cannot interleave their writes or accumulator updates.
       appendRow(config.outputPath, cell);

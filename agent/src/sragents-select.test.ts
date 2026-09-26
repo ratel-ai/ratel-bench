@@ -1,19 +1,23 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REPO_ROOT } from "./paths.js";
 import {
   armCandidates,
   buildCandidateSets,
   controlKey,
+  drainControlCache,
   readControlIndex,
   type SelectArgs,
   selectForCell,
+  sragentsCachePaths,
   stratifiedSample,
+  type Task,
 } from "./sragents-select.js";
-import type { SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
+import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 // Fixed price so cost assertions don't depend on models.json / MODELS_JSON.
@@ -213,6 +217,274 @@ describe("control-arm reuse", () => {
       current.has(controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0)),
     ).toBe(false);
   });
+
+  it("skips transient/access/request-errored rows in reuse", () => {
+    const path = join(dir, "agent.jsonl");
+    const early = "2026-06-01T00:00:00.000Z";
+    write(path, [
+      // key 0: an earlier outage row loses to the later good row.
+      cell({ generated_at: early, error: "Overloaded", selected_skill_ids: [] }),
+      cell({ selected_skill_ids: ["good"] }),
+      // key 1: only rerunnable errors → no reuse, runs live.
+      cell({ run_index: 1, error: "Forbidden", error_class: "access" }),
+      cell({ run_index: 1, error: "tools: too many", error_class: "request" }),
+      // key 2: a current-version transient error is current (resume skips it) but not reusable.
+      cell({ run_index: 2, ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
+    ]);
+    const { reuse } = readControlIndex(path);
+    const key = (run: number) =>
+      controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
+    expect(reuse.get(key(0))?.selected_skill_ids).toEqual(["good"]);
+    expect(reuse.has(key(1))).toBe(false);
+    expect(reuse.has(key(2))).toBe(false);
+  });
+
+  it("[guard] timeout/outcome control rows still reused", () => {
+    const path = join(dir, "agent.jsonl");
+    write(path, [
+      cell({ error: "run timed out after 300000ms" }),
+      cell({ run_index: 1, error: "No object generated: bad json", error_class: "outcome" }),
+    ]);
+    const { reuse } = readControlIndex(path);
+    const key = (run: number) =>
+      controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
+    expect(reuse.get(key(0))?.error).toBe("run timed out after 300000ms");
+    expect(reuse.get(key(1))?.error_class).toBe("outcome");
+  });
+
+  it("reads multiple sources; the earliest eligible row across files wins", () => {
+    const a = join(dir, "agent.jsonl");
+    const b = join(dir, "backfill.jsonl");
+    write(a, [
+      cell({ generated_at: "2026-05-01T00:00:00.000Z", error: "Overloaded" }),
+      cell({ generated_at: "2026-07-01T00:00:00.000Z", selected_skill_ids: ["a-late"] }),
+    ]);
+    write(b, [cell({ generated_at: "2026-06-01T00:00:00.000Z", selected_skill_ids: ["b-early"] })]);
+    const missing = join(dir, "missing.jsonl");
+    const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
+    // Both orders, so neither "last file wins" nor "only the last source is read" passes.
+    for (const paths of [
+      [a, missing, b],
+      [b, missing, a],
+    ]) {
+      expect(readControlIndex(...paths).reuse.get(key)?.selected_skill_ids).toEqual(["b-early"]);
+    }
+  });
+
+  it("[guard] a current-version rerunnable error still counts as current (resume unchanged)", () => {
+    const path = join(dir, "agent.jsonl");
+    write(path, [cell({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" })]);
+    const { current } = readControlIndex(path);
+    const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
+    expect(current.has(key)).toBe(true);
+  });
+});
+
+describe("drainControlCache", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sragents-drain-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const sc = {
+    scenarioId: "sragents-toolqa_0",
+    category: "sragents-toolqa",
+    goldSkillIds: ["g1"],
+    fullPool: ["a", "g1"],
+    ratelTopK: ["g1"],
+    poolSize: 100,
+  };
+  const model = { id: "gpt-5.4-mini", model: {} as never };
+  const task = (arm: SragentsArm, runIndex = 0): Task => ({ arm, sc, query: "q", model, runIndex });
+
+  function cached(over: Partial<SragentsSelectCell>): SragentsSelectCell {
+    return {
+      run_type: "skill_selection",
+      generated_at: "2026-06-24T00:00:00.000Z",
+      ratel_ai_core_version: "0.0.0-old",
+      scenario_id: sc.scenarioId,
+      category: sc.category,
+      arm: "control-baseline",
+      model: model.id,
+      run_index: 0,
+      pool_size: 100,
+      candidate_count: 2,
+      gold_skill_ids: ["g1"],
+      selected_skill_ids: ["g1"],
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      dollar_cost: 0,
+      wall_ms: 0,
+      error: null,
+      cache_source: "live",
+      ...over,
+    };
+  }
+
+  const writeCells = (path: string, cells: SragentsSelectCell[]) =>
+    writeFileSync(path, cells.map((c) => `${JSON.stringify(c)}\n`).join(""));
+  const readCells = (path: string): SragentsSelectCell[] =>
+    existsSync(path)
+      ? readFileSync(path, "utf-8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as SragentsSelectCell)
+      : [];
+
+  it("appends reused controls re-stamped with cache_source 'reused'; the rest run live", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    const backfill = join(dir, "backfill.jsonl");
+    writeCells(canonical, [cached({ error: "Overloaded" })]);
+    writeCells(backfill, [
+      cached({ arm: "control-oracle", pool_size: null, selected_skill_ids: ["oracle"] }),
+      cached({ generated_at: "2026-07-01T00:00:00.000Z", selected_skill_ids: ["late"] }),
+    ]);
+
+    const tasks = [task("control-baseline"), task("ratel-full"), task("control-oracle")];
+    const { liveTasks, reused } = drainControlCache(tasks, {
+      outputPath: output,
+      cachePaths: [canonical, backfill],
+      force: false,
+    });
+
+    expect(reused).toBe(2);
+    expect(liveTasks.map((t) => t.arm)).toEqual(["ratel-full"]);
+    const rows = readCells(output);
+    expect(rows.map((r) => [r.arm, r.selected_skill_ids, r.cache_source])).toEqual([
+      ["control-baseline", ["late"], "reused"],
+      ["control-oracle", ["oracle"], "reused"],
+    ]);
+    expect(rows.every((r) => r.ratel_ai_core_version === RATEL_AI_CORE_VERSION)).toBe(true);
+  });
+
+  it("runs a control live when its only cached rows are rerunnable errors", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    writeCells(canonical, [cached({ error: "Internal server error" })]);
+
+    const { liveTasks, reused } = drainControlCache([task("control-baseline")], {
+      outputPath: output,
+      cachePaths: [canonical],
+      force: false,
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks).toHaveLength(1);
+  });
+
+  it("--force truncates the output and runs every cell live", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    writeCells(output, [cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION })]);
+    writeCells(canonical, [cached({})]);
+
+    const tasks = [task("control-baseline"), task("ratel-full")];
+    const { liveTasks, reused } = drainControlCache(tasks, {
+      outputPath: output,
+      cachePaths: [canonical],
+      force: true,
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks).toHaveLength(2);
+    expect(readCells(output)).toEqual([]);
+  });
+
+  it("skips (resume) controls already in the output at the current version", () => {
+    const output = join(dir, "out.jsonl");
+    writeCells(output, [cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION })]);
+
+    const { liveTasks, reused } = drainControlCache([task("control-baseline")], {
+      outputPath: output,
+      cachePaths: [],
+      force: false,
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks).toEqual([]);
+    expect(readCells(output)).toHaveLength(1);
+  });
+
+  // U5 flips this when resume starts re-queueing rerunnable errors.
+  it("[guard] resume still skips a current-version rerunnable-errored control", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    writeCells(output, [
+      cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
+    ]);
+    writeCells(canonical, [cached({})]); // a good cached row must not be served either
+
+    const { liveTasks, reused } = drainControlCache([task("control-baseline")], {
+      outputPath: output,
+      cachePaths: [canonical],
+      force: false,
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks).toEqual([]);
+    expect(readCells(output)).toHaveLength(1);
+  });
+
+  it("the output's own prior-version control beats an earlier cache row; cache fills its rerunnable gaps", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    writeCells(output, [
+      cached({ generated_at: "2026-07-01T00:00:00.000Z", selected_skill_ids: ["own"] }),
+      cached({ run_index: 1, generated_at: "2026-07-01T00:00:00.000Z", error: "Overloaded" }),
+    ]);
+    writeCells(canonical, [
+      cached({ generated_at: "2026-06-01T00:00:00.000Z", selected_skill_ids: ["cache"] }),
+      cached({
+        run_index: 1,
+        generated_at: "2026-06-01T00:00:00.000Z",
+        selected_skill_ids: ["cache1"],
+      }),
+    ]);
+
+    const { liveTasks, reused } = drainControlCache(
+      [task("control-baseline"), task("control-baseline", 1)],
+      { outputPath: output, cachePaths: [canonical], force: false },
+    );
+
+    expect(reused).toBe(2);
+    expect(liveTasks).toEqual([]);
+    expect(
+      readCells(output)
+        .slice(2)
+        .map((r) => [r.run_index, r.selected_skill_ids, r.cache_source]),
+    ).toEqual([
+      [0, ["own"], "reused"],
+      [1, ["cache1"], "reused"],
+    ]);
+  });
+});
+
+describe("sragentsCachePaths", () => {
+  const output = "/repo/results/raw/sragents/agent-0.4.0-sparse.jsonl";
+
+  it("defaults to the sibling agent.jsonl when --cache-source is absent", () => {
+    expect(sragentsCachePaths(undefined, output)).toEqual([
+      "/repo/results/raw/sragents/agent.jsonl",
+    ]);
+  });
+
+  it("parses a comma list, trimming blanks; relative entries anchor to the repo root", () => {
+    expect(sragentsCachePaths("results/raw/sragents/agent.jsonl, /b.jsonl,", output)).toEqual([
+      resolve(REPO_ROOT, "results/raw/sragents/agent.jsonl"),
+      "/b.jsonl",
+    ]);
+  });
+
+  it("throws on an empty list rather than silently disabling reuse", () => {
+    for (const raw of [",", "", "  "]) {
+      expect(() => sragentsCachePaths(raw, output)).toThrow(/at least one path/);
+    }
+  });
 });
 
 describe("selectForCell", () => {
@@ -340,6 +612,7 @@ describe("selectForCell", () => {
 
     expect(cell.error).toBeNull();
     expect(cell.error_class).toBeUndefined();
+    expect(cell.cache_source).toBe("live");
     expect(cell.selected_skill_ids).toEqual(["g1"]);
     expect(cell.finish_reason).toBe("stop");
     expect(cell.provider).toBe("anthropic.messages");

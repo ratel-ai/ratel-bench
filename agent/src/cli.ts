@@ -18,270 +18,26 @@
 //   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
+import {
+  DEFAULT_OLLAMA_BASE_URL,
+  type ParsedArgs,
+  parseArgs,
+  resolveRunTarget,
+} from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
 import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
-import type { Arm, RetrievalMethod } from "./types.js";
 
 loadEnv();
 
 const OLLAMA_PREFIX = "ollama:";
-const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
-
-/** Default arms when `--arms` isn't passed: every committed arm. The local-only
- * `claude-sdk-tool-search` is included automatically by the registry but
- * excluded from the default list — opt in via `--arms` once it's wired locally. */
-const DEFAULT_ARMS: Arm[] = [
-  "control-baseline",
-  "control-oracle",
-  "ratel-full",
-  "ratel-pre-discovery",
-  "ratel-discovery-tool",
-];
-
-/** Old → new id hints for the rename in v0.1.2. Pre-empts a confusing
- * `unknown arm` error when developers re-run an older command. */
-const RENAMES: Record<string, string> = {
-  control: "control-baseline",
-  oracle: "control-oracle",
-  ratel: "ratel-full",
-  hybrid: "ratel-full",
-};
-
-/**
- * Parse + validate the `--arms` value against the registry. Bad input used to
- * flow through `as Arm[]` and crash deep in the runner with a useless
- * TypeError; this surface validates at the boundary and surfaces both the
- * legacy → new id rename and the full set of known ids.
- */
-function parseArms(raw: string, knownArms: readonly string[]): Arm[] {
-  const parts = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  if (parts.length === 0) throw new Error("--arms must list at least one arm");
-  const out: Arm[] = [];
-  for (const p of parts) {
-    if (knownArms.includes(p)) {
-      out.push(p);
-      continue;
-    }
-    if (RENAMES[p]) {
-      throw new Error(
-        `--arms: "${p}" was renamed to "${RENAMES[p]}". Update your command to ` +
-          `--arms ${DEFAULT_ARMS.join(",")} (or whichever subset you want).`,
-      );
-    }
-    throw new Error(`--arms: unknown arm "${p}" (expected one of: ${knownArms.join(", ")})`);
-  }
-  return out;
-}
-
-/**
- * Parse a single positive integer for `--pool-size`. Rejects commas explicitly
- * so a `--pool-size 30,50,100` typo points the user at `--pool-sizes`
- * instead of silently flowing `NaN` through to `expandPool` (which would
- * collapse the catalog to gold-only).
- */
-function parsePoolSize(flag: string, raw: string): number {
-  if (raw.includes(",")) {
-    throw new Error(
-      `${flag} takes a single integer (got "${raw}"). Use --pool-sizes for a comma-separated sweep.`,
-    );
-  }
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    throw new Error(`${flag} must be a positive integer (got "${raw}")`);
-  }
-  return n;
-}
-
-/** Parse `--pool-sizes 30,50,100` into a deduped, sorted list of positive integers. */
-function parsePoolSizes(raw: string): number[] {
-  const parts = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  if (parts.length === 0) throw new Error("--pool-sizes must list at least one integer");
-  const seen = new Set<number>();
-  for (const p of parts) {
-    const n = Number(p);
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-      throw new Error(`--pool-sizes: "${p}" is not a positive integer`);
-    }
-    seen.add(n);
-  }
-  return [...seen].sort((a, b) => a - b);
-}
-
-interface ParsedArgs {
-  corpus: string;
-  output: string;
-  outputExplicit: boolean;
-  ephemeral: boolean;
-  /** Reuse version-independent control cells (baseline/oracle) from this canonical file
-   * instead of re-running them. Lets a per-method output file still pull cached controls. */
-  cacheSource?: string;
-  scenarios?: number;
-  arms: Arm[];
-  models: string[];
-  runs: number;
-  topK: number;
-  /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
-  retriever: RetrievalMethod;
-  poolSizes: number[];
-  maxSteps: number;
-  timeoutMs: number;
-  dollarGlobal: number;
-  force: boolean;
-  noJudge: boolean;
-  /** Skip the (LLM-free) argument-level task-completion verdict. Defaults to off. */
-  noAst: boolean;
-  /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
-  judgeModelId?: string;
-  ollamaBaseURL: string;
-  /** Optional bearer token for a user-hosted (`<url>#<model>`) endpoint. */
-  modelApiKey?: string;
-  seed: number;
-  /** Cells in flight at once. See `RunnerConfig.concurrency` for cap semantics. */
-  concurrency: number;
-  logLevel: "quiet" | "normal" | "verbose";
-}
-
-function parseArgs(argv: string[], knownArms: readonly string[]): ParsedArgs {
-  const args: ParsedArgs = {
-    corpus: "test-data/metatool.jsonl",
-    output: "agent/results/agent.jsonl",
-    outputExplicit: false,
-    ephemeral: false,
-    arms: [...DEFAULT_ARMS],
-    models: ["gpt-5.4-mini", "claude-sonnet-4-6"],
-    runs: 1,
-    topK: 5,
-    retriever: "bm25",
-    poolSizes: [180],
-    maxSteps: 12,
-    timeoutMs: 60_000,
-    dollarGlobal: 25,
-    force: false,
-    noJudge: false,
-    noAst: false,
-    ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
-    modelApiKey: process.env.AWS_BEDROCK_BEARER,
-    seed: 42,
-    concurrency: 10,
-    logLevel: "normal",
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    const next = (): string => {
-      const v = argv[++i];
-      if (v === undefined) throw new Error(`missing value for ${flag}`);
-      return v;
-    };
-    switch (flag) {
-      case "--corpus":
-        args.corpus = next();
-        break;
-      case "--output":
-        args.output = next();
-        args.outputExplicit = true;
-        break;
-      case "--ephemeral":
-        args.ephemeral = true;
-        break;
-      case "--cache-source":
-        args.cacheSource = next();
-        break;
-      case "--scenarios":
-        args.scenarios = Number(next());
-        break;
-      case "--arms":
-        args.arms = parseArms(next(), knownArms);
-        break;
-      case "--models":
-        args.models = next().split(",");
-        break;
-      case "--runs":
-        args.runs = Number(next());
-        break;
-      case "--top-k":
-        args.topK = Number(next());
-        break;
-      case "--retriever": {
-        const v = next();
-        if (v !== "bm25" && v !== "semantic" && v !== "hybrid") {
-          throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${v}")`);
-        }
-        args.retriever = v;
-        break;
-      }
-      case "--pool-size":
-        args.poolSizes = [parsePoolSize(flag, next())];
-        break;
-      case "--pool-sizes":
-        args.poolSizes = parsePoolSizes(next());
-        break;
-      case "--max-steps":
-        args.maxSteps = Number(next());
-        break;
-      case "--timeout-ms":
-        args.timeoutMs = Number(next());
-        break;
-      case "--dollar-global":
-        args.dollarGlobal = Number(next());
-        break;
-      case "--force":
-        args.force = true;
-        break;
-      case "--no-judge":
-        args.noJudge = true;
-        break;
-      case "--no-ast":
-        args.noAst = true;
-        break;
-      case "--judge-model":
-        args.judgeModelId = next();
-        break;
-      case "--ollama-base-url":
-        args.ollamaBaseURL = next();
-        break;
-      case "--model-api-key":
-        args.modelApiKey = next();
-        break;
-      case "--seed":
-        args.seed = Number(next());
-        break;
-      case "--concurrency": {
-        const n = Number(next());
-        if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) {
-          throw new Error(`--concurrency must be a positive integer, got ${n}`);
-        }
-        args.concurrency = n;
-        break;
-      }
-      case "--verbose":
-      case "-v":
-        args.logLevel = "verbose";
-        break;
-      case "--quiet":
-      case "-q":
-        args.logLevel = "quiet";
-        break;
-      default:
-        throw new Error(`unknown flag: ${flag}`);
-    }
-  }
-  return args;
-}
 
 interface ResolveOpts {
   ollamaBaseURL: string;
@@ -382,9 +138,6 @@ function ephemeralOutputPath(): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return `agent/results/ephemeral/agent-${stamp}.jsonl`;
 }
-
-/** Canonical agent.jsonl that ephemeral runs read for cached control rows. */
-const CANONICAL_AGENT_JSONL = "agent/results/agent.jsonl";
 
 interface RejudgeParsedArgs {
   input: string;
@@ -499,7 +252,7 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   });
   console.log(
     `done: ${summary.total} rows (${summary.ast_scored} AST-scored, ${summary.rejudged} LLM-rejudged, ` +
-      `${summary.skipped_pass} kept as programmatic-pass).`,
+      `${summary.skipped_pass} kept as programmatic-pass, ${summary.skipped_error} errored left unjudged).`,
   );
 }
 
@@ -507,26 +260,12 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
-  let cacheSourcePath: string | undefined = parsed.cacheSource
-    ? resolveRepoPath(parsed.cacheSource)
-    : undefined;
-  if (parsed.ephemeral) {
-    if (parsed.outputExplicit) {
-      throw new Error("--ephemeral and --output are mutually exclusive");
-    }
-    parsed.output = ephemeralOutputPath();
-    cacheSourcePath ??= resolveRepoPath(CANONICAL_AGENT_JSONL);
-  }
-  // Control reuse is ON by default: when writing to a non-canonical file (e.g. a per-method
-  // `agent-0.4.0-sparse.jsonl`), reuse version-independent baseline/oracle from the canonical
-  // `agent.jsonl` in the same directory. A model with no cached controls (new model) just runs
-  // them fresh. `--cache-source` overrides the path; `--force` disables reuse entirely.
-  if (!cacheSourcePath && !parsed.ephemeral) {
-    const canonical = resolveRepoPath(join(dirname(parsed.output), "agent.jsonl"));
-    if (canonical !== resolveRepoPath(parsed.output) && existsSync(canonical)) {
-      cacheSourcePath = canonical;
-    }
-  }
+  // Output path, control-cache sources (reuse is ON by default) and --ratel-version.
+  const target = resolveRunTarget(parsed, {
+    resolve: resolveRepoPath,
+    exists: existsSync,
+    ephemeralOutput: ephemeralOutputPath,
+  });
   const resolveOpts: ResolveOpts = {
     ollamaBaseURL: parsed.ollamaBaseURL,
     modelApiKey: parsed.modelApiKey,
@@ -545,8 +284,8 @@ async function runMain(): Promise<void> {
   }
 
   const cfg: RunnerConfig = {
+    ...target,
     corpusPath: resolveRepoPath(parsed.corpus),
-    outputPath: resolveRepoPath(parsed.output),
     scenarioLimit: parsed.scenarios,
     arms: parsed.arms,
     models,
@@ -567,15 +306,17 @@ async function runMain(): Promise<void> {
     concurrency: parsed.concurrency,
     logLevel: parsed.logLevel,
     registry,
-    cacheSourcePath,
   };
 
   console.log(
     `running ${parsed.arms.length} arms × ${models.length} models × ${parsed.runs} runs ` +
       `× ${parsed.poolSizes.length} pool size(s) [${parsed.poolSizes.join(",")}] ` +
       `over ≤ ${parsed.scenarios ?? "all"} scenarios at concurrency=${parsed.concurrency} ` +
-      `→ ${parsed.output}`,
+      `→ ${target.outputPath}`,
   );
+  if (parsed.ratelVersion !== undefined) {
+    console.log(`ratel-version: control rows stamped as ${parsed.ratelVersion}`);
+  }
   const summary = await run(cfg);
   console.log(
     `done: ${summary.cells_run} cells run, ${summary.cells_cached} cached, ` +

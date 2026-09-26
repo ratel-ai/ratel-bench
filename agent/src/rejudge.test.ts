@@ -53,7 +53,7 @@ function cell(over: Partial<CellResult> & { scenario_id: string }): CellResult {
     judge_explanation: over.judge_explanation,
     final_text: over.final_text ?? "",
     finish_reason: "stop",
-    error: null,
+    error: over.error ?? null,
     wall_ms: 0,
     dollar_cost: 0,
     tool_calls: over.tool_calls ?? [],
@@ -89,7 +89,14 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 1, rejudged: 1, ast_scored: 0, skipped_pass: 0, written: 1 });
+    expect(summary).toEqual({
+      total: 1,
+      rejudged: 1,
+      ast_scored: 0,
+      skipped_pass: 0,
+      skipped_error: 0,
+      written: 1,
+    });
     expect(judge).toHaveBeenCalledTimes(1);
     expect(judge.mock.calls[0][0]).toMatchObject({
       prompt: "list X",
@@ -128,10 +135,48 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 1, rejudged: 0, ast_scored: 0, skipped_pass: 1, written: 1 });
+    expect(summary).toEqual({
+      total: 1,
+      rejudged: 0,
+      ast_scored: 0,
+      skipped_pass: 1,
+      skipped_error: 0,
+      written: 1,
+    });
     expect(judge).not.toHaveBeenCalled();
     const out = JSON.parse(readFileSync(outputPath, "utf-8").trim()) as CellResult;
     expect(out).toEqual(original);
+  });
+
+  // "" is still an error (an APICallError built from an empty statusText).
+  it.each([
+    ["Failed after 3 attempts. Last error: Overloaded"],
+    [""],
+  ])("skips errored rows: no LLM judge, row passed through (error %j)", async (error) => {
+    const inputPath = join(tempDir, "in.jsonl");
+    const outputPath = join(tempDir, "out.jsonl");
+    const corpusPath = join(tempDir, "corpus.jsonl");
+    writeJsonl(corpusPath, [scenario({ id: "s1" }), scenario({ id: "s2" })]);
+    const errored = cell({ scenario_id: "s1", programmatic_verdict: "fail", error });
+    writeJsonl(inputPath, [errored, cell({ scenario_id: "s2", programmatic_verdict: "fail" })]);
+
+    const judge = vi.fn().mockResolvedValue({ verdict: "pass", explanation: "x" });
+    const summary = await rejudge({
+      inputPath,
+      outputPath,
+      corpusPath,
+      // biome-ignore lint/suspicious/noExplicitAny: judge is mocked
+      judgeModel: {} as any,
+      judge,
+    });
+
+    expect(summary).toMatchObject({ total: 2, rejudged: 1, skipped_error: 1, written: 2 });
+    expect(judge).toHaveBeenCalledTimes(1);
+    const out = readFileSync(outputPath, "utf-8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as CellResult);
+    expect(out[0]).toEqual(errored);
   });
 
   it("re-judges programmatic-n/a rows (no gold_tools case)", async () => {
@@ -259,7 +304,14 @@ describe("rejudge", () => {
       judge,
     });
 
-    expect(summary).toEqual({ total: 3, rejudged: 2, ast_scored: 0, skipped_pass: 1, written: 3 });
+    expect(summary).toEqual({
+      total: 3,
+      rejudged: 2,
+      ast_scored: 0,
+      skipped_pass: 1,
+      skipped_error: 0,
+      written: 3,
+    });
     const lines = readFileSync(outputPath, "utf-8").trim().split("\n");
     expect(lines).toHaveLength(3);
   });

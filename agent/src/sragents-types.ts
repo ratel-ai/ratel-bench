@@ -93,6 +93,11 @@ export interface SragentsSelectCell {
   error_class?: ErrorClass;
   /** The call's finish reason (`length` = truncated output); `error` when the call threw without one. */
   finish_reason?: string;
+  /**
+   * `live` = produced by this row's run; `reused` = a control cell served from
+   * the control cache (re-stamped). Legacy rows lack it.
+   */
+  cache_source?: "live" | "reused";
 }
 
 /** Per-row skill-selection record (`results/raw/sragents/task-completion-rows.jsonl`). */
@@ -115,11 +120,23 @@ export interface SragentsTaskRow {
   precision: number;
   total_tokens: number;
   wall_ms: number;
+  /** Taxonomy class of the cell's error (`cell-errors.ts`); null when it didn't error. */
+  error_class: ErrorClass | null;
+  /** Final infra error (`transient|access`): left out of every summary metric. */
+  excluded: boolean;
+  /**
+   * The call stopped on the output-token limit (`finish_reason: "length"`). Kept (not
+   * excluded); scored on its verdict, normally an `outcome` fail since nothing parses.
+   */
+  truncated: boolean;
 }
 
 /**
  * Append-only skill-selection summary row (one per dataset × model × arm, plus an
- * `all` rollup). Same shape/field names as BFCL's `TaskSummaryRow` + `precision`.
+ * `all` rollup). Same shape/field names as BFCL's `TaskSummaryRow` + `precision`,
+ * with the same error semantics: superseded rows, final `transient|access` rows
+ * excluded and counted, other errors scored as fails, null metrics when no rows
+ * are kept.
  */
 export interface SragentsTaskSummaryRow {
   timestamp: string;
@@ -128,15 +145,24 @@ export interface SragentsTaskSummaryRow {
   model: string;
   arm: string;
   dataset: string;
+  /** Kept rows (the denominator); excluded ones not counted. */
   scenarios: number;
   /** Mean complete (every gold selected) — the headline. */
-  task_completion_accuracy: number;
+  task_completion_accuracy: number | null;
   /** Mean hit (≥1 gold selected). */
-  selection_accuracy: number;
+  selection_accuracy: number | null;
   /** Mean |selected ∩ gold| / |gold|. */
-  recall: number;
+  recall: number | null;
   /** Mean |selected ∩ gold| / |selected| — catches over-selection. */
-  precision: number;
-  mean_total_tokens: number;
-  latency_p50_ms: number;
+  precision: number | null;
+  /** Over non-errored rows only. */
+  mean_total_tokens: number | null;
+  /** Over non-errored rows only. */
+  latency_p50_ms: number | null;
+  /** Final `transient|access` rows left out of every metric (not in `scenarios`). */
+  excluded_cells: number;
+  /** Kept rows that errored (`request|timeout|outcome`): scored as fails. */
+  errored_cells: number;
+  /** Kept rows cut off by the output-token limit (scored on their verdict; not necessarily fails). */
+  truncated_cells: number;
 }

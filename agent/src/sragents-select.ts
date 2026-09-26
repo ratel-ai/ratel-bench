@@ -30,8 +30,8 @@ import {
 } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
-import { classifyError } from "./cell-errors.js";
-import { appendJsonl, readJsonl } from "./io.js";
+import { classifyError, isRerunnable } from "./cell-errors.js";
+import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import { dollarCost, providerOf } from "./metering.js";
 import { loadModelPricing } from "./pricing.js";
 
@@ -307,6 +307,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     dollar_cost: 0,
     wall_ms: 0,
     error: null,
+    cache_source: "live",
   };
 
   const startedAt = Date.now();
@@ -361,7 +362,7 @@ function usageFields(
 
 // ── Bounded-concurrency worker pool with a best-effort dollar cap ──────────────
 
-interface Task {
+export interface Task {
   arm: SragentsArm;
   sc: ScenarioCandidates;
   query: string;
@@ -434,27 +435,101 @@ export function controlKey(
 
 /**
  * Index existing control cells for reuse. `reuse` maps each key to the earliest-
- * produced cell (the original baseline); `current` holds keys already present at
- * the current ratel version, so a resumed run neither re-runs nor duplicates them.
+ * produced cell across all `paths` (the original baseline); `current` holds keys
+ * already present at the current ratel version, so a resumed run neither re-runs
+ * nor duplicates them. Missing paths are skipped.
+ *
+ * Rerunnable errors (transient|access|request) never enter `reuse` — serving
+ * them would re-count an outage as a miss forever — but still count as `current`
+ * (resume is unchanged). Timeout/outcome errors are final and stay reusable.
  */
-export function readControlIndex(path: string): {
+export function readControlIndex(...paths: string[]): {
   reuse: Map<string, SragentsSelectCell>;
   current: Set<string>;
 } {
   const reuse = new Map<string, SragentsSelectCell>();
   const current = new Set<string>();
-  if (!existsSync(path)) return { reuse, current };
-  for (const c of readJsonl<SragentsSelectCell>(path)) {
-    if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
-    const key = controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
-    if (c.ratel_ai_core_version === RATEL_AI_CORE_VERSION) current.add(key);
-    const prev = reuse.get(key);
-    if (!prev || (c.generated_at ?? "") < (prev.generated_at ?? "")) reuse.set(key, c);
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    for (const c of readJsonl<SragentsSelectCell>(path)) {
+      if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
+      const key = controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
+      if (c.ratel_ai_core_version === RATEL_AI_CORE_VERSION) current.add(key);
+      if (isRerunnable(c)) continue;
+      const prev = reuse.get(key);
+      if (!prev || (c.generated_at ?? "") < (prev.generated_at ?? "")) reuse.set(key, c);
+    }
   }
   return { reuse, current };
 }
 
+/**
+ * Serve control cells from the cache and return the tasks that must run live.
+ * The output's own prior controls take precedence; `cachePaths` (earliest
+ * eligible row across them) only fill gaps. Controls already at the current
+ * version are skipped (resume); reused ones are appended re-stamped to the
+ * current version with `cache_source: "reused"`. `force` truncates the output
+ * and disables reuse, so a forced run never appends a duplicate set.
+ */
+export function drainControlCache(
+  tasks: Task[],
+  opts: { outputPath: string; cachePaths: string[]; force: boolean },
+): { liveTasks: Task[]; reused: number } {
+  if (opts.force) {
+    truncateJsonl(opts.outputPath);
+    return { liveTasks: tasks, reused: 0 };
+  }
+  const { reuse: reuseIndex, current: currentKeys } = readControlIndex(opts.outputPath);
+  const ext = readControlIndex(...opts.cachePaths.filter((p) => p !== opts.outputPath));
+  for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
+
+  const liveTasks: Task[] = [];
+  let reused = 0;
+  for (const t of tasks) {
+    if (CACHEABLE_ARMS.has(t.arm)) {
+      const poolForArm = t.arm === "control-oracle" ? null : t.sc.poolSize;
+      const key = controlKey(t.sc.scenarioId, t.arm, t.model.id, poolForArm, t.runIndex);
+      if (currentKeys.has(key)) continue; // already have this version's control (resume)
+      const prior = reuseIndex.get(key);
+      if (prior) {
+        appendJsonl(opts.outputPath, {
+          ...prior,
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          generated_at: new Date().toISOString(),
+          cache_source: "reused",
+        });
+        reused++;
+        continue;
+      }
+    }
+    liveTasks.push(t);
+  }
+  return { liveTasks, reused };
+}
+
+/**
+ * Control-cache sources for `--cache-source a,b,…` (`raw`; `undefined` when the
+ * flag is absent → the canonical `agent.jsonl` beside the output). An empty
+ * list throws instead of silently disabling reuse (every control would run live).
+ */
+export function sragentsCachePaths(raw: string | undefined, outputPath: string): string[] {
+  if (raw === undefined) return [join(dirname(outputPath), "agent.jsonl")];
+  const paths = raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  if (paths.length === 0) throw new Error("--cache-source must list at least one path");
+  return paths.map((p) => resolveRepoPath(p));
+}
+
 async function main(): Promise<void> {
+  // `arg()` ignores unknown flags; this one is `pnpm start`-only (SR rows are
+  // labelled via RATEL_VERSION_LABEL), so fail loudly rather than no-op.
+  if (process.argv.includes("--ratel-version")) {
+    throw new Error(
+      "--ratel-version is not supported by sragents-select (use RATEL_VERSION_LABEL)",
+    );
+  }
   const candidatesPath = resolveRepoPath(
     arg("--candidates", "results/raw/sragents/candidates.jsonl"),
   );
@@ -515,43 +590,16 @@ async function main(): Promise<void> {
   // Control-arm reuse (default-on): control-baseline/control-oracle don't use Ratel,
   // so their cells are version-independent. Reuse prior cells (re-stamped to the
   // current version) instead of re-running them; a model with no prior controls falls
-  // through to a live run — the "new model" path that runs all three arms. `--force`/
-  // `--fresh` disables reuse and re-runs everything.
+  // through to a live run — the "new model" path that runs all three arms. The cache
+  // sources default to the canonical `agent.jsonl` in the output's directory (the 0.2.0
+  // results); `--cache-source a,b,…` overrides them. `--force`/`--fresh` truncates the
+  // output, disables reuse and re-runs everything.
   const force = process.argv.includes("--force") || process.argv.includes("--fresh");
-  const { reuse: reuseIndex, current: currentKeys } = force
-    ? { reuse: new Map<string, SragentsSelectCell>(), current: new Set<string>() }
-    : readControlIndex(outputPath);
-  // Control reuse is ON by default: pull version-independent baseline/oracle from the canonical
-  // `agent.jsonl` in the output's directory (the 0.2.0 results) so they're reused (re-stamped)
-  // instead of re-run. A model with no cached controls just runs them fresh. The output file's
-  // own controls take precedence; the cache source only fills gaps. `--cache-source` overrides
-  // the path; `--force`/`--fresh` disables reuse.
-  let cachePath = arg("--cache-source", "");
-  cachePath = cachePath ? resolveRepoPath(cachePath) : join(dirname(outputPath), "agent.jsonl");
-  if (cachePath !== outputPath && existsSync(cachePath) && !force) {
-    const ext = readControlIndex(cachePath);
-    for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
-  }
-  const liveTasks: Task[] = [];
-  let reused = 0;
-  for (const t of tasks) {
-    if (CACHEABLE_ARMS.has(t.arm)) {
-      const poolForArm = t.arm === "control-oracle" ? null : poolSize;
-      const key = controlKey(t.sc.scenarioId, t.arm, t.model.id, poolForArm, t.runIndex);
-      if (currentKeys.has(key)) continue; // already have this version's control (resume)
-      const prior = reuseIndex.get(key);
-      if (prior) {
-        appendJsonl(outputPath, {
-          ...prior,
-          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
-          generated_at: new Date().toISOString(),
-        });
-        reused++;
-        continue;
-      }
-    }
-    liveTasks.push(t);
-  }
+  const cachePaths = sragentsCachePaths(
+    process.argv.includes("--cache-source") ? arg("--cache-source", "") : undefined,
+    outputPath,
+  );
+  const { liveTasks, reused } = drainControlCache(tasks, { outputPath, cachePaths, force });
 
   console.log(
     `sragents-select: ${tasks.length} cells ` +
