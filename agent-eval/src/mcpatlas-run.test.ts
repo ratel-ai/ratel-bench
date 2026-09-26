@@ -2,11 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as tomlParse } from "smol-toml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildClaudeArgs, type RunClaudeOutcome } from "./mcpatlas-agent.js";
 import { CODEX_PRICING, codexLockdown } from "./mcpatlas-codex.js";
+import type { JudgeClaimsArgs } from "./mcpatlas-judge.js";
 import { SYSTEM_PROMPT_ADDENDUM } from "./mcpatlas-prompt.js";
 import {
+  ambientOutputCapWarning,
   appendJsonl,
   buildQueue,
   buildRunConfig,
@@ -19,14 +21,21 @@ import {
   freezeConfig,
   makeScratch,
   missingFromSandbox,
+  nativeCacheContext,
   nativeCacheKey,
+  optionalPositiveIntFlag,
+  parseCapFlags,
+  parsePositiveInt,
+  type RunCellDeps,
   readJsonl,
   readNativeCacheIndex,
   registrationMismatches,
   runCampaign,
   runCell,
+  runNativeCacheKey,
   stableStringify,
   truncateJsonl,
+  validateHarnessOptions,
 } from "./mcpatlas-run.js";
 import { buildCatalogManifest } from "./mcpatlas-servers.js";
 import type {
@@ -116,18 +125,25 @@ describe("buildQueue", () => {
   });
 });
 
+const NATIVE_KEY_BASE = {
+  taskId: "t1",
+  model: "claude-haiku-4-5",
+  scope: "coding" as const,
+  runIndex: 0,
+  agentVersion: "2.1.241",
+  promptHash: "ph1",
+  taskListHash: "th1",
+  datasetRevision: "dr1",
+  catalogTools: 0,
+};
+
+/** Existing cache files key NATIVE_KEY_BASE by exactly this string. A literal,
+ *  never computed: it pins the key format itself. */
+const GOLDEN_NATIVE_KEY =
+  "t1::native::claude-haiku-4-5::coding::0::0::2.1.241::ph1::th1::dr1::claude-code";
+
 describe("nativeCacheKey", () => {
-  const base = {
-    taskId: "t1",
-    model: "claude-haiku-4-5",
-    scope: "coding" as const,
-    runIndex: 0,
-    agentVersion: "2.1.241",
-    promptHash: "ph1",
-    taskListHash: "th1",
-    datasetRevision: "dr1",
-    catalogTools: 0,
-  };
+  const base = NATIVE_KEY_BASE;
 
   it("is stable across ratel_local_version — the whole point of native caching", () => {
     // ratel_local_version is deliberately not one of the inputs; the key must
@@ -167,9 +183,30 @@ describe("nativeCacheKey", () => {
   // [guard] Existing cache files key by this exact string; any drift silently
   // turns every prior native cell into a cache miss (and a re-spend).
   it("key string for an existing cell is unchanged", () => {
-    expect(nativeCacheKey(base)).toBe(
-      "t1::native::claude-haiku-4-5::coding::0::0::2.1.241::ph1::th1::dr1::claude-code",
-    );
+    expect(nativeCacheKey(base)).toBe(GOLDEN_NATIVE_KEY);
+  });
+
+  // [guard] Output caps are opt-in: an unset cap must leave every existing key
+  // byte-identical, or every cached native re-spends.
+  it("nativeCacheKey unchanged when unset", () => {
+    for (const unset of [undefined, null]) {
+      expect(nativeCacheKey({ ...base, maxOutputTokens: unset, judgeMaxOutputTokens: unset })).toBe(
+        GOLDEN_NATIVE_KEY,
+      );
+    }
+  });
+
+  it("a set cap is appended to nativeCacheKey; agent and judge caps never collide", () => {
+    const keys = new Set([
+      nativeCacheKey(base),
+      nativeCacheKey({ ...base, maxOutputTokens: 4096 }),
+      nativeCacheKey({ ...base, judgeMaxOutputTokens: 4096 }),
+      nativeCacheKey({ ...base, maxOutputTokens: 4096, judgeMaxOutputTokens: 4096 }),
+    ]);
+    expect(keys.size).toBe(4);
+    expect(
+      nativeCacheKey({ ...base, maxOutputTokens: 4096 }).startsWith(`${GOLDEN_NATIVE_KEY}::`),
+    ).toBe(true);
   });
 });
 
@@ -471,6 +508,10 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
         finish_reason: "success",
       }),
       cell(judged("judge omitted 1 of 3 claim(s)")),
+      // Judge truncation is terminal, like agent truncation — at a set cap and
+      // at the provider's default limit alike.
+      cell({ ...judged("judge truncated at 64 output tokens"), judge_max_output_tokens: 64 }),
+      cell(judged("judge truncated at the provider's default output limit")),
     ];
     const withRun = (cs: McpAtlasCell[], offset: number) =>
       cs.map((c, i) => ({ ...c, run_index: offset + i, cell_key: `run${offset + i}` }));
@@ -486,6 +527,10 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
         runIndex: c.run_index,
         agentVersion: c.agent_version,
         harness: c.agent_harness ?? "claude-code",
+        // Each cell under its real key: a capped cell must not pass only
+        // because its key collapsed to the uncapped one.
+        maxOutputTokens: c.max_output_tokens,
+        judgeMaxOutputTokens: c.judge_max_output_tokens,
         ...context,
       });
     for (const c of skippedCells) {
@@ -510,6 +555,40 @@ describe("readNativeCacheIndex / drainNativeCache", () => {
     const goodLater = cell({ generated_at: "2026-08-20T00:00:00.000Z", cell_key: "good" });
     const { reuse } = readNativeCacheIndex([erroredFirst, goodLater], context);
     expect(reuse.get(keyOf({ task: task(), runIndex: 0 }))?.cell_key).toBe("good");
+  });
+
+  // Each cell keys on its OWN recorded caps, never the current run's: a capped
+  // native is a different measurement from an uncapped one (and an agent cap
+  // is not a judge cap), so neither may ever serve the other.
+  it("readNativeCacheIndex keys on each cell's agent/judge caps", () => {
+    const context = { promptHash: "ph1", taskListHash: "th1", datasetRevision: "dr1" };
+    const cells = [
+      cell({ run_index: 0, cell_key: "uncapped" }),
+      cell({ run_index: 1, cell_key: "agent", max_output_tokens: 4096 }),
+      cell({ run_index: 2, cell_key: "judge", judge_max_output_tokens: 2048 }),
+      cell({
+        run_index: 3,
+        cell_key: "both",
+        max_output_tokens: 4096,
+        judge_max_output_tokens: 2048,
+      }),
+    ];
+    const { reuse } = readNativeCacheIndex(cells, context);
+    const keyAt = (
+      runIndex: number,
+      caps: { maxOutputTokens?: number; judgeMaxOutputTokens?: number } = {},
+    ) => nativeCacheKey({ ...NATIVE_KEY_BASE, runIndex, ...context, ...caps });
+    expect(reuse.get(keyAt(0))?.cell_key).toBe("uncapped");
+    expect(reuse.has(keyAt(0, { maxOutputTokens: 4096 }))).toBe(false);
+    expect(reuse.get(keyAt(1, { maxOutputTokens: 4096 }))?.cell_key).toBe("agent");
+    expect(reuse.has(keyAt(1))).toBe(false);
+    expect(reuse.has(keyAt(1, { maxOutputTokens: 8192 }))).toBe(false);
+    expect(reuse.get(keyAt(2, { judgeMaxOutputTokens: 2048 }))?.cell_key).toBe("judge");
+    expect(reuse.has(keyAt(2, { maxOutputTokens: 2048 }))).toBe(false);
+    expect(
+      reuse.get(keyAt(3, { maxOutputTokens: 4096, judgeMaxOutputTokens: 2048 }))?.cell_key,
+    ).toBe("both");
+    expect(reuse.has(keyAt(3, { maxOutputTokens: 4096 }))).toBe(false);
   });
 
   it("a cell recorded under a different pinned corpus does not collide with the current one", () => {
@@ -726,6 +805,135 @@ describe("formatDoneLine", () => {
   });
 });
 
+describe("validateHarnessOptions", () => {
+  const claude = {
+    harness: "claude-code",
+    model: "claude-haiku-4-5",
+    modelExplicit: false,
+    maxOutputTokens: null,
+  };
+  const codex = { ...claude, harness: "codex", model: "gpt-5.6-luna", modelExplicit: true };
+
+  it("accepts claude-code with or without --max-output-tokens", () => {
+    expect(validateHarnessOptions(claude)).toEqual({ harness: "claude-code" });
+    expect(validateHarnessOptions({ ...claude, maxOutputTokens: 4096 })).toEqual({
+      harness: "claude-code",
+    });
+  });
+
+  it("rejects an unknown harness", () => {
+    expect(() => validateHarnessOptions({ ...claude, harness: "aider" })).toThrow(
+      /--harness must be one of claude-code, codex — got "aider"/,
+    );
+  });
+
+  it("codex requires an explicit, priced model", () => {
+    expect(() => validateHarnessOptions({ ...codex, modelExplicit: false })).toThrow(
+      /--harness codex requires an explicit --model/,
+    );
+    expect(() => validateHarnessOptions({ ...codex, model: "gpt-unknown" })).toThrow(
+      /no pricing entry for codex model "gpt-unknown"/,
+    );
+    expect(validateHarnessOptions(codex)).toEqual({
+      harness: "codex",
+      codexPricing: CODEX_PRICING["gpt-5.6-luna"],
+    });
+  });
+
+  // The cap rides on CLAUDE_CODE_MAX_OUTPUT_TOKENS; codex has no equivalent,
+  // so accepting the flag would record a cap that was never applied.
+  it("rejects --max-output-tokens with codex", () => {
+    expect(() => validateHarnessOptions({ ...codex, maxOutputTokens: 4096 })).toThrow(
+      /--max-output-tokens is claude-code only/,
+    );
+  });
+});
+
+describe("cap flag parsing", () => {
+  it("parsePositiveInt accepts positive integers", () => {
+    expect(parsePositiveInt("--max-output-tokens", "4096")).toBe(4096);
+    expect(parsePositiveInt("--max-output-tokens", "1")).toBe(1);
+  });
+
+  it("parsePositiveInt rejects anything else, naming the flag and the value", () => {
+    for (const raw of ["0", "-1", "1.5", "4096abc", "abc", "", " 12", "1e3", "none"]) {
+      expect(() => parsePositiveInt("--judge-max-output-tokens", raw)).toThrow(
+        `--judge-max-output-tokens must be a positive integer — got "${raw}"`,
+      );
+    }
+  });
+
+  it("optionalPositiveIntFlag is null when absent and validates when present", () => {
+    const flag = "--max-output-tokens";
+    expect(optionalPositiveIntFlag(["node", "run"], flag)).toBeNull();
+    expect(optionalPositiveIntFlag(["node", "run", flag, "4096"], flag)).toBe(4096);
+    expect(() => optionalPositiveIntFlag(["node", "run", flag, "0"], flag)).toThrow(
+      /positive integer/,
+    );
+    // A dangling flag (or one followed by the next flag) is an error, never a
+    // silently uncapped run.
+    expect(() => optionalPositiveIntFlag(["node", "run", flag], flag)).toThrow(/got ""/);
+    expect(() => optionalPositiveIntFlag(["node", "run", flag, "--force"], flag)).toThrow(
+      /got "--force"/,
+    );
+  });
+
+  it("parseCapFlags: null when absent, values when present", () => {
+    expect(parseCapFlags(["node", "run"], "")).toEqual({
+      maxOutputTokens: null,
+      judgeMaxOutputTokens: null,
+    });
+    expect(
+      parseCapFlags(
+        ["node", "run", "--max-output-tokens", "4096", "--judge-max-output-tokens", "2048"],
+        "claude-haiku-4-5",
+      ),
+    ).toEqual({ maxOutputTokens: 4096, judgeMaxOutputTokens: 2048 });
+  });
+
+  // parsePositiveInt owns the raw-value table; this pins that each flag is wired
+  // through it. A non-empty judge model keeps the judge case off the
+  // "requires --judge-model" guard.
+  it.each([
+    "--max-output-tokens",
+    "--judge-max-output-tokens",
+  ])("parseCapFlags validates %s", (flag) => {
+    for (const tail of [["0"], ["-1"], ["abc"], [], ["--force"]]) {
+      expect(() => parseCapFlags(["node", "run", flag, ...tail], "claude-haiku-4-5")).toThrow(
+        `${flag} must be a positive integer`,
+      );
+    }
+  });
+
+  // A judge cap on a screen-only run is never applied, yet would still move
+  // config_hash and the native cache key.
+  it("parseCapFlags rejects --judge-max-output-tokens without --judge-model", () => {
+    const argv = ["node", "run", "--judge-max-output-tokens", "2048"];
+    expect(() => parseCapFlags(argv, "")).toThrow(
+      /--judge-max-output-tokens requires --judge-model/,
+    );
+    expect(parseCapFlags(argv, "claude-haiku-4-5").judgeMaxOutputTokens).toBe(2048);
+  });
+
+  // runCell strips an ambient CLAUDE_CODE_MAX_OUTPUT_TOKENS so it can never
+  // cap a run recorded as uncapped; the operator is told, not silently ignored.
+  it("ambientOutputCapWarning names an ignored ambient cap", () => {
+    const env = { CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" };
+    expect(ambientOutputCapWarning(env, "claude-code", null)).toMatch(
+      /CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000 is ignored.*--max-output-tokens/,
+    );
+    // The flag wins and is recorded; nothing to warn about.
+    expect(ambientOutputCapWarning(env, "claude-code", 4096)).toBeNull();
+    expect(ambientOutputCapWarning({}, "claude-code", null)).toBeNull();
+    expect(
+      ambientOutputCapWarning({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "" }, "claude-code", null),
+    ).toBeNull();
+    // Codex never reads the variable, and rejects --max-output-tokens: advising
+    // the flag there would steer the operator into a hard error.
+    expect(ambientOutputCapWarning(env, "codex", null)).toBeNull();
+  });
+});
+
 describe("output truncation vs cache source — never the same file", () => {
   let dir: string;
   afterEach(() => {
@@ -864,6 +1072,132 @@ describe("runCell", () => {
     expect(r.cell.error).toBeNull();
     expect(r.cell.task_pass).toBe(true);
     expect(r.dollarCost).toBeCloseTo(0.01, 6);
+  });
+
+  describe("output caps (opt-in)", () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    function cappedConfig(caps: {
+      maxOutputTokens?: number;
+      judgeMaxOutputTokens?: number;
+    }): McpAtlasRunConfig {
+      const core = buildRunConfig({ ...RUN_CONFIG_BASE, manifest: manifest(), ...caps });
+      return freezeConfig(core, "run-test", "2026-08-24T00:00:00.000Z");
+    }
+
+    function recordingDeps(outcome: Partial<RunClaudeOutcome> = {}) {
+      const seen: { env?: Record<string, string>; judgeArgs?: JudgeClaimsArgs } = {};
+      const deps: RunCellDeps = {
+        runCodex: async () => {
+          throw new Error("runCodex must not be called on a claude-code cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runClaude: async (o) => {
+          seen.env = o.env;
+          return {
+            stdout: claudeStdout(),
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 1000,
+            ...outcome,
+          };
+        },
+        judgeClaims: async (args) => {
+          seen.judgeArgs = args;
+          return {
+            claims: [],
+            coverage: 1,
+            verdict: "pass",
+            judge_model: "",
+            judge_error: null,
+            judge_wall_ms: 0,
+            judge_input_tokens: 0,
+            judge_output_tokens: 0,
+            scored_by: [],
+            screens: [],
+            claims_auto_scored: 0,
+            claims_sent_to_llm: 0,
+            auto_rate: 1,
+          };
+        },
+      };
+      return { seen, deps };
+    }
+
+    // An ambient value (operator shell, agent-eval/.env, a Claude Code settings
+    // env) must never cap a run the config, cell and cache key call uncapped;
+    // only the flag's value is ever sent.
+    it("CLAUDE_CODE_MAX_OUTPUT_TOKENS only when the flag is set", async () => {
+      vi.stubEnv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "32000");
+      const unset = recordingDeps();
+      await runCell({ ...baseOpts(), deps: unset.deps });
+      expect(unset.seen.env).toBeDefined();
+      expect(unset.seen.env).not.toHaveProperty("CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+
+      const set = recordingDeps();
+      await runCell({
+        ...baseOpts({ cfg: cappedConfig({ maxOutputTokens: 4096 }) }),
+        deps: set.deps,
+      });
+      expect(set.seen.env?.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("4096");
+    });
+
+    it("stamps each set cap on the cell and forwards the judge cap to judgeClaims", async () => {
+      const { seen, deps } = recordingDeps();
+      const r = await runCell({
+        ...baseOpts({ cfg: cappedConfig({ maxOutputTokens: 4096, judgeMaxOutputTokens: 2048 }) }),
+        deps,
+      });
+      expect(r.cell.error).toBeNull();
+      expect(r.cell.max_output_tokens).toBe(4096);
+      expect(r.cell.judge_max_output_tokens).toBe(2048);
+      expect(seen.judgeArgs?.maxOutputTokens).toBe(2048);
+    });
+
+    it("an unset cap leaves no trace on the cell or the judge call", async () => {
+      const { seen, deps } = recordingDeps();
+      const r = await runCell({ ...baseOpts(), deps });
+      expect("max_output_tokens" in r.cell).toBe(false);
+      expect("judge_max_output_tokens" in r.cell).toBe(false);
+      expect(seen.judgeArgs).toBeDefined();
+      expect(seen.judgeArgs?.maxOutputTokens).toBeUndefined();
+    });
+
+    // Both sides of the cache from the real builders: the cell runCell writes,
+    // indexed by readNativeCacheIndex, looked up by the key main() computes.
+    // A capped native never serves an uncapped run, nor the reverse.
+    it("round-trip: a native keys back only under the caps it ran with", async () => {
+      const uncapped = buildTestConfig();
+      const agentCap = cappedConfig({ maxOutputTokens: 4096 });
+      const judgeCap = cappedConfig({ judgeMaxOutputTokens: 2048 });
+      const both = cappedConfig({ maxOutputTokens: 4096, judgeMaxOutputTokens: 2048 });
+      const configs = [uncapped, agentCap, judgeCap, both];
+      for (const ran of configs) {
+        const opts = baseOpts({ cfg: ran });
+        const { cell } = await runCell({ ...opts, deps: recordingDeps().deps });
+        expect(cell.error).toBeNull();
+        const { reuse } = readNativeCacheIndex([cell], nativeCacheContext(ran));
+        for (const lookup of configs) {
+          expect(reuse.has(runNativeCacheKey(lookup, opts.item, "coding"))).toBe(lookup === ran);
+        }
+        rmSync(opts.scratchRoot, { recursive: true, force: true });
+      }
+    });
+
+    // A timeout cell is reusable, so an error cell must carry its caps too or a
+    // capped timeout would be served to an uncapped run.
+    it("an error cell carries the caps it ran under", async () => {
+      const { deps } = recordingDeps({ stdout: "", exitCode: null, timedOut: true });
+      const r = await runCell({
+        ...baseOpts({ cfg: cappedConfig({ maxOutputTokens: 4096, judgeMaxOutputTokens: 2048 }) }),
+        deps,
+      });
+      expect(r.cell.error).not.toBeNull();
+      expect(r.cell.max_output_tokens).toBe(4096);
+      expect(r.cell.judge_max_output_tokens).toBe(2048);
+    });
   });
 
   it("a non-zero exit with no parseable envelope produces an error cell, not a thrown exception", async () => {
@@ -1213,6 +1547,8 @@ describe("harness byte-identity goldens", () => {
     dollarCapGlobal: 50,
     declaredLimitations: [],
   };
+  /** GOLDEN_INPUT's hash under vitest — see the first test for provenance. */
+  const GOLDEN_CONFIG_HASH = "47092966cd5e9da597ce137981b52cdf116c5b8f31f97d5d543c55b0b709e167";
 
   it("claude config_hash matches the pre-harness golden", () => {
     // Captured from the code as it stood BEFORE the harness feature, under
@@ -1221,9 +1557,7 @@ describe("harness byte-identity goldens", () => {
     // tsx's — the same input hashes to 32c9149b… under tsx), so this golden
     // pins the claude path only within vitest; the cross-transform
     // pre/post-change identity was verified separately under tsx.
-    expect(computeConfigHash(buildRunConfig(GOLDEN_INPUT))).toBe(
-      "47092966cd5e9da597ce137981b52cdf116c5b8f31f97d5d543c55b0b709e167",
-    );
+    expect(computeConfigHash(buildRunConfig(GOLDEN_INPUT))).toBe(GOLDEN_CONFIG_HASH);
   });
 
   it("an explicit harness: claude-code is byte-identical to the default", () => {
@@ -1274,6 +1608,55 @@ describe("harness byte-identity goldens", () => {
     // agentVersion identical ("unknown" — the --skip-doctor value on BOTH
     // harnesses): only the explicit harness component separates them.
     expect(nativeCacheKey({ ...base, harness: "codex" })).not.toBe(nativeCacheKey(base));
+  });
+
+  // [guard] Output caps are opt-in: an unset cap must leave every existing
+  // config_hash byte-identical, or every prior run stops matching.
+  it("config_hash unchanged when unset", () => {
+    for (const unset of [undefined, null]) {
+      const cfg = buildRunConfig({
+        ...GOLDEN_INPUT,
+        maxOutputTokens: unset,
+        judgeMaxOutputTokens: unset,
+      });
+      expect("max_output_tokens" in cfg).toBe(false);
+      expect("judge_max_output_tokens" in cfg).toBe(false);
+      expect(computeConfigHash(cfg)).toBe(GOLDEN_CONFIG_HASH);
+    }
+  });
+
+  it("a set cap is recorded in the frozen config and changes config_hash", () => {
+    const agent = buildRunConfig({ ...GOLDEN_INPUT, maxOutputTokens: 4096 });
+    const judge = buildRunConfig({ ...GOLDEN_INPUT, judgeMaxOutputTokens: 4096 });
+    expect(agent.max_output_tokens).toBe(4096);
+    expect("judge_max_output_tokens" in agent).toBe(false);
+    expect(judge.judge_max_output_tokens).toBe(4096);
+    expect("max_output_tokens" in judge).toBe(false);
+    const hashes = new Set([
+      GOLDEN_CONFIG_HASH,
+      computeConfigHash(agent),
+      computeConfigHash(judge),
+    ]);
+    expect(hashes.size).toBe(3);
+  });
+
+  // main() spreads parseCapFlags straight into buildRunConfig; this pins that
+  // the two shapes line up, so a parsed flag always lands in the config.
+  it("parsed cap flags spread into buildRunConfig are recorded", () => {
+    const argv = [
+      "node",
+      "run",
+      "--max-output-tokens",
+      "4096",
+      "--judge-max-output-tokens",
+      "2048",
+    ];
+    const cfg = buildRunConfig({ ...GOLDEN_INPUT, ...parseCapFlags(argv, "claude-haiku-4-5") });
+    expect(cfg.max_output_tokens).toBe(4096);
+    expect(cfg.judge_max_output_tokens).toBe(2048);
+    expect(computeConfigHash(buildRunConfig({ ...GOLDEN_INPUT, ...parseCapFlags([], "") }))).toBe(
+      GOLDEN_CONFIG_HASH,
+    );
   });
 
   it("claude argv matches the pre-harness golden, token for token", () => {
@@ -1506,6 +1889,48 @@ describe("runCell codex branch", () => {
     expect(r.cell.shell_command_executions).toBe(0);
     expect(existsSync(join(cellDir, "mcp.json"))).toBe(false);
     expect(existsSync(join(cellDir, "ratel.json"))).toBe(false);
+  });
+
+  // The cell runCell stamps, indexed by readNativeCacheIndex, looked up by the
+  // key main() computes: harness and agent version must agree on both sides or
+  // every cached codex native silently re-runs (and is paid for again).
+  it("round-trip: a codex native keys back under its own harness/version, never a claude run's", async () => {
+    const opts = codexOpts("native");
+    const { cell } = await runCell({
+      ...opts,
+      deps: {
+        runClaude: async () => {
+          throw new Error("runClaude must not be called on a codex cell");
+        },
+        fetchSandboxTools: healthySandbox,
+        runCodex: async () =>
+          ({
+            stdout: CODEX_EVENTS,
+            stderr: "",
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            wallMs: 2000,
+          }) satisfies RunClaudeOutcome,
+        judgeClaims: passJudge,
+      },
+    });
+    expect(cell.error).toBeNull();
+    const { reuse } = readNativeCacheIndex([cell], nativeCacheContext(opts.cfg));
+    expect(reuse.has(runNativeCacheKey(opts.cfg, opts.item, "coding"))).toBe(true);
+    // Same model and a claude_code_version equal to the codex version: harness
+    // is the only differing component, and it alone must miss.
+    const claudeCfg = freezeConfig(
+      buildRunConfig({
+        ...RUN_CONFIG_BASE,
+        manifest: manifest(),
+        agentModel: "gpt-5.6-luna",
+        claudeCodeVersion: "0.153.0",
+      }),
+      "run-test",
+      "2026-09-03T00:00:00.000Z",
+    );
+    expect(reuse.has(runNativeCacheKey(claudeCfg, opts.item, "coding"))).toBe(false);
   });
 
   it("ratel arm with empty telemetry is still a hard cell error under codex", async () => {

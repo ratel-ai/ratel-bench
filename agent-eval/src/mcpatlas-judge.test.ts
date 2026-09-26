@@ -1,4 +1,6 @@
+import { NoObjectGeneratedError } from "ai";
 import { describe, expect, it, vi } from "vitest";
+import { isReusableCell } from "./mcpatlas-cell-errors.js";
 import { screenClaim } from "./mcpatlas-claim-match.js";
 import {
   buildJudgePrompt,
@@ -181,6 +183,151 @@ describe("judgeClaims — screen first, model for the residual", () => {
     expect(r.coverage).toBeNull();
     expect(r.verdict).toBe("n/a");
     expect(r.judge_error).toContain("no model was supplied");
+  });
+
+  describe("output cap (--judge-max-output-tokens)", () => {
+    const ambiguous = {
+      taskId: "t9",
+      prompt: task,
+      claims: ["The tone is friendly."],
+      finalText: "hello",
+      model: MODEL,
+    };
+
+    /** fakeJudge that also records every call's options. */
+    function recordingGenerate() {
+      const calls: Array<{ prompt: string; maxOutputTokens?: number }> = [];
+      const inner: (o: { prompt: string }) => Promise<unknown> = fakeJudge(() => 1);
+      const generate = (async (o: { prompt: string; maxOutputTokens?: number }) => {
+        calls.push(o);
+        return inner(o);
+      }) as never;
+      return { calls, generate };
+    }
+
+    it("forwards maxOutputTokens to the model call", async () => {
+      const { calls, generate } = recordingGenerate();
+      await judgeClaims({ ...ambiguous, maxOutputTokens: 512, generate });
+      expect(calls[0].maxOutputTokens).toBe(512);
+    });
+
+    it("sends no cap when unset", async () => {
+      const { calls, generate } = recordingGenerate();
+      await judgeClaims({ ...ambiguous, generate });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].maxOutputTokens).toBeUndefined();
+    });
+
+    const truncated = (finishReason: string) =>
+      new NoObjectGeneratedError({
+        message: "No object generated: could not parse the response.",
+        text: '{"scores":[{"claim_index":0,"sco',
+        response: { id: "r", timestamp: new Date(0), modelId: "claude-sonnet-4-6" },
+        usage: { inputTokens: 100, outputTokens: 64, totalTokens: 164 } as never,
+        finishReason: finishReason as never,
+      });
+
+    // Truncation is terminal and visible: n/a with its own message, never a
+    // fail and never `judge failed:` (which marks the cell for a re-run). With
+    // no cap set the provider's own default limit is what binds.
+    it.each([
+      { cap: 64, msg: "judge truncated at 64 output tokens" },
+      { cap: undefined, msg: "judge truncated at the provider's default output limit" },
+    ])("length → judge_error '$msg', verdict n/a (cap $cap)", async ({ cap, msg }) => {
+      const r = await judgeClaims({
+        ...ambiguous,
+        ...(cap !== undefined ? { maxOutputTokens: cap } : {}),
+        generate: (async () => {
+          throw truncated("length");
+        }) as never,
+      });
+      expect(r.judge_error).toBe(msg);
+      expect(r.verdict).toBe("n/a");
+      expect(r.coverage).toBeNull();
+      expect(r.scored_by).toEqual(["unscored"]);
+      // The truncated call was still billed: meter it.
+      expect(r.judge_input_tokens).toBe(100);
+      expect(r.judge_output_tokens).toBe(64);
+      // Tied to U2's reuse predicate: a judge-truncated cell is final.
+      expect(isReusableCell({ error: null, finish_reason: "success", claim_rubric: r })).toBe(true);
+    });
+
+    // generateObject can also RETURN on finish 'length' when the cut-off output
+    // still parses. Missing claims then are truncation, not an omission; every
+    // claim answered under 'length' keeps its scores (only an explanation was
+    // cut short) — a deliberate narrowing of the plan's "length → n/a".
+    const twoAmbiguous = { ...ambiguous, claims: ["The tone is friendly.", "The tone is warm."] };
+    const partial = (indices: number[], finishReason: string) =>
+      (async () => ({
+        object: {
+          scores: indices.map((claim_index) => ({
+            claim_index,
+            score: 1,
+            evidence: "hello",
+            explanation: "because",
+          })),
+        },
+        finishReason,
+        usage: { inputTokens: 100, outputTokens: 64 },
+      })) as never;
+
+    it.each([
+      {
+        answered: [0, 1],
+        finish: "length",
+        judgeError: null,
+        verdict: "pass",
+        coverage: 1,
+        scoredBy: ["llm", "llm"],
+      },
+      {
+        answered: [0],
+        finish: "length",
+        judgeError: "judge truncated at 64 output tokens",
+        verdict: "n/a",
+        coverage: null,
+        scoredBy: ["llm", "unscored"],
+      },
+      {
+        answered: [0],
+        finish: "stop",
+        judgeError: "judge omitted 1 of 2 claim(s)",
+        verdict: "n/a",
+        coverage: null,
+        scoredBy: ["llm", "unscored"],
+      },
+    ])("returned object answering $answered with finish '$finish' → judge_error $judgeError", async ({
+      answered,
+      finish,
+      judgeError,
+      verdict,
+      coverage,
+      scoredBy,
+    }) => {
+      const r = await judgeClaims({
+        ...twoAmbiguous,
+        maxOutputTokens: 64,
+        generate: partial(answered, finish),
+      });
+      expect(r.judge_error).toBe(judgeError);
+      expect(r.verdict).toBe(verdict);
+      expect(r.coverage).toBe(coverage);
+      expect(r.scored_by).toEqual(scoredBy);
+      expect(r.judge_input_tokens).toBe(100);
+      expect(r.judge_output_tokens).toBe(64);
+    });
+
+    it("any other NoObjectGeneratedError is still 'judge failed:'", async () => {
+      const r = await judgeClaims({
+        ...ambiguous,
+        maxOutputTokens: 64,
+        generate: (async () => {
+          throw truncated("stop");
+        }) as never,
+      });
+      expect(r.judge_error).toMatch(/^judge failed: No object generated/);
+      expect(r.verdict).toBe("n/a");
+    });
   });
 
   it("meters judge tokens separately so they cannot pollute arm cost", async () => {

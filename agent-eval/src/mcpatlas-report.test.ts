@@ -59,6 +59,7 @@ function task(over: Partial<McpAtlasTaskSummaryRow> = {}): McpAtlasTaskSummaryRo
     mean_turns: 3,
     errored: 0,
     excluded_cells: 0,
+    truncated_cells: 0,
     no_search_rate: 0,
     variance_measured: false,
     ...over,
@@ -212,6 +213,12 @@ describe("metricFields", () => {
     for (const k of GROUP_KEYS) expect(m).not.toHaveProperty(k);
     expect(m).toHaveProperty("task_pass_rate");
     expect(m).toHaveProperty("task_pass_ci95_low");
+  });
+
+  it("carries a capped row's caps into the report metrics", () => {
+    const m = metricFields(task({ max_output_tokens: 1024, judge_max_output_tokens: "mixed" }));
+    expect(m).toHaveProperty("max_output_tokens", 1024);
+    expect(m).toHaveProperty("judge_max_output_tokens", "mixed");
   });
 });
 

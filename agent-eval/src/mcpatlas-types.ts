@@ -189,6 +189,11 @@ export interface McpAtlasRunConfig {
   codex_pricing?: CodexPricing;
   codex_lockdown?: CodexLockdown;
   agent_model: string;
+  /** `--max-output-tokens`: the agent's per-response cap, applied through
+   *  CLAUDE_CODE_MAX_OUTPUT_TOKENS (claude-code only). Present ONLY when set —
+   *  conditionally spread like the codex keys, so an uncapped run hashes as
+   *  before. Absent = Claude Code's own default, which it already sends. */
+  max_output_tokens?: number;
   backend: string | null;
   max_turns: number;
   per_cell_timeout_ms: number;
@@ -204,6 +209,8 @@ export interface McpAtlasRunConfig {
 
   // Judging
   judge_model: string;
+  /** `--judge-max-output-tokens`. Present ONLY when set; absent = no cap sent. */
+  judge_max_output_tokens?: number;
   claim_pass_threshold: number;
   claim_partial_threshold: number;
   include_tool_evidence: boolean;
@@ -401,6 +408,11 @@ export interface McpAtlasCell {
    *  means claude-code. New rows carry it explicitly on both harnesses. */
   agent_harness?: AgentHarness;
   model: string;
+  /** The run's `max_output_tokens` / `judge_max_output_tokens`, present ONLY
+   *  when set. Part of the native cache key, read from the cell itself, so a
+   *  capped cell never serves an uncapped run or vice versa. */
+  max_output_tokens?: number;
+  judge_max_output_tokens?: number;
 
   // Ground truth, carried so rows are self-describing
   enabled_tool_ids: CanonicalToolId[];
@@ -453,6 +465,14 @@ export interface McpAtlasCell {
   final_text: string;
   finish_reason: string;
   error: string | null;
+  /** Assistant messages that stopped on `max_tokens` (distinct message ids in
+   *  the transcript). Truncation is a scored outcome, never re-run; a non-zero
+   *  count means an output limit bound (the `--max-output-tokens` cap, or
+   *  Claude Code's own default when unset), so it is recorded on every
+   *  claude-code cell, capped or not. Absent on codex cells and on runCell
+   *  failure rows (finish_reason 'error'), where no Claude Code transcript is
+   *  read. */
+  truncated_turns?: number;
 
   // Provenance
   transcript_path: string;

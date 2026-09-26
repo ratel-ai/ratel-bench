@@ -5,6 +5,7 @@ import { parse as tomlParse } from "smol-toml";
 import { describe, expect, it } from "vitest";
 import {
   countCompactions,
+  countMaxTokensStops,
   toolUsesFromTranscript,
   turnUsagesFromTranscript,
 } from "./mcpatlas-agent.js";
@@ -655,6 +656,7 @@ describe("assembleCell parsed-injection equivalence", () => {
         uses: toolUsesFromTranscript(transcript),
         turnUsages: turnUsagesFromTranscript(transcript),
         compactionEvents: countCompactions(transcript),
+        truncatedTurns: countMaxTokensStops(transcript),
       },
     });
     expect(withParsed).toEqual(without);

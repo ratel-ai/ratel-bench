@@ -115,7 +115,8 @@ export function isInfraErrorCell(cell: CellErrorRow): boolean {
  * Whether a prior cell may be served from the cache. Not when its run errored
  * re-runnably (transient|access|request, the `infra` re-run policy), nor when
  * its judge failed: that leaves the cell unscored for a reason unrelated to the
- * agent. A judge that answered but omitted claims is a final verdict.
+ * agent. A judge that answered but omitted claims, or whose output was
+ * truncated (`judge truncated …`), is a final verdict.
  */
 export function isReusableCell(cell: CellErrorRow): boolean {
   const cls = cellErrorClass(cell);

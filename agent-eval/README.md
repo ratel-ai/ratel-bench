@@ -47,6 +47,8 @@ spawns it to proxy the sandbox servers to the agent and log every tool call and 
 | `--harness` | `claude-code` | agent harness — `claude-code` or `codex` (codex requires an explicit `--model`) |
 | `--model` | `claude-haiku-4-5` | model id |
 | `--judge-model` | none | LLM judge model (requires `ANTHROPIC_API_KEY`) |
+| `--max-output-tokens` | unset | agent output cap per response, sent as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (claude-code only; an error with `--harness codex`) — see [Output caps](#output-caps) |
+| `--judge-max-output-tokens` | unset | judge output cap per call (requires `--judge-model`) — see [Output caps](#output-caps) |
 | `--ratel-local` | `0.8.1` | ratel-local version pin |
 | `--sandbox-url` | `http://localhost:1984` | sandbox endpoint |
 | `--output` | `results/raw/mcpatlas/agent.jsonl` | output path |
@@ -57,6 +59,44 @@ spawns it to proxy the sandbox servers to the agent and log every tool call and 
 | `--refresh-native` | off | ignore the native cache (`--cache-source`): every native cell runs live |
 | `--skip-doctor` | off | skip the preflight doctor check |
 | `--keep-stack` / `--keep-artifacts` | off | leave the sandbox stack / per-cell artifacts running after the campaign for debugging |
+
+### Output caps
+
+Both caps are opt-in and have **no default**. Claude Code already sends its own `max_tokens` and
+derives its auto-compaction threshold from it, so an implicit cap would silently change the agent
+under test. Unset means no cap is sent and no cap field is recorded: `config_hash` and native cache
+keys stay byte-identical to an uncapped run. Truncation *detection* (`truncated_turns`,
+`truncated_cells`, judge truncation) applies to every run, capped or not.
+
+- Values must be positive integers; anything else (including a flag with no value) is an error.
+  `--judge-max-output-tokens` without `--judge-model` is an error too: a screen-only run makes no
+  judge call, so the cap would never apply yet would still change `config_hash` and cache keys.
+- Only `--max-output-tokens` caps Claude Code. An ambient `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (shell,
+  `agent-eval/.env`, a Claude Code settings `env`) is stripped from the claude spawn's environment,
+  with a warning, so it can never cap a run recorded as uncapped. Codex never reads the variable,
+  so a codex run neither strips it nor warns.
+- A set cap is recorded in the frozen config (`max_output_tokens` / `judge_max_output_tokens`)
+  and on every cell, and is appended to the native cache key. `--cache-source` keys each prior
+  cell on its **own** recorded caps, so a capped native never serves an uncapped run, and the
+  reverse never happens either.
+- Summary task and cost rows carry `max_output_tokens` / `judge_max_output_tokens` when any cell
+  in the group was capped: the shared value, or `mixed`. They are metrics, not group keys, so a
+  capped run still replaces the uncapped rows of the same group in `report.json` — the field
+  says so. Uncapped summaries carry neither key.
+- Agent truncation is a scored outcome, never re-run. `truncated_turns` on every claude-code cell
+  built from a result envelope (including max-turns and other `is_error` envelopes) counts
+  assistant responses that stopped on `max_tokens` — the set cap, or Claude Code's own default
+  when unset — deduped by message id because Claude Code writes one transcript line per content
+  block. `mcpatlas-summarize` counts cells with `truncated_turns > 0` as `truncated_cells`.
+  Denominators are unchanged. Codex cells, legacy cells and `runCell`'s `finish_reason: "error"`
+  rows (no-envelope timeouts or kills, spawn failures, catalog-integrity or empty-telemetry
+  refusals) carry no `truncated_turns`, so they never count in `truncated_cells`.
+- A judge whose output is cut off (finish `length`) scores the task n/a (`coverage` null) with
+  `judge_error: "judge truncated at N output tokens"`, or `"judge truncated at the provider's
+  default output limit"` when no judge cap is set. If every claim was still answered, the scores
+  stand and there is no `judge_error`. Like `judge omitted …`, both stay reusable; only
+  `judge failed: …` re-runs. (Before this, an uncapped truncation read `judge failed: No object
+  generated…` and re-ran.)
 
 ### Errored cells
 
@@ -102,8 +142,9 @@ is not an error.
 
 - **Native cache (`--cache-source`).** A prior native cell is never reused when its run errored
   `transient | access | request`, or when its `judge_error` starts `judge failed:`; that key runs
-  live, and a later good cell on the same key wins. `timeout`, max-turns and `judge omitted …`
-  cells are final measurements and stay reusable. `nativeCacheKey` is unchanged.
+  live, and a later good cell on the same key wins. `timeout`, max-turns, `judge omitted …` and
+  `judge truncated …` cells are final measurements and stay reusable. This rule leaves
+  `nativeCacheKey` unchanged (only a set output cap extends it; see [Output caps](#output-caps)).
   `--refresh-native` disables reuse entirely.
 - **Summaries — documented divergence.** BFCL/SR-Agents summaries drop infra-errored
   (`transient | access`) rows from every metric. `mcpatlas-summarize` does NOT: its denominators

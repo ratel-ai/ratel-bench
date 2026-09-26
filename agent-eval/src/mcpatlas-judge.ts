@@ -13,7 +13,7 @@
 //   - the judge never sees the trajectory, the gold tools, or the ARM label
 //   - the verdict is computed in code from the scores, never asserted by the model
 
-import { generateObject, type LanguageModel } from "ai";
+import { generateObject, type LanguageModel, NoObjectGeneratedError } from "ai";
 import { z } from "zod";
 import { type ClaimScreen, screenClaims } from "./mcpatlas-claim-match.js";
 import type { ClaimRubricResult, ClaimScore, JudgeVerdict } from "./mcpatlas-types.js";
@@ -94,6 +94,8 @@ export interface JudgeClaimsArgs {
   finalText: string;
   /** Omit to run screen-only (no model calls, fully deterministic). */
   model?: LanguageModel;
+  /** `--judge-max-output-tokens`. Omit to send no cap (the provider default). */
+  maxOutputTokens?: number;
   passThreshold?: number;
   partialThreshold?: number;
   /** Force every claim through the LLM, ignoring the screen. Used by the
@@ -130,6 +132,7 @@ export async function judgeClaims(args: JudgeClaimsArgs): Promise<McpAtlasRubric
     claims,
     finalText,
     model,
+    maxOutputTokens,
     passThreshold = DEFAULT_PASS_THRESHOLD,
     partialThreshold = DEFAULT_PARTIAL_THRESHOLD,
     judgeAll = false,
@@ -167,6 +170,8 @@ export async function judgeClaims(args: JudgeClaimsArgs): Promise<McpAtlasRubric
           needLlm.map((i) => ({ index: i, text: claims[i] })),
           finalText,
         ),
+        // Undefined sends no cap: the provider default, as before.
+        maxOutputTokens,
       });
       inputTokens = res.usage?.inputTokens ?? 0;
       outputTokens = res.usage?.outputTokens ?? 0;
@@ -180,11 +185,25 @@ export async function judgeClaims(args: JudgeClaimsArgs): Promise<McpAtlasRubric
       }
       const unanswered = needLlm.filter((i) => scores[i] === null);
       if (unanswered.length) {
-        judgeError = `judge omitted ${unanswered.length} of ${needLlm.length} claim(s)`;
+        // A cut-off output that still parsed: the missing claims are
+        // truncation, not an omission. (Every claim answered under 'length'
+        // keeps its scores — only an explanation was cut short.)
+        judgeError =
+          res.finishReason === "length"
+            ? truncationMessage(maxOutputTokens)
+            : `judge omitted ${unanswered.length} of ${needLlm.length} claim(s)`;
       }
     } catch (err) {
       // Never silently a fail: an unscorable task is n/a and counted separately.
-      judgeError = `judge failed: ${(err as Error).message}`;
+      if (NoObjectGeneratedError.isInstance(err) && err.finishReason === "length") {
+        // Truncation is terminal, not an infra failure: its own message, so
+        // the cell is not re-run as `judge failed:` would be. Still billed.
+        inputTokens = err.usage?.inputTokens ?? 0;
+        outputTokens = err.usage?.outputTokens ?? 0;
+        judgeError = truncationMessage(maxOutputTokens);
+      } else {
+        judgeError = `judge failed: ${(err as Error).message}`;
+      }
     }
   } else if (needLlm.length) {
     judgeError = `${needLlm.length} claim(s) need a judge but no model was supplied`;
@@ -255,4 +274,11 @@ export function calibration(result: McpAtlasRubricResult): {
     rows,
     agreement: rows.length ? rows.filter((r) => r.agrees).length / rows.length : null,
   };
+}
+
+/** `judge truncated …`: terminal and reusable, unlike `judge failed:`. */
+function truncationMessage(maxOutputTokens: number | undefined): string {
+  return maxOutputTokens !== undefined
+    ? `judge truncated at ${maxOutputTokens} output tokens`
+    : "judge truncated at the provider's default output limit";
 }
