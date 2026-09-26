@@ -6,6 +6,7 @@ import { summarizeBfcl } from "./bfcl-summarize.js";
 import {
   type AuditRow,
   auditRows,
+  legacyServed,
   mixedHarness,
   runResultsAudit,
   staleControlKeys,
@@ -248,8 +249,43 @@ describe("mixedHarness", () => {
       ],
       0,
     ],
+    [
+      "uncapped (null) beside legacy (no recorded cap) rows is a cap mix",
+      [row({ provider: "a", max_output_tokens: null }), row({ provider: "a" })],
+      1,
+    ],
   ])("%s", (_name, rows, groups) => {
     expect(mixedHarness(rows)).toHaveLength(groups);
+  });
+
+  it("keys uncapped (null) as `none`, apart from legacy (absent) `unset`", () => {
+    const [group] = mixedHarness([
+      row({ provider: "a", max_output_tokens: null }),
+      row({ provider: "a" }),
+      row({ provider: "a" }),
+    ]);
+    expect(group.caps).toEqual({ none: 1, unset: 2 });
+  });
+});
+
+describe("legacyServed", () => {
+  const reused = (over: Partial<AuditRow>) =>
+    row({ cache_source: "reused", provider: "amazon-bedrock", ...over });
+
+  it("counts reused rows with no recorded cap per label × arm × model, even when unmixed", () => {
+    expect(
+      legacyServed([
+        // A pure legacy-served control group (provider recorded or not).
+        reused({}),
+        reused({ provider: undefined }),
+        // Not legacy-served: capped, explicitly uncapped, or live.
+        reused({ max_output_tokens: 4096 }),
+        reused({ max_output_tokens: null }),
+        row({ provider: "amazon-bedrock" }),
+        // A capped ratel-full group beside it.
+        row({ arm: "ratel-full", provider: "amazon-bedrock", max_output_tokens: 4096 }),
+      ]),
+    ).toEqual([{ label: "0.2.0", arm: "control-oracle", model: "claude-haiku-4-5", rows: 2 }]);
   });
 });
 
@@ -439,6 +475,21 @@ describe("runResultsAudit (CLI)", () => {
       "  agent.jsonl · 0.2.0 · control-oracle · claude-haiku-4-5 · transient · 0.1.5: 1",
     );
     expect(logged.some((l) => l.includes("ratel-full"))).toBe(false);
+  });
+
+  it("prints the legacy-served control groups a capped label hides behind `null`", () => {
+    const dir = tmpDir();
+    const agent = join(dir, "agent.jsonl");
+    const rows = [
+      row({ cache_source: "reused", provider: "amazon-bedrock" }),
+      row({ arm: "ratel-full", provider: "amazon-bedrock", max_output_tokens: 4096 }),
+    ];
+    writeFileSync(agent, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf-8");
+    const logged: string[] = [];
+    runResultsAudit(["--bench", "bfcl", "--agent", agent], (l) => logged.push(l));
+    expect(logged).toContain("mixed provider/cap groups: 0");
+    expect(logged).toContain("legacy-served controls (reused, no recorded cap): 1");
+    expect(logged).toContain("  0.2.0 · control-oracle · claude-haiku-4-5: 1");
   });
 
   it("rejects --drop-infra-errors without --out, and --out onto the input", () => {

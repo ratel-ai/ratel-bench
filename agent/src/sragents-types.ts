@@ -94,6 +94,11 @@ export interface SragentsSelectCell {
   /** The call's finish reason (`length` = truncated output); `error` when the call threw without one. */
   finish_reason?: string;
   /**
+   * Output cap REQUESTED on the call (`maxOutputTokens`); `null` = none sent. A
+   * provider may clamp it further. Legacy rows lack it.
+   */
+  max_output_tokens?: number | null;
+  /**
    * `live` = produced by this row's run; `reused` = a control cell served from
    * the control cache (re-stamped). Legacy rows lack it.
    */
@@ -129,6 +134,8 @@ export interface SragentsTaskRow {
    * excluded); scored on its verdict, normally an `outcome` fail since nothing parses.
    */
   truncated: boolean;
+  /** Output cap the cell requested; `null` when none was sent or the row predates the field. */
+  max_output_tokens: number | null;
 }
 
 /**
@@ -165,4 +172,9 @@ export interface SragentsTaskSummaryRow {
   errored_cells: number;
   /** Kept rows cut off by the output-token limit (scored on their verdict; not necessarily fails). */
   truncated_cells: number;
+  /**
+   * Output cap of the kept rows: the shared value, `null` when none recorded one
+   * (legacy or uncapped), or `"mixed"` (e.g. capped rows beside legacy controls).
+   */
+  max_output_tokens: number | "mixed" | null;
 }

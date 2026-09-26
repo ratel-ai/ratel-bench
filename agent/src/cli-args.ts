@@ -2,6 +2,8 @@
 // `cli.ts`, which runs `main()` on import, so the parser is unit-testable.
 
 import { dirname, join } from "node:path";
+import type { JudgePromptVariant } from "./judges/llm.js";
+import type { OutputCapOverride } from "./output-limits.js";
 import { CACHEABLE_ARMS, type RunnerConfig } from "./runner.js";
 import type { Arm, RetrievalMethod } from "./types.js";
 
@@ -36,7 +38,7 @@ export interface ParsedArgs {
   outputExplicit: boolean;
   ephemeral: boolean;
   /** Reuse version-independent control cells (baseline/oracle) from these files
-   * (`--cache-source a,b,…`; earliest eligible row across them wins) instead of
+   * (`--cache-source a,b,…`; exact harness tier first, then earliest) instead of
    * re-running them. Lets a per-method output file still pull cached controls. */
   cacheSources?: string[];
   /** `--ratel-version V`: stamp (and resume) rows as version V instead of the
@@ -59,6 +61,13 @@ export interface ParsedArgs {
   noAst: boolean;
   /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
   judgeModelId?: string;
+  /**
+   * `--max-output-tokens N|none`: per-call cap for every agent model, overriding
+   * models.json `maxOutputTokens` (`none` = send no cap). Unset = the catalog's.
+   */
+  maxOutputTokens?: OutputCapOverride;
+  /** `--judge-max-output-tokens N`: cap on each LLM-judge call. Unset = no cap sent. */
+  judgeMaxOutputTokens?: number;
   ollamaBaseURL: string;
   /** Optional bearer token for a user-hosted (`<url>#<model>`) endpoint. */
   modelApiKey?: string;
@@ -68,8 +77,14 @@ export interface ParsedArgs {
   logLevel: "quiet" | "normal" | "verbose";
 }
 
-/** Where a run writes, which files feed its control cache, and the version it's filed under. */
-export type RunTarget = Pick<RunnerConfig, "outputPath" | "cacheSourcePaths" | "ratelVersion">;
+/**
+ * Where a run writes, which files feed its control cache (and which cache tiers
+ * may serve), the version it's filed under, and the judge's output cap.
+ */
+export type RunTarget = Pick<
+  RunnerConfig,
+  "outputPath" | "cacheSourcePaths" | "ratelVersion" | "allowLegacyCache" | "judgeMaxOutputTokens"
+>;
 
 /** Filesystem access `resolveRunTarget` needs, injected so it stays pure. */
 export interface RunTargetIO {
@@ -185,6 +200,12 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
       case "--judge-model":
         args.judgeModelId = next();
         break;
+      case "--max-output-tokens":
+        args.maxOutputTokens = parseOutputCapFlag(flag, next());
+        break;
+      case "--judge-max-output-tokens":
+        args.judgeMaxOutputTokens = parsePositiveInt(flag, next());
+        break;
       case "--ollama-base-url":
         args.ollamaBaseURL = next();
         break;
@@ -228,6 +249,8 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
  *     isn't the output itself (e.g. a per-method `agent-0.4.0-sparse.jsonl`);
  *  4. otherwise `undefined`: the runner falls back to the output's own rows.
  * A model with no cached controls just runs them live; `--force` disables reuse.
+ * An explicit `--max-output-tokens` (N or `none`) must measure the cap it names,
+ * so it serves exact-tier controls only (`allowLegacyCache: false`).
  */
 export function resolveRunTarget(parsed: ParsedArgs, io: RunTargetIO): RunTarget {
   if (parsed.ephemeral && parsed.outputExplicit) {
@@ -239,7 +262,113 @@ export function resolveRunTarget(parsed: ParsedArgs, io: RunTargetIO): RunTarget
     outputPath,
     cacheSourcePaths: cacheSourcesFor(parsed, output, outputPath, io),
     ratelVersion: parsed.ratelVersion,
+    allowLegacyCache: parsed.maxOutputTokens === undefined,
+    judgeMaxOutputTokens: parsed.judgeMaxOutputTokens,
   };
+}
+
+export interface RejudgeParsedArgs {
+  input: string;
+  corpus: string;
+  judgeModelId?: string;
+  promptVariant: JudgePromptVariant;
+  out?: string;
+  ollamaBaseURL: string;
+  /** Bearer token for a user-hosted (`<url>#<model>`) judge endpoint (optional). */
+  modelApiKey?: string;
+  /** Skip the LLM judge — only recompute the (LLM-free) AST task-completion verdict. */
+  noJudge: boolean;
+  /** `--judge-max-output-tokens N`: cap on each judge call. Unset = no cap sent. */
+  judgeMaxOutputTokens?: number;
+}
+
+/** Parse `pnpm start rejudge <results.jsonl> [flags]` (argv after `rejudge`). */
+export function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
+  const args: RejudgeParsedArgs = {
+    input: "",
+    corpus: "test-data/metatool.jsonl",
+    promptVariant: "strict",
+    ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
+    modelApiKey: process.env.AWS_BEDROCK_BEARER,
+    noJudge: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    const next = (): string => {
+      const v = argv[++i];
+      if (v === undefined) throw new Error(`missing value for ${flag}`);
+      return v;
+    };
+    switch (flag) {
+      case "--corpus":
+        args.corpus = next();
+        break;
+      case "--judge-model":
+        args.judgeModelId = next();
+        break;
+      case "--judge-prompt": {
+        const v = next();
+        if (v !== "coherence" && v !== "strict") {
+          throw new Error(`--judge-prompt must be "coherence" or "strict", got "${v}"`);
+        }
+        args.promptVariant = v;
+        break;
+      }
+      case "--out":
+        args.out = next();
+        break;
+      case "--no-judge":
+        args.noJudge = true;
+        break;
+      case "--judge-max-output-tokens":
+        args.judgeMaxOutputTokens = parsePositiveInt(flag, next());
+        break;
+      case "--ollama-base-url":
+        args.ollamaBaseURL = next();
+        break;
+      case "--model-api-key":
+        args.modelApiKey = next();
+        break;
+      default:
+        if (flag.startsWith("-")) {
+          throw new Error(`unknown flag for rejudge: ${flag}`);
+        }
+        if (args.input) {
+          throw new Error(`rejudge takes a single input JSONL (got "${args.input}" and "${flag}")`);
+        }
+        args.input = flag;
+    }
+  }
+  if (!args.input) {
+    throw new Error(
+      "rejudge: missing input JSONL. Usage:\n" +
+        "  pnpm start rejudge <results.jsonl> [--corpus PATH] [--judge-model ID] " +
+        "[--judge-prompt coherence|strict] [--judge-max-output-tokens N] [--out PATH]",
+    );
+  }
+  return args;
+}
+
+/**
+ * Parse a flag value that must be a positive integer (digits only, ≥ 1). Shared
+ * by every integer-valued flag that must not silently become `NaN`/`0`.
+ */
+export function parsePositiveInt(flag: string, raw: string): number {
+  const n = Number(raw);
+  if (!/^\s*\d+\s*$/.test(raw) || !Number.isSafeInteger(n) || n < 1) {
+    throw new Error(`${flag} must be a positive integer (got "${raw}")`);
+  }
+  return n;
+}
+
+/** `--max-output-tokens N|none`: a positive integer, or `none` to send no cap. */
+export function parseOutputCapFlag(flag: string, raw: string): OutputCapOverride {
+  if (raw.trim() === "none") return "none";
+  try {
+    return parsePositiveInt(flag, raw);
+  } catch {
+    throw new Error(`${flag} must be a positive integer or "none" (got "${raw}")`);
+  }
 }
 
 /**
@@ -283,11 +412,7 @@ function parsePoolSize(flag: string, raw: string): number {
       `${flag} takes a single integer (got "${raw}"). Use --pool-sizes for a comma-separated sweep.`,
     );
   }
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
-    throw new Error(`${flag} must be a positive integer (got "${raw}")`);
-  }
-  return n;
+  return parsePositiveInt(flag, raw);
 }
 
 /** Parse `--pool-sizes 30,50,100` into a deduped, sorted list of positive integers. */

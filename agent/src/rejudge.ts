@@ -30,6 +30,8 @@ export interface RejudgeArgs {
   judgeModel?: LanguageModel;
   /** Defaults to `"strict"` — same as the runner's default. */
   promptVariant?: JudgePromptVariant;
+  /** `--judge-max-output-tokens`: cap on each judge call. Unset = no cap sent. */
+  judgeMaxOutputTokens?: number;
   /** Recompute the argument-level task-completion verdict. Defaults to `true`. */
   recomputeAst?: boolean;
   /** Test injection point. */
@@ -103,6 +105,7 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
         finalText: cell.final_text,
         model: args.judgeModel,
         promptVariant: variant,
+        maxOutputTokens: args.judgeMaxOutputTokens,
       });
       cell.judge_verdict = judged.verdict;
       cell.judge_explanation = judged.explanation;

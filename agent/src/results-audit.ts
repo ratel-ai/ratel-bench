@@ -4,6 +4,9 @@
 //   - lists the control keys the OLD control cache (earliest row wins, errors
 //     included) would serve as errors from the given cache file set
 //   - flags label × arm × model groups that mix providers or output caps
+//     (uncapped `null` reads `none`; no recorded cap reads `unset`)
+//   - counts legacy-served controls per label × arm × model: reused rows with no
+//     recorded cap, which a summary's `max_output_tokens` can't tell from uncapped
 //   - BFCL: lists label cells whose rows span >1 `ratel_version` (the supersede
 //     key includes it, so each version counts as its own cell), and per label the
 //     `ratel_version` of its infra-errored rows: the `--ratel-version` a re-drain
@@ -54,8 +57,9 @@ export interface AuditRow extends ErrorRow {
   /** `@ratel-ai/sdk` version (BFCL only). */
   ratel_version?: string;
   provider?: string;
-  /** Requested output cap; absent on rows written before caps were recorded. */
+  /** Requested output cap (`null` = uncapped); absent on rows written before caps were recorded. */
   max_output_tokens?: number | null;
+  cache_source?: "live" | "reused";
   truncated_steps?: number;
   finish_reason?: string;
 }
@@ -95,8 +99,16 @@ export interface MixedHarness {
   model: string;
   /** Row count per provider (`unset` when not recorded). */
   providers: Record<string, number>;
-  /** Row count per requested output cap (`unset` when not recorded). */
+  /** Row count per requested output cap (`none` when uncapped, `unset` when not recorded). */
   caps: Record<string, number>;
+}
+
+/** A label × arm × model group's reused rows with no recorded cap (legacy-tier serves). */
+export interface LegacyServed {
+  label: string;
+  arm: string;
+  model: string;
+  rows: number;
 }
 
 /** Arms the OLD control cache served; a frozen copy of the pre-U2 rule the audit replays. */
@@ -151,6 +163,7 @@ export function runResultsAudit(argv: string[], log: (line: string) => void = co
     stale: staleControlKeys(bench, cacheFiles),
     cacheFileCount: cacheFiles.length,
     mixed: mixedHarness(agent.rows),
+    legacy: legacyServed(agent.rows),
     // SR's cell key has no SDK version, so only BFCL can split a cell on it.
     versionSplit: bench === "bfcl" ? versionSplitCells(agent.rows) : null,
   })) {
@@ -245,13 +258,33 @@ export function mixedHarness(rows: AuditRow[]): MixedHarness[] {
       groups.set(key, { label, arm: r.arm, model: r.model, providers: {}, caps: {} }).get(key);
     if (!group) continue;
     const provider = r.provider ?? UNSET;
-    const cap = r.max_output_tokens == null ? UNSET : String(r.max_output_tokens);
+    const cap = r.max_output_tokens === undefined ? UNSET : String(r.max_output_tokens ?? "none");
     group.providers[provider] = (group.providers[provider] ?? 0) + 1;
     group.caps[cap] = (group.caps[cap] ?? 0) + 1;
   }
   return [...groups.values()].filter(
     (g) => Object.keys(g.providers).length > 1 || Object.keys(g.caps).length > 1,
   );
+}
+
+/**
+ * Per label × arm × model, the reused rows with no recorded cap: controls served
+ * from the legacy tier (effective cap unknown — the SDK default at the time; an
+ * uncapped run serves same-provider ones as exact, but they read the same here).
+ * Reported whether or not the group is mixed: a group whose rows are all
+ * legacy-served reads `max_output_tokens: null` in its summary, like an uncapped run.
+ */
+export function legacyServed(rows: AuditRow[]): LegacyServed[] {
+  const groups = new Map<string, LegacyServed>();
+  for (const r of rows) {
+    if (r.cache_source !== "reused" || r.max_output_tokens !== undefined) continue;
+    const label = labelOf(r);
+    const key = `${label}::${r.arm}::${r.model}`;
+    const group =
+      groups.get(key) ?? groups.set(key, { label, arm: r.arm, model: r.model, rows: 0 }).get(key);
+    if (group) group.rows++;
+  }
+  return [...groups.values()];
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -288,6 +321,7 @@ function formatAudit(a: {
   stale: StaleControl[];
   cacheFileCount: number;
   mixed: MixedHarness[];
+  legacy: LegacyServed[];
   /** null when the bench's cell key has no SDK version (sragents). */
   versionSplit: VersionSplitCell[] | null;
 }): string[] {
@@ -332,6 +366,9 @@ function formatAudit(a: {
       `  ${m.label} · ${m.arm} · ${m.model}: providers {${tally(m.providers)}}; caps {${tally(m.caps)}}`,
     );
   }
+  const legacyRows = a.legacy.reduce((n, g) => n + g.rows, 0);
+  lines.push("", `legacy-served controls (reused, no recorded cap): ${legacyRows}`);
+  for (const g of a.legacy) lines.push(`  ${g.label} · ${g.arm} · ${g.model}: ${g.rows}`);
   if (a.versionSplit) lines.push(...formatVersionChecks(a.versionSplit, errored));
   return lines;
 }

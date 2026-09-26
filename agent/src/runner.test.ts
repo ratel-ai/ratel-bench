@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import {
   appendRow,
@@ -92,7 +92,7 @@ function baseConfig(corpusPath: string, outputPath: string): RunnerConfig {
     corpusPath,
     outputPath,
     arms: ["control-baseline", "ratel-full", "control-oracle"],
-    models: [{ id: "fake-model", model: {} as never }],
+    models: [{ id: "fake-model", model: {} as never, maxOutputTokens: null }],
     runsPerCell: 1,
     topK: 3,
     retriever: "bm25",
@@ -103,6 +103,7 @@ function baseConfig(corpusPath: string, outputPath: string): RunnerConfig {
     force: false,
     seed: 42,
     logLevel: "quiet",
+    allowLegacyCache: true,
     // Pin a synthetic version so tests don't depend on the installed SDK; the
     // runner stamps it on every row it writes.
     ratelVersion: "test",
@@ -1025,6 +1026,333 @@ describe("control cache", () => {
     expect(summary.cells_cached).toBe(0);
     expect(summary.cells_run).toBe(1);
   });
+
+  describe("resume under output caps", () => {
+    const capped = (maxOutputTokens: number | null) => ({
+      models: [{ id: "fake-model", model: {} as never, maxOutputTokens }],
+    });
+    // A current-version (`test`) live row, as a prior run of this label wrote it.
+    const liveRow = (over: Partial<CellResult>) =>
+      cachedRow({ ratel_version: "test", cache_source: "live", ...over });
+
+    it("throws on live rows at this version with a different defined cap", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [liveRow({ max_output_tokens: 4096 })]);
+      await expect(runBaseline(output, capped(16))).rejects.toThrow(
+        /max_output_tokens.*fake-model: output has 4096, run uses 16/,
+      );
+      // An explicit uncapped row (null) is a defined, different cap too.
+      writeRows(output, [liveRow({ max_output_tokens: null })]);
+      await expect(runBaseline(output, capped(4096))).rejects.toThrow(
+        /output has none, run uses 4096/,
+      );
+    });
+
+    it("resumes over matching rows, reused legacy rows, and other versions", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [
+        liveRow({ max_output_tokens: 4096 }),
+        liveRow({ run_index: 1, cache_source: "reused", max_output_tokens: 4096 }),
+        liveRow({ run_index: 2, cache_source: "reused" }),
+        liveRow({ run_index: 3, ratel_version: "0.0.1", max_output_tokens: 16384 }),
+      ]);
+      const { summary, called } = await runBaseline(output, capped(4096));
+      expect(summary.cells_skipped).toBe(1);
+      expect(called).toEqual([]);
+    });
+
+    it("throws on a reused row at this version with a different defined cap", async () => {
+      // e.g. a controls-only run at 16384, resumed at 4096: its exact-tier reused
+      // rows would otherwise stay at 16384 while the ratel arms run at 4096.
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [liveRow({ cache_source: "reused", max_output_tokens: 16384 })]);
+      await expect(runBaseline(output, capped(4096))).rejects.toThrow(
+        /fake-model: output has 16384, run uses 4096/,
+      );
+    });
+
+    it("ignores live rows of a model not in this run", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [liveRow({ model: "other-model", max_output_tokens: 16384 })]);
+      const { summary } = await runBaseline(output, capped(4096));
+      expect(summary.cells_run).toBe(1);
+    });
+
+    it("ignores infra-error rows (access) at a different cap; they are unmeasured", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [
+        liveRow({
+          max_output_tokens: null,
+          error: "model not available for this account",
+          error_class: "access",
+        }),
+      ]);
+      const { summary } = await runBaseline(output, capped(16384));
+      expect(summary.cells_skipped).toBe(1);
+    });
+
+    it("warns on legacy live rows (no max_output_tokens) and resumes over them", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [liveRow({})]);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { summary } = await runBaseline(output, capped(4096));
+        expect(summary.cells_skipped).toBe(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 live row.*max_output_tokens/));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    describe("under an explicit --max-output-tokens (allowLegacyCache false)", () => {
+      const bedrock = (maxOutputTokens: number | null) => ({
+        models: [
+          { id: "fake-model", model: { provider: "amazon-bedrock" } as never, maxOutputTokens },
+        ],
+      });
+
+      it.each([
+        16, 4096,
+      ])("throws on legacy controls an earlier catalog-cap run served (then %s)", async (cap) => {
+        const canonical = join(tempDir, "canonical.jsonl");
+        writeRows(canonical, [cachedRow({ final_text: "legacy" })]);
+        const output = join(tempDir, "out.jsonl");
+        // Run A: catalog cap, legacy tier allowed → the legacy control is reused.
+        const a = await runBaseline(output, { ...bedrock(4096), cacheSourcePaths: [canonical] });
+        expect(a.summary.cells_cached).toBe(1);
+        // Run B: same output, explicit cap → refuses to keep the unknown-cap control.
+        await expect(
+          runBaseline(output, {
+            ...bedrock(cap),
+            cacheSourcePaths: [canonical],
+            allowLegacyCache: false,
+          }),
+        ).rejects.toThrow(/fake-model: output has legacy \(no recorded cap\), run uses/);
+      });
+
+      it("`none` resumes over a reused same-provider pre-cap row (exact: same request)", async () => {
+        const output = join(tempDir, "out.jsonl");
+        writeRows(output, [
+          liveRow({ cache_source: "reused", provider: "amazon-bedrock", final_text: "pre-cap" }),
+        ]);
+        const { summary, called } = await runBaseline(output, {
+          ...bedrock(null),
+          allowLegacyCache: false,
+        });
+        expect(summary.cells_skipped).toBe(1);
+        expect(called).toEqual([]);
+      });
+    });
+
+    it("--force skips the check (the output is truncated)", async () => {
+      const output = join(tempDir, "out.jsonl");
+      writeRows(output, [liveRow({ max_output_tokens: 4096 })]);
+      const { summary } = await runBaseline(output, { ...capped(16), force: true });
+      expect(summary.cells_run).toBe(1);
+    });
+  });
+
+  describe("harness tiers (provider | max_output_tokens)", () => {
+    const bedrock = (maxOutputTokens: number | null) => ({
+      models: [
+        { id: "fake-model", model: { provider: "amazon-bedrock" } as never, maxOutputTokens },
+      ],
+    });
+
+    async function served(rows: CellResult[], cap: number | null) {
+      const canonical = join(tempDir, "canonical.jsonl");
+      writeRows(canonical, rows);
+      const output = join(tempDir, "out.jsonl");
+      const result = await runBaseline(output, { ...bedrock(cap), cacheSourcePaths: [canonical] });
+      return { ...result, rows: readRows(output) };
+    }
+
+    it("prefers a later exact-tier row over an earlier legacy row", async () => {
+      const { summary, rows } = await served(
+        [
+          cachedRow({ final_text: "legacy", generated_at: "2026-06-01T00:00:00.000Z" }),
+          cachedRow({
+            final_text: "exact",
+            provider: "amazon-bedrock",
+            max_output_tokens: 4096,
+            generated_at: "2026-09-01T00:00:00.000Z",
+          }),
+        ],
+        4096,
+      );
+      expect(summary.cells_cached).toBe(1);
+      expect(rows[0].final_text).toBe("exact");
+      expect(rows[0].max_output_tokens).toBe(4096);
+    });
+
+    it("prefers the exact-tier row whichever cache source lists it first", async () => {
+      const exactFile = join(tempDir, "exact.jsonl");
+      const legacyFile = join(tempDir, "legacy.jsonl");
+      writeRows(exactFile, [
+        cachedRow({
+          final_text: "exact",
+          provider: "amazon-bedrock",
+          max_output_tokens: 4096,
+          generated_at: "2026-09-01T00:00:00.000Z",
+        }),
+      ]);
+      writeRows(legacyFile, [
+        cachedRow({ final_text: "legacy", generated_at: "2026-06-01T00:00:00.000Z" }),
+      ]);
+      const output = join(tempDir, "out.jsonl");
+      for (const cacheSourcePaths of [
+        [exactFile, legacyFile],
+        [legacyFile, exactFile],
+      ]) {
+        rmSync(output, { force: true });
+        const { summary } = await runBaseline(output, { ...bedrock(4096), cacheSourcePaths });
+        expect(summary.cells_cached).toBe(1);
+        expect(readRows(output)[0]).toMatchObject({ final_text: "exact", max_output_tokens: 4096 });
+      }
+    });
+
+    it("falls back to the legacy tier when no exact row exists", async () => {
+      const { summary, rows } = await served(
+        [
+          cachedRow({ final_text: "legacy" }),
+          cachedRow({ final_text: "other-cap", provider: "amazon-bedrock", max_output_tokens: 16 }),
+        ],
+        4096,
+      );
+      expect(summary.cells_cached).toBe(1);
+      expect(rows[0].final_text).toBe("legacy");
+    });
+
+    it("never reuses a different recorded cap or provider", async () => {
+      for (const over of [
+        { provider: "amazon-bedrock", max_output_tokens: 16384 },
+        { provider: "amazon-bedrock", max_output_tokens: null },
+        { provider: "anthropic.messages", max_output_tokens: 4096 },
+        { provider: "anthropic.messages" },
+      ] satisfies Partial<CellResult>[]) {
+        const { summary, called } = await served([cachedRow(over)], 4096);
+        expect(summary.cells_cached, JSON.stringify(over)).toBe(0);
+        expect(called).toHaveLength(1);
+        rmSync(join(tempDir, "out.jsonl"), { force: true });
+      }
+    });
+
+    it("serves a same-provider row with no recorded cap (pre-cap build) as legacy", async () => {
+      const { summary, rows } = await served(
+        [cachedRow({ provider: "amazon-bedrock", final_text: "pre-cap" })],
+        4096,
+      );
+      expect(summary.cells_cached).toBe(1);
+      expect(rows[0].final_text).toBe("pre-cap");
+    });
+
+    it("an uncapped run serves a same-provider pre-cap row as exact, over an earlier legacy row", async () => {
+      const { summary, rows } = await served(
+        [
+          cachedRow({ final_text: "legacy", generated_at: "2026-06-01T00:00:00.000Z" }),
+          cachedRow({
+            final_text: "pre-cap",
+            provider: "amazon-bedrock",
+            generated_at: "2026-08-01T00:00:00.000Z",
+          }),
+        ],
+        null,
+      );
+      expect(summary.cells_cached).toBe(1);
+      expect(rows[0].final_text).toBe("pre-cap");
+    });
+
+    it.each([
+      16,
+      null,
+    ])("an explicit --max-output-tokens (%s) never serves a legacy row", async (cap) => {
+      const canonical = join(tempDir, "canonical.jsonl");
+      writeRows(canonical, [cachedRow({})]);
+      const output = join(tempDir, "out.jsonl");
+      const { summary, called } = await runBaseline(output, {
+        ...bedrock(cap),
+        cacheSourcePaths: [canonical],
+        allowLegacyCache: false,
+      });
+      expect(summary.cells_cached).toBe(0);
+      expect(called).toHaveLength(1);
+    });
+
+    it.each([
+      16,
+      null,
+    ])("an explicit --max-output-tokens (%s) still serves exact-tier rows", async (cap) => {
+      // run 0: legacy only (runs live); run 1: an exact row at the named cap (served).
+      const canonical = join(tempDir, "canonical.jsonl");
+      writeRows(canonical, [
+        cachedRow({}),
+        cachedRow({
+          run_index: 1,
+          final_text: "exact",
+          provider: "amazon-bedrock",
+          max_output_tokens: cap,
+        }),
+      ]);
+      const output = join(tempDir, "out.jsonl");
+      const { summary, called } = await runBaseline(output, {
+        ...bedrock(cap),
+        runsPerCell: 2,
+        cacheSourcePaths: [canonical],
+        allowLegacyCache: false,
+      });
+      expect(summary.cells_cached).toBe(1);
+      expect(called).toHaveLength(1);
+      expect(readRows(output).find((r) => r.cache_source === "reused")?.final_text).toBe("exact");
+    });
+
+    it("logs how many reused cells came from the legacy tier", async () => {
+      const canonical = join(tempDir, "canonical.jsonl");
+      writeRows(canonical, [
+        cachedRow({}),
+        cachedRow({ run_index: 1, provider: "amazon-bedrock", max_output_tokens: 4096 }),
+      ]);
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await runBaseline(join(tempDir, "out.jsonl"), {
+          ...bedrock(4096),
+          runsPerCell: 2,
+          cacheSourcePaths: [canonical],
+          logLevel: "normal",
+        });
+        expect(log).toHaveBeenCalledWith(
+          expect.stringMatching(
+            /^cache: 2 control cells reused \(1 legacy-tier: no recorded cap\)/,
+          ),
+        );
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("an uncapped run reuses exact uncapped (null) rows", async () => {
+      const { summary } = await served(
+        [cachedRow({ provider: "amazon-bedrock", max_output_tokens: null })],
+        null,
+      );
+      expect(summary.cells_cached).toBe(1);
+    });
+
+    it("[guard] a truncated control cell is a final row: reused, never re-run", async () => {
+      const { summary } = await served(
+        [
+          cachedRow({
+            provider: "amazon-bedrock",
+            max_output_tokens: 4096,
+            programmatic_verdict: "fail",
+            finish_reason: "length",
+            truncated_steps: 1,
+          }),
+        ],
+        4096,
+      );
+      expect(summary.cells_cached).toBe(1);
+    });
+  });
 });
 
 describe("makeRegistryRunCell: errored cells and the judge gate", () => {
@@ -1072,6 +1400,7 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
     model: MockLanguageModelV3,
     perRunTimeoutMs: number,
     judgeModel?: MockLanguageModelV3,
+    caps: { maxOutputTokens?: number; judgeMaxOutputTokens?: number } = {},
   ) {
     const registry = new Map([[controlBaseline.id, controlBaseline]]);
     return makeRegistryRunCell(
@@ -1080,13 +1409,14 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
     )({
       scenario: goldScenario,
       arm: controlBaseline.id,
-      model: { id: "priced-model", model },
+      model: { id: "priced-model", model, maxOutputTokens: caps.maxOutputTokens ?? null },
       runIndex: 0,
       pool: goldScenario.candidate_pool,
       poolSize: 1,
       config: {
         ...baseConfig("unused", "unused"),
         perRunTimeoutMs,
+        judgeMaxOutputTokens: caps.judgeMaxOutputTokens,
         pricing: {
           "priced-model": {
             inputPer1M: 1,
@@ -1126,13 +1456,23 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
   });
 
   function judge(): MockLanguageModelV3 {
+    return stopModel(JSON.stringify({ verdict: "pass", explanation: "ok" }), 10);
+  }
+
+  /** An agent that answers in text on its first step (a clean programmatic fail). */
+  function textAnswerModel(): MockLanguageModelV3 {
+    return stopModel("I cannot read files.", 5);
+  }
+
+  /** A fresh model (own `doGenerateCalls`) whose every call returns `text` and stops. */
+  function stopModel(text: string, outputTokens: number): MockLanguageModelV3 {
     return new MockLanguageModelV3({
       doGenerate: async () => ({
-        content: [{ type: "text", text: JSON.stringify({ verdict: "pass", explanation: "ok" }) }],
+        content: [{ type: "text", text }],
         finishReason: { unified: "stop", raw: "end_turn" },
         usage: {
           inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-          outputTokens: { total: 10, text: 10, reasoning: 0 },
+          outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 },
         },
         warnings: [],
       }),
@@ -1158,23 +1498,32 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
   });
 
   it("[guard] judges a clean programmatic-fail cell", async () => {
-    const model = new MockLanguageModelV3({
-      doGenerate: async () => ({
-        content: [{ type: "text", text: "I cannot read files." }],
-        finishReason: { unified: "stop", raw: "end_turn" },
-        usage: {
-          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
-          outputTokens: { total: 5, text: 5, reasoning: 0 },
-        },
-        warnings: [],
-      }),
-    });
+    const model = textAnswerModel();
     const judgeModel = judge();
     const cell = await runCell(model, 5_000, judgeModel);
     expect(cell.error).toBeNull();
     expect(cell.programmatic_verdict).toBe("fail");
     expect(judgeModel.doGenerateCalls).toHaveLength(1);
     expect(cell.judge_verdict).toBe("pass");
+  });
+
+  it("forwards model.maxOutputTokens to the agent and judgeMaxOutputTokens to the judge", async () => {
+    const model = textAnswerModel();
+    const judgeModel = judge();
+    const cell = await runCell(model, 5_000, judgeModel, {
+      maxOutputTokens: 777,
+      judgeMaxOutputTokens: 333,
+    });
+    expect(model.doGenerateCalls[0].maxOutputTokens).toBe(777);
+    expect(cell.max_output_tokens).toBe(777);
+    expect(judgeModel.doGenerateCalls[0].maxOutputTokens).toBe(333);
+  });
+
+  it("[guard] sends no judge cap by default", async () => {
+    const model = textAnswerModel();
+    const judgeModel = judge();
+    await runCell(model, 5_000, judgeModel, { maxOutputTokens: 777 });
+    expect(judgeModel.doGenerateCalls[0].maxOutputTokens).toBeUndefined();
   });
 
   it("stays fail/fail when step 2 hangs past the deadline", async () => {

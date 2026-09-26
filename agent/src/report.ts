@@ -119,6 +119,17 @@ export function isTruncated(r: { truncated_steps?: number; finish_reason?: strin
   return (r.truncated_steps ?? 0) > 0 || r.finish_reason === "length";
 }
 
+/**
+ * Output-cap provenance of a summary group's kept rows: the one cap they all
+ * requested, `null` when none recorded one (legacy or uncapped), or `"mixed"`
+ * when they differ — e.g. capped live rows alongside legacy uncapped controls.
+ */
+export function capProvenance(caps: Array<number | null>): number | "mixed" | null {
+  const distinct = new Set(caps);
+  if (distinct.size > 1) return "mixed";
+  return distinct.values().next().value ?? null;
+}
+
 /** Normalize a (possibly absent) cell category into a stable grouping key. */
 export function categoryOf(c: Pick<CellResult, "category">): string {
   return c.category ?? "(uncategorized)";

@@ -37,6 +37,13 @@ import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
 import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
+import {
+  cacheTier,
+  guardResumeCaps,
+  type Harness,
+  harnessByModel,
+  preferCacheRow,
+} from "./output-limits.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import type {
   AgentDescriptor,
@@ -44,6 +51,7 @@ import type {
   CellResult,
   PrewarmInput,
   RetrievalMethod,
+  RunnerModel,
   Scenario,
   ToolSpec,
 } from "./types.js";
@@ -58,13 +66,6 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
  * paying for another live agent loop.
  */
 export const CACHEABLE_ARMS: ReadonlySet<Arm> = new Set(["control-baseline", "control-oracle"]);
-
-export interface RunnerModel {
-  /** Stable id used in the JSONL row (e.g. "gpt-5.4-mini"). */
-  id: string;
-  /** AI SDK model instance. */
-  model: LanguageModel;
-}
 
 export interface RunnerConfig {
   corpusPath: string;
@@ -90,6 +91,8 @@ export interface RunnerConfig {
   dollarGlobalCap: number;
   force: boolean;
   judgeModel?: LanguageModel;
+  /** `--judge-max-output-tokens`: cap on each LLM-judge call. Unset = no cap sent. */
+  judgeMaxOutputTokens?: number;
   /** Skip the argument-level (AST) task-completion verdict. Defaults to off (AST on). */
   noAst?: boolean;
   seed: number;
@@ -131,13 +134,20 @@ export interface RunnerConfig {
   ratelVersion?: string;
   /**
    * JSONL files to consult for cached control-arm rows (e.g. the canonical
-   * `agent.jsonl` plus a controls backfill). The runner reuses the earliest
-   * eligible cacheable-arm row per key across all of them (re-stamped) instead
-   * of re-running the cell. Ephemeral runs point this at the canonical file so
+   * `agent.jsonl` plus a controls backfill). The runner reuses the best eligible
+   * cacheable-arm row per key across all of them (exact harness tier before
+   * legacy, then earliest; re-stamped) instead of re-running the cell. Ephemeral runs point this at the canonical file so
    * iteration on ratel arms doesn't re-pay for controls. When unset or empty,
    * `outputPath` is the source. `force: true` disables the cache.
    */
   cacheSourcePaths?: string[];
+  /**
+   * Whether the control cache may serve legacy-tier rows (no recorded cap; see
+   * `cacheTier`), and resume may keep ones an earlier invocation served. The CLI
+   * sets false for any explicit `--max-output-tokens` (N or `none`), so such a run
+   * measures the cap it names. Required: no silent default.
+   */
+  allowLegacyCache: boolean;
 }
 
 export type RunCellFn = (args: {
@@ -164,9 +174,10 @@ export interface RunnerSummary {
   stopped_reason: "completed" | "global_cap";
 }
 
-function readCompletedKeys(path: string): Set<string> {
-  if (!existsSync(path)) return new Set();
-  const out = new Set<string>();
+/** The output's resumable rows (those carrying a `ratel_version`). */
+function readOutputRows(path: string): CellResult[] {
+  if (!existsSync(path)) return [];
+  const out: CellResult[] = [];
   const text = readFileSync(path, "utf-8");
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -176,7 +187,7 @@ function readCompletedKeys(path: string): Set<string> {
       // task's key — they're effectively ignored, which is the right behavior
       // (we don't know what code shape produced them).
       if (typeof cell.ratel_version !== "string") continue;
-      out.add(cellKeyOf(cell));
+      out.push(cell);
     } catch {
       // Ignore malformed rows; resumability is best-effort.
     }
@@ -185,18 +196,44 @@ function readCompletedKeys(path: string): Set<string> {
 }
 
 /**
+ * Resume keys of the output's rows. Throws first when a row at this version was
+ * produced under a different recorded output cap than this run's, or (under an
+ * explicit cap) is a reused legacy row (see `checkResumeCaps`); live rows with no
+ * recorded cap only warn.
+ */
+function readCompletedKeys(config: RunnerConfig, ratelVersion: string): Set<string> {
+  const rows = readOutputRows(config.outputPath);
+  guardResumeCaps(
+    rows.filter((r) => r.ratel_version === ratelVersion),
+    config.models,
+    ratelVersion,
+    config.allowLegacyCache,
+  );
+  return new Set(rows.map(cellKeyOf));
+}
+
+/**
  * Index control-arm rows from the source files, keyed by a VERSION-AGNOSTIC key.
  * Control arms don't use Ratel retrieval, so a control cell produced under any
  * version is a valid result for every other version — reused (re-stamped) instead
- * of re-run. The earliest-produced cell per key across ALL sources wins (the
- * original baseline); missing sources are skipped.
+ * of re-run. Across ALL sources the best harness tier wins, then the
+ * earliest-produced cell (the original baseline); missing sources are skipped.
  *
  * Rerunnable errors (transient|access|request) are never eligible: they say
  * nothing about the model, so serving them would re-count an outage as a fail
  * forever. A key whose only rows are such errors is absent and runs live.
  * Timeout/outcome errors are final, scored results and stay reusable.
+ *
+ * Rows must also match the model's current harness (`harness`: provider +
+ * requested output cap, see `cacheTier`): exact-tier rows win over legacy rows
+ * (no recorded cap), then earliest; a different recorded provider or cap is
+ * never served, nor is a legacy row when `allowLegacy` is false.
  */
-function readControlCacheIndex(paths: readonly string[]): Map<string, CellResult> {
+function readControlCacheIndex(
+  paths: readonly string[],
+  harness: ReadonlyMap<string, Harness>,
+  allowLegacy: boolean,
+): Map<string, CellResult> {
   const out = new Map<string, CellResult>();
   for (const path of paths) {
     if (!existsSync(path)) continue;
@@ -209,8 +246,8 @@ function readControlCacheIndex(paths: readonly string[]): Map<string, CellResult
         if (!CACHEABLE_ARMS.has(cell.arm)) continue;
         if (isRerunnable(cell)) continue;
         const key = controlKeyOf(cell);
-        const prev = out.get(key);
-        if (!prev || (cell.generated_at ?? "") < (prev.generated_at ?? "")) out.set(key, cell);
+        const best = preferCacheRow(out.get(key), cell, harness.get(cell.model), allowLegacy);
+        if (best) out.set(key, best);
       } catch {
         // Ignore malformed rows.
       }
@@ -367,7 +404,7 @@ export function makeRegistryRunCell(
       scenario,
       pool,
       poolSize,
-      model: { id: model.id, model: model.model },
+      model: { id: model.id, model: model.model, maxOutputTokens: model.maxOutputTokens },
       runIndex,
       topK: config.topK,
       retriever: config.retriever,
@@ -401,6 +438,7 @@ export function makeRegistryRunCell(
         judgeCriteria: scenario.judge_criteria,
         finalText: cell.final_text,
         model: judgeModel,
+        maxOutputTokens: config.judgeMaxOutputTokens,
       });
       cell.judge_verdict = judged.verdict;
       cell.judge_explanation = judged.explanation;
@@ -562,7 +600,6 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     // Truncate so re-runs don't append duplicates onto previous cells.
     writeFileSync(config.outputPath, "", "utf-8");
   }
-  const completed = config.force ? new Set<string>() : readCompletedKeys(config.outputPath);
 
   // Build the registry only when the runner needs it: production runs (no
   // injected `runCell`) need it for dispatch; test runs that inject `runCell`
@@ -579,14 +616,17 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   }
 
   const ratelVersion = config.ratelVersion ?? SDK_VERSION;
+  const completed = config.force ? new Set<string>() : readCompletedKeys(config, ratelVersion);
   // Control-arm reuse (default-on): control cells are version-independent, so reuse
   // prior cells (from any version) re-stamped to this run instead of re-running them.
   // Sources default to this run's own output (its prior-version controls); --ephemeral
   // points them at the canonical file. `--force` disables it. Same-version controls are
   // already handled by the `completed` resume set, so there's no double-write.
+  const harness = harnessByModel(config.models);
+  const allowLegacy = config.allowLegacyCache;
   const cacheIndex = config.force
     ? new Map<string, CellResult>()
-    : readControlCacheIndex(controlSources(config));
+    : readControlCacheIndex(controlSources(config), harness, allowLegacy);
 
   const { tasks, cellsSkipped: initialSkipped } = buildTaskQueue(
     scenarios,
@@ -601,6 +641,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   // Hits are appended in task-iteration order so JSONL ordering matches a fresh
   // live run at the same args.
   let cellsCached = 0;
+  let legacyCached = 0;
   const liveTasks: PendingTask[] = [];
   for (const task of tasks) {
     const cached = CACHEABLE_ARMS.has(task.arm)
@@ -625,14 +666,16 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         cache_source: "reused",
       });
       cellsCached++;
+      if (cacheTier(cached, harness.get(cached.model), allowLegacy) === "legacy") legacyCached++;
     } else {
       liveTasks.push(task);
     }
   }
 
   if ((config.logLevel ?? "normal") !== "quiet" && cellsCached > 0) {
+    const legacyNote = legacyCached > 0 ? ` (${legacyCached} legacy-tier: no recorded cap)` : "";
     console.error(
-      `cache: ${cellsCached} control cells reused (re-stamped to ${ratelVersion}), ` +
+      `cache: ${cellsCached} control cells reused${legacyNote} (re-stamped to ${ratelVersion}), ` +
         `${liveTasks.length} will run`,
     );
   }

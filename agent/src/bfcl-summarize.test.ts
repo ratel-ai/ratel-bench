@@ -204,13 +204,14 @@ describe("summarizeBfcl — task completion", () => {
     const s = taskSummary[0];
     expect(s.recall).toBe(0.5);
     expect(s.latency_p50_ms).toBe(700);
-    // exactly the five metrics (+ identity/dims + n + error counters), nothing extra
+    // exactly the five metrics (+ identity/dims + n + error counters + cap provenance), nothing extra
     expect(Object.keys(s).sort()).toEqual(
       [
         "arm",
         "errored_cells",
         "excluded_cells",
         "latency_p50_ms",
+        "max_output_tokens",
         "mean_total_tokens",
         "model",
         "ratel_ai_core_version",
@@ -410,6 +411,48 @@ describe("summarizeBfcl — errored cells", () => {
       mean_total_tokens: null,
       latency_p50_ms: null,
     });
+  });
+});
+
+describe("summarizeBfcl — max_output_tokens provenance", () => {
+  const TRANSIENT = "Failed after 3 attempts. Last error: Internal server error";
+  const other = { scenario_id: "bfcl-simple-1" };
+  const summary = (cells: CellResult[]) =>
+    summarizeBfcl({ retrievalRows: [], cells, scenarios }).taskSummary[0];
+
+  it("number when every kept row shares one cap; carried on each task row", () => {
+    const cells = [cell({ max_output_tokens: 4096 }), cell({ ...other, max_output_tokens: 4096 })];
+    const { taskRows, taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskRows.map((r) => r.max_output_tokens)).toEqual([4096, 4096]);
+    expect(taskSummary[0].max_output_tokens).toBe(4096);
+  });
+
+  it("'mixed' when kept rows differ, legacy (unrecorded) rows included", () => {
+    expect(summary([cell({ max_output_tokens: 4096 }), cell({ ...other })]).max_output_tokens).toBe(
+      "mixed",
+    );
+    expect(
+      summary([cell({ max_output_tokens: 4096 }), cell({ ...other, max_output_tokens: 16 })])
+        .max_output_tokens,
+    ).toBe("mixed");
+  });
+
+  it("null when no kept row recorded a cap (legacy or uncapped) or none is kept", () => {
+    expect(summary([cell({}), cell({ ...other, max_output_tokens: null })]).max_output_tokens).toBe(
+      null,
+    );
+    expect(summary([cell({ error: TRANSIENT, max_output_tokens: 4096 })]).max_output_tokens).toBe(
+      null,
+    );
+  });
+
+  it("counts only superseding, non-excluded rows", () => {
+    const cells = [
+      cell({ error: TRANSIENT, max_output_tokens: 16 }), // superseded by the re-run
+      cell({ generated_at: "2026-06-23T00:00:00.000Z", max_output_tokens: 4096 }),
+      cell({ ...other, error: TRANSIENT, max_output_tokens: 16 }), // final, excluded
+    ];
+    expect(summary(cells).max_output_tokens).toBe(4096);
   });
 });
 

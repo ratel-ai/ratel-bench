@@ -2,6 +2,7 @@
   "run": [
     {
       "id": "claude-sonnet-5",
+      "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-sonnet-5",
       "pricing": {
         "bedrock": {
@@ -20,6 +21,7 @@
     },
     {
       "id": "claude-sonnet-4-6",
+      "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-sonnet-4-6",
       "pricing": {
         "bedrock": {
@@ -38,6 +40,7 @@
     },
     {
       "id": "claude-haiku-4-5",
+      "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
       "pricing": {
         "bedrock": {
@@ -56,6 +59,7 @@
     },
     {
       "id": "claude-opus-4-8",
+      "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-opus-4-8",
       "anthropicEndpoint": "https://api.anthropic.com/v1",
       "pricing": {
@@ -75,6 +79,7 @@
     },
     {
       "id": "claude-opus-4-5",
+      "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-opus-4-5-20251101-v1:0",
       "pricing": {
         "bedrock": {
@@ -93,6 +98,7 @@
     },
     {
       "id": "claude-fable-5",
+      "maxOutputTokens": 16384,
       "bedrockProfile": "global.anthropic.claude-fable-5",
       "anthropicEndpoint": "https://api.anthropic.com/v1",
       "pricing": {
@@ -112,6 +118,7 @@
     },
     {
       "id": "gpt-5.4-mini",
+      "maxOutputTokens": 16384,
       "pricing": {
         "openai": {
           "inputPer1M": 0.75,
@@ -123,6 +130,7 @@
     },
     {
       "id": "gpt-5.6-luna",
+      "maxOutputTokens": 16384,
       "pricing": {
         "openai": {
           "inputPer1M": 0.2,

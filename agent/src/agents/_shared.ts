@@ -166,6 +166,10 @@ export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * builds its own bundle (with whatever Ratel/SDK wiring it wants to demonstrate)
  * and then hands off to this helper for the loop + metering boilerplate, which
  * is identical across arms.
+ *
+ * Honours the output-cap contract on `AgentRunInput.model`: every step's call
+ * requests `maxOutputTokens` (omitted when the cap is `null`), and the row
+ * records it as `max_output_tokens`, errored cells included.
  */
 export async function runMeteredLoop(
   armId: string,
@@ -179,6 +183,7 @@ export async function runMeteredLoop(
     tools: bundle.tools,
     toolChoice: "auto",
     stopWhen: stepCountIs(input.maxSteps),
+    maxOutputTokens: input.model.maxOutputTokens ?? undefined,
     onStepFinish: recorder.record,
   });
 
@@ -207,5 +212,6 @@ export async function runMeteredLoop(
     input.pricing as PricingTable | undefined,
     recorder,
   );
+  cell.max_output_tokens = input.model.maxOutputTokens;
   return cell;
 }

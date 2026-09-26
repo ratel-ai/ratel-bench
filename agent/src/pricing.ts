@@ -27,7 +27,7 @@ interface ModelEntry {
 
 /** Location of the model catalog: MODELS_JSON override (used by the AWS harness),
  *  else models.json at the repo root (rides in with the checkout there too). */
-function modelsJsonPath(): string {
+export function modelsJsonPath(): string {
   return process.env.MODELS_JSON || resolve(REPO_ROOT, "models.json");
 }
 

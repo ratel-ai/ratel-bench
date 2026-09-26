@@ -169,7 +169,7 @@ describe("runMeteredLoop", () => {
     outputTokens: { total: output, text: output, reasoning: 0 },
   });
 
-  function input(model: MockLanguageModelV3): AgentRunInput {
+  function input(model: MockLanguageModelV3, maxOutputTokens: number | null = null): AgentRunInput {
     return {
       scenario: {
         id: "s-1",
@@ -179,7 +179,7 @@ describe("runMeteredLoop", () => {
       },
       pool: [spec],
       poolSize: 1,
-      model: { id: "priced-model", model },
+      model: { id: "priced-model", model, maxOutputTokens },
       runIndex: 0,
       topK: 5,
       retriever: "bm25",
@@ -260,5 +260,79 @@ describe("runMeteredLoop", () => {
     expect(cell.finish_reason).toBe("length");
     expect(cell.truncated_steps).toBe(1);
     expect(cell.max_step_output_tokens).toBe(64);
+  });
+
+  it("every doGenerate call receives the model's maxOutputTokens; the cell stamps it", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        call++;
+        if (call === 1) {
+          return {
+            content: [
+              { type: "tool-call", toolCallId: "c1", toolName: "fs_read_file", input: "{}" },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool_use" },
+            usage: usage(10, 5),
+            warnings: [],
+          };
+        }
+        return {
+          content: [{ type: "text", text: "done" }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: usage(10, 5),
+          warnings: [],
+        };
+      },
+    });
+
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, 1234),
+      buildToolBundle([spec]),
+    );
+
+    expect(model.doGenerateCalls).toHaveLength(2);
+    expect(model.doGenerateCalls.map((c) => c.maxOutputTokens)).toEqual([1234, 1234]);
+    expect(cell.max_output_tokens).toBe(1234);
+  });
+
+  it("a null cap sends no maxOutputTokens and stamps null", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "done" }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: usage(10, 5),
+        warnings: [],
+      }),
+    });
+
+    const cell = await runMeteredLoop("control-baseline", input(model), buildToolBundle([spec]));
+
+    expect(model.doGenerateCalls[0].maxOutputTokens).toBeUndefined();
+    expect(cell.max_output_tokens).toBeNull();
+  });
+
+  it("stamps the cap on an errored cell too", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "bad request",
+          url: "https://api.test/v1",
+          requestBodyValues: {},
+          statusCode: 400,
+          isRetryable: false,
+        });
+      },
+    });
+
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, 64),
+      buildToolBundle([spec]),
+    );
+
+    expect(cell.error_class).toBe("request");
+    expect(cell.max_output_tokens).toBe(64);
   });
 });

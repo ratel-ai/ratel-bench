@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CANONICAL_AGENT_JSONL, parseArgs, resolveRunTarget } from "./cli-args.js";
+import {
+  CANONICAL_AGENT_JSONL,
+  parseArgs,
+  parseOutputCapFlag,
+  parsePositiveInt,
+  parseRejudgeArgs,
+  resolveRunTarget,
+} from "./cli-args.js";
 
 const KNOWN_ARMS = [
   "control-baseline",
@@ -34,6 +41,9 @@ describe("parseArgs", () => {
     });
     expect(args.cacheSources).toBeUndefined();
     expect(args.ratelVersion).toBeUndefined();
+    // No flag defaults: models.json supplies the agent cap, the judge gets none.
+    expect(args.maxOutputTokens).toBeUndefined();
+    expect(args.judgeMaxOutputTokens).toBeUndefined();
   });
 
   it("parses the campaign flags", () => {
@@ -106,6 +116,64 @@ describe("parseArgs", () => {
   });
 });
 
+describe("output cap flags", () => {
+  it("--max-output-tokens takes N or 'none'; --judge-max-output-tokens takes N", () => {
+    expect(parse("--max-output-tokens", "16").maxOutputTokens).toBe(16);
+    expect(parse("--max-output-tokens", "none").maxOutputTokens).toBe("none");
+    expect(parse("--judge-max-output-tokens", "512").judgeMaxOutputTokens).toBe(512);
+  });
+
+  it("cap flags reject non-positive-int values", () => {
+    // "1e3", "+5", "0x10", "1.0" pass Number()/isInteger; only the digits-only rule rejects them.
+    for (const bad of ["0", "-1", "1.5", "abc", "", "16,32", "1e3x", "1e3", "+5", "0x10", "1.0"]) {
+      expect(() => parse("--max-output-tokens", bad)).toThrow(
+        /--max-output-tokens must be a positive integer/,
+      );
+      expect(() => parse("--judge-max-output-tokens", bad)).toThrow(
+        /--judge-max-output-tokens must be a positive integer/,
+      );
+    }
+    // The judge cap has no 'none': unset already means no cap.
+    expect(() => parse("--judge-max-output-tokens", "none")).toThrow(/positive integer/);
+    expect(() => parse("--max-output-tokens")).toThrow("missing value for --max-output-tokens");
+  });
+
+  it("parsePositiveInt / parseOutputCapFlag", () => {
+    expect(parsePositiveInt("--x", "7")).toBe(7);
+    expect(parsePositiveInt("--x", " 7 ")).toBe(7);
+    expect(() => parsePositiveInt("--x", " ")).toThrow('--x must be a positive integer (got " ")');
+    expect(parseOutputCapFlag("--x", "none")).toBe("none");
+    expect(parseOutputCapFlag("--x", "42")).toBe(42);
+  });
+
+  it("[guard] --pool-size keeps its messages after delegating to parsePositiveInt", () => {
+    expect(() => parse("--pool-size", "30,50")).toThrow(/Use --pool-sizes/);
+    expect(() => parse("--pool-size", "0")).toThrow(
+      '--pool-size must be a positive integer (got "0")',
+    );
+  });
+});
+
+describe("parseRejudgeArgs", () => {
+  it("parses --judge-max-output-tokens N; unset by default", () => {
+    expect(
+      parseRejudgeArgs(["in.jsonl", "--judge-max-output-tokens", "256"]).judgeMaxOutputTokens,
+    ).toBe(256);
+    expect(parseRejudgeArgs(["in.jsonl"]).judgeMaxOutputTokens).toBeUndefined();
+  });
+
+  it("rejects a non-positive-int or missing --judge-max-output-tokens", () => {
+    for (const bad of ["0", "abc", "none", "1e3"]) {
+      expect(() => parseRejudgeArgs(["in.jsonl", "--judge-max-output-tokens", bad])).toThrow(
+        /--judge-max-output-tokens must be a positive integer/,
+      );
+    }
+    expect(() => parseRejudgeArgs(["in.jsonl", "--judge-max-output-tokens"])).toThrow(
+      "missing value for --judge-max-output-tokens",
+    );
+  });
+});
+
 describe("resolveRunTarget", () => {
   const io = (existing: string[] = []) => ({
     resolve: (p: string) => `/repo/${p}`,
@@ -127,6 +195,8 @@ describe("resolveRunTarget", () => {
       outputPath: "/repo/agent/results/ephemeral/agent-T.jsonl",
       cacheSourcePaths: [`/repo/${CANONICAL_AGENT_JSONL}`],
       ratelVersion: undefined,
+      allowLegacyCache: true,
+      judgeMaxOutputTokens: undefined,
     });
   });
 
@@ -142,6 +212,8 @@ describe("resolveRunTarget", () => {
       outputPath: "/repo/results/agent-0.4.0-sparse.jsonl",
       cacheSourcePaths: ["/repo/results/agent.jsonl"],
       ratelVersion: undefined,
+      allowLegacyCache: true,
+      judgeMaxOutputTokens: undefined,
     });
     expect(resolveRunTarget(args, io()).cacheSourcePaths).toBeUndefined();
     // Writing the canonical file itself: the runner falls back to the output.
@@ -155,5 +227,22 @@ describe("resolveRunTarget", () => {
     expect(
       resolveRunTarget(parse(...controls, "--ratel-version", "0.1.5"), io()).ratelVersion,
     ).toBe("0.1.5");
+  });
+
+  it("an explicit --max-output-tokens (N or none) serves no legacy-tier controls", () => {
+    expect(resolveRunTarget(parse(), io()).allowLegacyCache).toBe(true);
+    for (const cap of ["16", "none"]) {
+      expect(resolveRunTarget(parse("--max-output-tokens", cap), io()).allowLegacyCache).toBe(
+        false,
+      );
+    }
+  });
+
+  it("carries the judge cap alongside the agent cap", () => {
+    const target = resolveRunTarget(
+      parse("--max-output-tokens", "16", "--judge-max-output-tokens", "256"),
+      io(),
+    );
+    expect(target).toMatchObject({ allowLegacyCache: false, judgeMaxOutputTokens: 256 });
   });
 });
