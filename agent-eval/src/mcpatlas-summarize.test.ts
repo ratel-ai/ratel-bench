@@ -305,6 +305,96 @@ describe("task summary", () => {
     expect(ratelRows.every((s) => s.excluded_cells === 0)).toBe(true);
   });
 
+  // Truncation stays a scored outcome (no denominator changes); the count
+  // only makes a binding output cap visible per group.
+  it("counts cells with truncated_turns > 0 as truncated_cells", () => {
+    const cells = [
+      cell({ task_id: "t1", truncated_turns: 2, task_pass: false }),
+      cell({ task_id: "t2", truncated_turns: 0 }),
+      cell({ task_id: "t3" }), // legacy / codex: field absent
+    ];
+    const r = summarizeMcpAtlas(input({ cells }));
+    const all = r.taskSummary.find((s) => s.workload === "all");
+    expect(all?.truncated_cells).toBe(1);
+    expect(all?.tasks).toBe(3);
+    expect(all?.task_pass_rate).toBeCloseTo(2 / 3);
+  });
+
+  // Caps are provenance, not a group key: a capped run's rows must say so, or
+  // in report.json they would silently stand in for the uncapped headline.
+  it("records each group's caps: the value, 'mixed', or absent when uncapped", () => {
+    const capped = { max_output_tokens: 1024, judge_max_output_tokens: 512 };
+    const pairOf = (taskId: string, over: Partial<McpAtlasCell> = {}) => [
+      cell({ task_id: taskId, arm: "native", cell_key: `${taskId}__native`, ...over }),
+      cell({ task_id: taskId, arm: "ratel", cell_key: `${taskId}__ratel`, ...over }),
+    ];
+    const rowsFor = (cells: McpAtlasCell[]) => {
+      const r = summarizeMcpAtlas(input({ cells }));
+      return [
+        r.taskSummary.find((s) => s.workload === "all" && s.arm === "native"),
+        r.costSummary.find((s) => s.workload === "all"),
+      ];
+    };
+
+    for (const row of rowsFor(pairOf("t1", capped))) {
+      expect(row?.max_output_tokens).toBe(1024);
+      expect(row?.judge_max_output_tokens).toBe(512);
+    }
+    // Uncapped (and legacy) output stays byte-identical: no key at all.
+    for (const row of rowsFor(pairOf("t1"))) {
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty("max_output_tokens");
+      expect(row).not.toHaveProperty("judge_max_output_tokens");
+    }
+    for (const row of rowsFor([...pairOf("t1", capped), ...pairOf("t2")])) {
+      expect(row?.max_output_tokens).toBe("mixed");
+      expect(row?.judge_max_output_tokens).toBe("mixed");
+    }
+  });
+
+  // 'mixed' is a safety net for a hand-merged agent.jsonl: mcpatlas-run
+  // truncates its output and reuses natives only under keys carrying the caps.
+  it.each([
+    { caps: [1024, 1024], want: 1024, judgeWant: 512 },
+    { caps: [1024, 4096], want: "mixed", judgeWant: "mixed" },
+    { caps: [1024, undefined], want: "mixed", judgeWant: "mixed" },
+    { caps: [undefined, undefined], want: undefined, judgeWant: undefined },
+  ])("a group whose cells ran under caps $caps records $want", ({ caps, want, judgeWant }) => {
+    const cells = caps.map((cap, i) =>
+      cell({
+        task_id: `t${i + 1}`,
+        cell_key: `t${i + 1}__native`,
+        ...(cap != null ? { max_output_tokens: cap, judge_max_output_tokens: cap / 2 } : {}),
+      }),
+    );
+    const row = summarizeMcpAtlas(input({ cells })).taskSummary.find(
+      (s) => s.workload === "all" && s.arm === "native",
+    );
+    expect(row).toBeDefined();
+    if (want === undefined) {
+      expect(row).not.toHaveProperty("max_output_tokens");
+      expect(row).not.toHaveProperty("judge_max_output_tokens");
+    } else {
+      expect(row?.max_output_tokens).toBe(want);
+      expect(row?.judge_max_output_tokens).toBe(judgeWant);
+    }
+  });
+
+  // The cost row compares both arms, so its caps span both: an uncapped native
+  // beside a capped ratel cell is 'mixed', whichever side carries the cap.
+  it.each([
+    { native: {}, ratel: { max_output_tokens: 1024, judge_max_output_tokens: 512 } },
+    { native: { max_output_tokens: 1024, judge_max_output_tokens: 512 }, ratel: {} },
+  ])("cost row caps span both arms (native $native, ratel $ratel)", ({ native, ratel }) => {
+    const cells = [
+      cell({ task_id: "t1", arm: "native", cell_key: "t1__native", ...native }),
+      cell({ task_id: "t1", arm: "ratel", cell_key: "t1__ratel", ...ratel }),
+    ];
+    const cost = summarizeMcpAtlas(input({ cells })).costSummary.find((s) => s.workload === "all");
+    expect(cost?.max_output_tokens).toBe("mixed");
+    expect(cost?.judge_max_output_tokens).toBe("mixed");
+  });
+
   it("excluded_cells is 0 when nothing errored on infra", () => {
     const r = summarizeMcpAtlas(input({ cells: [cell()] }));
     expect(r.taskSummary.every((s) => s.excluded_cells === 0)).toBe(true);

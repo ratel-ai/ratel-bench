@@ -230,17 +230,7 @@ export interface RawToolUse {
 export function toolUsesFromTranscript(text: string): RawToolUse[] {
   const out: RawToolUse[] = [];
   let turn = 0;
-  for (const line of text.split("\n")) {
-    const s = line.trim();
-    if (!s) continue;
-    let rec: Record<string, unknown>;
-    try {
-      rec = JSON.parse(s);
-    } catch {
-      continue;
-    }
-    const msg = (rec.message ?? rec) as Record<string, unknown>;
-    if (msg?.role !== "assistant") continue;
+  for (const msg of assistantMessages(text)) {
     turn++;
     const content = msg.content;
     if (!Array.isArray(content)) continue;
@@ -255,6 +245,26 @@ export function toolUsesFromTranscript(text: string): RawToolUse[] {
     }
   }
   return out;
+}
+
+/** Every assistant message in a Claude Code transcript, one per LINE (Claude
+ *  Code writes one line per content block, so a message may repeat). Blank,
+ *  malformed and non-object lines are skipped. */
+function* assistantMessages(text: string): Generator<Record<string, unknown>> {
+  for (const line of text.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    let rec: unknown;
+    try {
+      rec = JSON.parse(s);
+    } catch {
+      continue;
+    }
+    if (!rec || typeof rec !== "object") continue;
+    const r = rec as Record<string, unknown>;
+    const msg = (r.message ?? r) as Record<string, unknown>;
+    if (msg && typeof msg === "object" && msg.role === "assistant") yield msg;
+  }
 }
 
 // Confirmed against the live ratel-local 0.8.1 process's own MCP connection
@@ -456,17 +466,7 @@ export interface TurnUsage {
 export function turnUsagesFromTranscript(text: string): TurnUsage[] {
   const out: TurnUsage[] = [];
   let turn = 0;
-  for (const line of text.split("\n")) {
-    const s = line.trim();
-    if (!s) continue;
-    let rec: Record<string, unknown>;
-    try {
-      rec = JSON.parse(s);
-    } catch {
-      continue;
-    }
-    const msg = (rec.message ?? rec) as Record<string, unknown>;
-    if (msg?.role !== "assistant") continue;
+  for (const msg of assistantMessages(text)) {
     turn++;
     const u = (msg.usage ?? {}) as Record<string, number>;
     if (!Object.keys(u).length) continue;
@@ -498,4 +498,21 @@ export function countCompactions(text: string): number {
     else if (/"subtype"\s*:\s*"compact_boundary"/.test(line)) n++;
   }
   return n;
+}
+
+/** Assistant responses that stopped on `max_tokens`: an output limit bound
+ *  (the `--max-output-tokens` cap, or Claude Code's own default when unset).
+ *  Claude Code writes the main-session transcript as one line per content
+ *  block, each repeating the parent message's id and stop_reason, so one
+ *  truncated response would count once per block; dedupe by `message.id`. An
+ *  id-less line counts on its own. */
+export function countMaxTokensStops(text: string): number {
+  const ids = new Set<string>();
+  let idless = 0;
+  for (const msg of assistantMessages(text)) {
+    if (msg.stop_reason !== "max_tokens") continue;
+    if (typeof msg.id === "string") ids.add(msg.id);
+    else idless++;
+  }
+  return ids.size + idless;
 }

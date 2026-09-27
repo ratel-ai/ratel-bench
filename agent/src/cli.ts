@@ -22,18 +22,15 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
-import {
-  DEFAULT_OLLAMA_BASE_URL,
-  type ParsedArgs,
-  parseArgs,
-  resolveRunTarget,
-} from "./cli-args.js";
+import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
-import { loadAgentRegistry, type RunnerConfig, type RunnerModel, run } from "./runner.js";
+import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
+import type { ResolvedModel } from "./types.js";
 
 loadEnv();
 
@@ -58,7 +55,7 @@ interface ResolveOpts {
  * write a coherent answer." That's still informative — just call it out
  * when reading the report.
  */
-function resolveOllama(modelTag: string, baseURL: string): RunnerModel {
+function resolveOllama(modelTag: string, baseURL: string): ResolvedModel {
   // `.chat(...)` forces the legacy `/v1/chat/completions` wire format. The
   // default factory call uses OpenAI's newer Responses API (typed items like
   // `item_reference`), which Ollama's OpenAI-compat endpoint doesn't speak.
@@ -77,12 +74,12 @@ function resolveOllama(modelTag: string, baseURL: string): RunnerModel {
  * unambiguous. Auth is optional: a bearer token from --model-api-key /
  * AWS_BEDROCK_BEARER when set, else a dummy key (unauthenticated endpoints).
  */
-function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): RunnerModel {
+function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): ResolvedModel {
   const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: opts.modelApiKey ?? "none" });
   return { id: raw, model: provider.chat(ep.modelName) };
 }
 
-function resolveModel(modelId: string, opts: ResolveOpts): RunnerModel {
+function resolveModel(modelId: string, opts: ResolveOpts): ResolvedModel {
   const ep = parseCustomEndpoint(modelId);
   if (ep) {
     return resolveCustomEndpoint(modelId, ep, opts);
@@ -139,82 +136,6 @@ function ephemeralOutputPath(): string {
   return `agent/results/ephemeral/agent-${stamp}.jsonl`;
 }
 
-interface RejudgeParsedArgs {
-  input: string;
-  corpus: string;
-  judgeModelId?: string;
-  promptVariant: JudgePromptVariant;
-  out?: string;
-  ollamaBaseURL: string;
-  /** Bearer token for a user-hosted (`<url>#<model>`) judge endpoint (optional). */
-  modelApiKey?: string;
-  /** Skip the LLM judge — only recompute the (LLM-free) AST task-completion verdict. */
-  noJudge: boolean;
-}
-
-function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
-  const args: RejudgeParsedArgs = {
-    input: "",
-    corpus: "test-data/metatool.jsonl",
-    promptVariant: "strict",
-    ollamaBaseURL: process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL,
-    modelApiKey: process.env.AWS_BEDROCK_BEARER,
-    noJudge: false,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
-    const next = (): string => {
-      const v = argv[++i];
-      if (v === undefined) throw new Error(`missing value for ${flag}`);
-      return v;
-    };
-    switch (flag) {
-      case "--corpus":
-        args.corpus = next();
-        break;
-      case "--judge-model":
-        args.judgeModelId = next();
-        break;
-      case "--judge-prompt": {
-        const v = next();
-        if (v !== "coherence" && v !== "strict") {
-          throw new Error(`--judge-prompt must be "coherence" or "strict", got "${v}"`);
-        }
-        args.promptVariant = v;
-        break;
-      }
-      case "--out":
-        args.out = next();
-        break;
-      case "--no-judge":
-        args.noJudge = true;
-        break;
-      case "--ollama-base-url":
-        args.ollamaBaseURL = next();
-        break;
-      case "--model-api-key":
-        args.modelApiKey = next();
-        break;
-      default:
-        if (flag.startsWith("-")) {
-          throw new Error(`unknown flag for rejudge: ${flag}`);
-        }
-        if (args.input) {
-          throw new Error(`rejudge takes a single input JSONL (got "${args.input}" and "${flag}")`);
-        }
-        args.input = flag;
-    }
-  }
-  if (!args.input) {
-    throw new Error(
-      "rejudge: missing input JSONL. Usage:\n" +
-        "  pnpm start rejudge <results.jsonl> [--corpus PATH] [--judge-model ID] " +
-        "[--judge-prompt coherence|strict] [--out PATH]",
-    );
-  }
-  return args;
-}
-
 /** Default output path: `<input>.rejudged-<variant>.jsonl`, alongside the source. */
 function defaultRejudgeOutput(input: string, variant: JudgePromptVariant): string {
   const dotJsonl = input.endsWith(".jsonl") ? input.slice(0, -".jsonl".length) : input;
@@ -249,6 +170,7 @@ async function rejudgeMain(argv: string[]): Promise<void> {
     corpusPath,
     judgeModel,
     promptVariant: parsed.promptVariant,
+    judgeMaxOutputTokens: parsed.judgeMaxOutputTokens,
   });
   console.log(
     `done: ${summary.total} rows (${summary.ast_scored} AST-scored, ${summary.rejudged} LLM-rejudged, ` +
@@ -260,7 +182,8 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
-  // Output path, control-cache sources (reuse is ON by default) and --ratel-version.
+  // Output path, control-cache sources and tiers (reuse is ON by default),
+  // --ratel-version and the judge cap.
   const target = resolveRunTarget(parsed, {
     resolve: resolveRepoPath,
     exists: existsSync,
@@ -270,7 +193,13 @@ async function runMain(): Promise<void> {
     ollamaBaseURL: parsed.ollamaBaseURL,
     modelApiKey: parsed.modelApiKey,
   };
-  const models = parsed.models.map((m) => resolveModel(m, resolveOpts));
+  // Caps are attached after resolution, so no resolver branch (e.g. an injected
+  // early return) can skip them. Every model's cap is logged — none is implied.
+  const models = buildRunnerModels(parsed.models, (m) => resolveModel(m, resolveOpts), {
+    catalog: loadModelCatalog(),
+    override: parsed.maxOutputTokens,
+  });
+  console.log(capsLine(models, parsed.maxOutputTokens));
   // Warm any user-hosted endpoints once so early cells don't burn their timeout on
   // a cold start (no-op for cloud/ollama model ids).
   await warmUpModels(parsed.models, parsed.modelApiKey);
@@ -316,6 +245,9 @@ async function runMain(): Promise<void> {
   );
   if (parsed.ratelVersion !== undefined) {
     console.log(`ratel-version: control rows stamped as ${parsed.ratelVersion}`);
+  }
+  if (judgeModel && parsed.judgeMaxOutputTokens !== undefined) {
+    console.log(`caps: judge=${parsed.judgeMaxOutputTokens}`);
   }
   const summary = await run(cfg);
   console.log(

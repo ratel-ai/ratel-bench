@@ -19,13 +19,31 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
    **Errored rows are never reused, never double-counted** (taxonomy: `agent/src/cell-errors.ts`).
    - *Cache:* rerunnable errors (`transient|access|request`) are skipped, so a key whose only
      cached rows are errors runs live; `timeout|outcome` rows are final, scored results and stay
-     reusable. `--cache-source a,b,…` reads several files (earliest eligible row across them wins,
-     e.g. canonical + a controls backfill); `--ratel-version V` stamps re-drained control rows
+     reusable. `--cache-source a,b,…` reads several files (best harness tier, then earliest, across
+     them — see *Harness*; e.g. canonical + a controls backfill); `--ratel-version V` stamps re-drained control rows
      with a label's original SDK version (control arms only). V must equal the `ratel_version` of
      the rows being replaced, as `results-audit` prints it per label (e.g. `0.1.5` for label
      `0.2.0`, `0.3.0-rc.1` for label `0.3.0-rc.1`). A different or omitted V (the installed SDK
      version) doesn't supersede them: each version counts as its own cell, so the label is
      double-counted (`bfcl-summarize` / `report` warn; `results-audit` lists the split cells).
+   - *Harness:* controls are reused only under the same harness (`provider|max_output_tokens`):
+     exact match first, then legacy rows (no recorded cap; a recorded provider must still match),
+     earliest within a tier, never a different recorded backend or cap. A same-provider row with no
+     recorded cap is exact for an uncapped run (pre-cap builds sent no cap either). Any explicit
+     `--max-output-tokens` (N or `none`) serves exact-tier rows only, and refuses to resume over
+     legacy controls an earlier invocation served into the same output. A REBASELINE (`--force`)
+     changes what is served only on a build that records caps: its exact-tier rows then beat
+     older legacy rows (a pre-cap re-baseline stays legacy-tier, where earlier rows win). A
+     re-drain from a controls backfill is served its rows only under the backfill's backend and
+     cap (same provider, no different `--max-output-tokens`); otherwise those keys run live. The
+     `cache:` line counts legacy-tier hits. Summary `max_output_tokens` can't tell legacy rows from
+     uncapped ones: a group served only legacy controls reads `null`, and `"mixed"` means
+     legacy/uncapped rows sit beside capped ones. Legacy-served controls are `cache_source:
+     "reused"` rows with no `max_output_tokens` key (`provider` may be present: U1/U2-era rows
+     record it; an explicit `null` means uncapped). Under an uncapped run a same-provider such
+     row is exact-tier, not legacy; either way its effective cap is none / the SDK default.
+     `results-audit` prints them per label · arm · model (`legacy-served controls`), and its
+     `caps` keep `none` (uncapped) apart from `unset` (no recorded cap).
    - *Summaries / reports:* rows are superseded per cell (label + cell key; the last final row
      wins, so a re-run replaces a transient error and a duplicated row counts once). Final
      `transient|access` rows are left out of every metric and counted in `excluded_cells`;
@@ -39,9 +57,9 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
      the label match the new summary rows. `--label L` summarizes one label only.
    - *Audit first:* `results-audit --bench bfcl|sragents --agent <file> --cache <a,b,…>` counts
      errors per file/label/arm/model/class/ratel_version, lists the control keys the old cache
-     re-served as errors, flags mixed providers/caps and (BFCL) lists label cells under >1
-     `ratel_version` plus each label's infra-errored rows' `ratel_version`. Read-only unless
-     `--drop-infra-errors --out <path>`: drops only `transient|access` rows a later row of the same
+     re-served as errors, flags mixed providers/caps, counts legacy-served controls and (BFCL)
+     lists label cells under >1 `ratel_version` plus each label's infra-errored rows'
+     `ratel_version`. Read-only unless `--drop-infra-errors --out <path>`: drops only `transient|access` rows a later row of the same
      cell supersedes, so no summary changes; final infra rows stay (still `excluded_cells`).
 2. **SR-Agents LLM eval is ALWAYS 600 scenarios = 100/dataset × 6** — a seeded subset of the
    full 5,400. ALWAYS pin it: `sragents-candidates --scenarios-from results/raw/sragents/candidates.jsonl`.
@@ -66,6 +84,21 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
   `sragents-candidates --scenarios-from results/raw/sragents/candidates.jsonl` (else all 5,400 run).
 - **Pool rule:** pool = `gold + deterministic distractors`, truncated to pool size; gold
   always present (so recall@pool = 1.0). Mirrors `expandPool` (`agent/src/pool.ts`).
+- **Output caps:** every agent call requests the model's models.json `maxOutputTokens` (4096:
+  haiku-4-5 / sonnet-4-6 / opus-4-5; 16384: sonnet-5 / opus-4-8 / fable-5 / gpt-5.4-mini /
+  gpt-5.6-luna; self-hosted: none sent), recorded per row as `max_output_tokens`. Resume won't
+  mix recorded caps: it throws when the output holds current-version rows of a run model (live,
+  or reused with a recorded cap) whose `max_output_tokens` differs (`null` included); live rows
+  with no recorded cap only warn, and infra-error (`transient|access`) rows are ignored. Uncapped
+  legacy controls can still be served into a capped label through the legacy tier (see
+  *Harness*); re-baseline with `--force` for a single-cap label. `--max-output-tokens N|none`
+  (`start`, `sragents-select`) overrides the catalog for a whole run and serves exact-tier
+  controls only; `--judge-max-output-tokens N` (`start`, `rejudge`) caps the BFCL judge
+  (default: none). Cut-offs stay scored and final (`truncated_cells`); a truncated judge answer
+  is `n/a` (`judge truncated at N`). Check the startup `caps:` line. Paired cap checks (capped vs
+  `none`, plus the noise repeat) must run every side with `--force` (or a fresh output and
+  `--cache-source <nonexistent path>`) so controls run live: otherwise the catalog-cap side takes
+  legacy controls and the repeat is served the first run's exact rows (noise 0 by construction).
 - **Models:** whatever LLM(s) under test — cloud (`claude-sonnet-4-6`, `gpt-5.4-mini`) or
   user-hosted via URL (`https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b`).
 

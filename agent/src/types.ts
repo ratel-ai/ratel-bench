@@ -72,6 +72,22 @@ export interface UsageTotals {
 /** Ratel retrieval method. Mirrors `@ratel-ai/sdk`'s `SearchMethod`. */
 export type RetrievalMethod = "bm25" | "semantic" | "hybrid";
 
+/** A model id resolved to an AI SDK instance (what the CLI model resolvers return). */
+export interface ResolvedModel {
+  /** Stable id used in the JSONL row (e.g. "gpt-5.4-mini"). */
+  id: string;
+  /** AI SDK model instance. */
+  model: LanguageModel;
+}
+
+/**
+ * A resolved model plus its per-call output cap (`output-limits.ts`): the
+ * models.json `maxOutputTokens`, a `--max-output-tokens` override, or `null` =
+ * no cap sent (the provider default applies). Built after resolution, so every
+ * resolver path (including injected ones) gets a cap.
+ */
+export type RunnerModel = ResolvedModel & { maxOutputTokens: number | null };
+
 export interface AgentRunInput {
   scenario: Scenario;
   /** Expanded pool (gold + distractors) at config.poolSize. Empty for pool-size-agnostic arms. */
@@ -82,7 +98,14 @@ export interface AgentRunInput {
    * to `pool.length`.
    */
   poolSize: number | null;
-  model: { id: string; model: LanguageModel };
+  /**
+   * The model under test. Contract: an arm MUST send `model.maxOutputTokens` as
+   * `maxOutputTokens` on every LLM call it makes (omitted when `null`), and
+   * stamp it on the row as `max_output_tokens` — `runMeteredLoop` does both.
+   * The control cache and resume key on the stamped value, so an arm that calls
+   * the model itself must honour it too.
+   */
+  model: RunnerModel;
   runIndex: number;
   topK: number;
   /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
@@ -223,6 +246,11 @@ export interface CellResult {
   truncated_steps?: number;
   /** Largest single-step `outputTokens`; the headroom signal for output caps. */
   max_step_output_tokens?: number;
+  /**
+   * Output cap REQUESTED on every call of the cell (`maxOutputTokens`); `null` =
+   * none sent. A provider may clamp it further. Legacy rows lack it.
+   */
+  max_output_tokens?: number | null;
   /**
    * `live` = produced by this row's run; `reused` = a control cell served from
    * the control cache (re-stamped). Legacy rows lack it.

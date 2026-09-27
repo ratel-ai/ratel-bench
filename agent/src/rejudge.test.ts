@@ -223,6 +223,23 @@ describe("rejudge", () => {
     expect(judge.mock.calls[0][0].promptVariant).toBe("strict");
   });
 
+  it("forwards judgeMaxOutputTokens to the judge (unset → not sent)", async () => {
+    const inputPath = join(tempDir, "in.jsonl");
+    const outputPath = join(tempDir, "out.jsonl");
+    const corpusPath = join(tempDir, "corpus.jsonl");
+    writeJsonl(corpusPath, [scenario({ id: "s1" })]);
+    writeJsonl(inputPath, [cell({ scenario_id: "s1", programmatic_verdict: "fail" })]);
+
+    const judge = vi.fn().mockResolvedValue({ verdict: "fail", explanation: "x" });
+    // biome-ignore lint/suspicious/noExplicitAny: judge is mocked
+    const base = { inputPath, outputPath, corpusPath, judgeModel: {} as any, judge };
+    await rejudge({ ...base, judgeMaxOutputTokens: 256 });
+    await rejudge(base);
+
+    expect(judge.mock.calls[0][0].maxOutputTokens).toBe(256);
+    expect(judge.mock.calls[1][0].maxOutputTokens).toBeUndefined();
+  });
+
   it("throws when a row's scenario_id is missing from the corpus", async () => {
     const inputPath = join(tempDir, "in.jsonl");
     const outputPath = join(tempDir, "out.jsonl");

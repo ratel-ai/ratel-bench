@@ -381,6 +381,40 @@ describe("summarizeSragents — errored cells", () => {
   });
 });
 
+describe("summarizeSragents — max_output_tokens provenance", () => {
+  const TRANSIENT = "Failed after 3 attempts. Last error: Overloaded";
+  const other = { scenario_id: "sragents-toolqa_1" };
+  const groups = (cells: SragentsSelectCell[]) =>
+    summarizeSragents({ retrievalRows: [], cells }).taskSummary;
+  const toolqa = (cells: SragentsSelectCell[]) =>
+    groups(cells).find((r) => r.dataset === "toolqa")?.max_output_tokens;
+
+  it("number when every kept row shares one cap (dataset and `all` rollup); on each task row", () => {
+    const cells = [cell({ max_output_tokens: 4096 }), cell({ ...other, max_output_tokens: 4096 })];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(taskRows.map((r) => r.max_output_tokens)).toEqual([4096, 4096]);
+    expect(groups(cells).map((g) => [g.dataset, g.max_output_tokens])).toEqual([
+      ["toolqa", 4096],
+      ["all", 4096],
+    ]);
+  });
+
+  it("'mixed' when kept rows differ, legacy (unrecorded) rows included", () => {
+    expect(toolqa([cell({ max_output_tokens: 4096 }), cell({ ...other })])).toBe("mixed");
+  });
+
+  it("null when no kept row recorded a cap, or none is kept; excluded rows don't count", () => {
+    expect(toolqa([cell({}), cell({ ...other, max_output_tokens: null })])).toBeNull();
+    expect(toolqa([cell({ error: TRANSIENT, max_output_tokens: 4096 })])).toBeNull();
+    expect(
+      toolqa([
+        cell({ max_output_tokens: 4096 }),
+        cell({ ...other, error: TRANSIENT, max_output_tokens: 8 }),
+      ]),
+    ).toBe(4096);
+  });
+});
+
 describe("summarizeSragents — label filter", () => {
   it("emits only the given label's task and retrieval groups", () => {
     const cells = [

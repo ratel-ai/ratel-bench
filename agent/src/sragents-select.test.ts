@@ -14,6 +14,7 @@ import {
   type SelectArgs,
   selectForCell,
   sragentsCachePaths,
+  sragentsCapOptions,
   stratifiedSample,
   type Task,
 } from "./sragents-select.js";
@@ -193,7 +194,7 @@ describe("control-arm reuse", () => {
       }),
       cell({ arm: "ratel-full", selected_skill_ids: ["ignored"] }), // not cacheable
     ]);
-    const { reuse } = readControlIndex(path);
+    const { reuse } = readControlIndex([path]);
     const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
     expect(reuse.size).toBe(1); // ratel-full excluded
     expect(reuse.get(key)?.selected_skill_ids).toEqual(["early"]); // earliest wins
@@ -209,7 +210,7 @@ describe("control-arm reuse", () => {
         ratel_ai_core_version: RATEL_AI_CORE_VERSION,
       }),
     ]);
-    const { current } = readControlIndex(path);
+    const { current } = readControlIndex([path]);
     expect(
       current.has(controlKey("sragents-toolqa_0", "control-oracle", "gpt-5.4-mini", null, 0)),
     ).toBe(true);
@@ -231,7 +232,7 @@ describe("control-arm reuse", () => {
       // key 2: a current-version transient error is current (resume skips it) but not reusable.
       cell({ run_index: 2, ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
     ]);
-    const { reuse } = readControlIndex(path);
+    const { reuse } = readControlIndex([path]);
     const key = (run: number) =>
       controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
     expect(reuse.get(key(0))?.selected_skill_ids).toEqual(["good"]);
@@ -245,7 +246,7 @@ describe("control-arm reuse", () => {
       cell({ error: "run timed out after 300000ms" }),
       cell({ run_index: 1, error: "No object generated: bad json", error_class: "outcome" }),
     ]);
-    const { reuse } = readControlIndex(path);
+    const { reuse } = readControlIndex([path]);
     const key = (run: number) =>
       controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
     expect(reuse.get(key(0))?.error).toBe("run timed out after 300000ms");
@@ -267,16 +268,75 @@ describe("control-arm reuse", () => {
       [a, missing, b],
       [b, missing, a],
     ]) {
-      expect(readControlIndex(...paths).reuse.get(key)?.selected_skill_ids).toEqual(["b-early"]);
+      expect(readControlIndex(paths).reuse.get(key)?.selected_skill_ids).toEqual(["b-early"]);
     }
   });
 
   it("[guard] a current-version rerunnable error still counts as current (resume unchanged)", () => {
     const path = join(dir, "agent.jsonl");
     write(path, [cell({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" })]);
-    const { current } = readControlIndex(path);
+    const { current } = readControlIndex([path]);
     const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
     expect(current.has(key)).toBe(true);
+  });
+
+  it("applies harness tiers: exact (provider|cap) beats an earlier legacy row; others never", () => {
+    const path = join(dir, "agent.jsonl");
+    const bedrock4096 = { provider: "amazon-bedrock", max_output_tokens: 4096 };
+    write(path, [
+      // key 0: legacy (earlier) vs exact (later) → exact.
+      cell({ generated_at: "2026-06-01T00:00:00.000Z", selected_skill_ids: ["legacy"] }),
+      cell({
+        generated_at: "2026-09-01T00:00:00.000Z",
+        selected_skill_ids: ["exact"],
+        ...bedrock4096,
+      }),
+      // key 1: only a different recorded cap / provider → nothing served.
+      cell({ run_index: 1, provider: "amazon-bedrock", max_output_tokens: 16384 }),
+      cell({ run_index: 1, provider: "anthropic.messages", max_output_tokens: 4096 }),
+      cell({ run_index: 1, provider: "anthropic.messages" }),
+      // key 2: legacy only → served (legacy tier).
+      cell({ run_index: 2, selected_skill_ids: ["legacy2"] }),
+      // key 3: same provider, no recorded cap (pre-cap build) → served (legacy tier).
+      cell({ run_index: 3, provider: "amazon-bedrock", selected_skill_ids: ["pre-cap"] }),
+    ]);
+    const harness = new Map([["gpt-5.4-mini", bedrock4096]]);
+    const { reuse } = readControlIndex([path], harness);
+    const key = (run: number) =>
+      controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
+    expect(reuse.get(key(0))?.selected_skill_ids).toEqual(["exact"]);
+    expect(reuse.has(key(1))).toBe(false);
+    expect(reuse.get(key(2))?.selected_skill_ids).toEqual(["legacy2"]);
+    expect(reuse.get(key(3))?.selected_skill_ids).toEqual(["pre-cap"]);
+  });
+
+  it("the exact-tier row wins whichever source lists it first", () => {
+    const exactFile = join(dir, "exact.jsonl");
+    const legacyFile = join(dir, "legacy.jsonl");
+    write(exactFile, [
+      cell({
+        generated_at: "2026-09-01T00:00:00.000Z",
+        selected_skill_ids: ["exact"],
+        provider: "amazon-bedrock",
+        max_output_tokens: 4096,
+      }),
+    ]);
+    // Earlier, so earliest-wins alone would pick it.
+    write(legacyFile, [
+      cell({ generated_at: "2026-06-01T00:00:00.000Z", selected_skill_ids: ["legacy"] }),
+    ]);
+    const harness = new Map([
+      ["gpt-5.4-mini", { provider: "amazon-bedrock", max_output_tokens: 4096 }],
+    ]);
+    const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
+    for (const paths of [
+      [exactFile, legacyFile],
+      [legacyFile, exactFile],
+    ]) {
+      expect(readControlIndex(paths, harness).reuse.get(key)?.selected_skill_ids).toEqual([
+        "exact",
+      ]);
+    }
   });
 });
 
@@ -297,7 +357,7 @@ describe("drainControlCache", () => {
     ratelTopK: ["g1"],
     poolSize: 100,
   };
-  const model = { id: "gpt-5.4-mini", model: {} as never };
+  const model = { id: "gpt-5.4-mini", model: {} as never, maxOutputTokens: null };
   const task = (arm: SragentsArm, runIndex = 0): Task => ({ arm, sc, query: "q", model, runIndex });
 
   function cached(over: Partial<SragentsSelectCell>): SragentsSelectCell {
@@ -350,6 +410,7 @@ describe("drainControlCache", () => {
       outputPath: output,
       cachePaths: [canonical, backfill],
       force: false,
+      allowLegacyCache: true,
     });
 
     expect(reused).toBe(2);
@@ -371,6 +432,7 @@ describe("drainControlCache", () => {
       outputPath: output,
       cachePaths: [canonical],
       force: false,
+      allowLegacyCache: true,
     });
 
     expect(reused).toBe(0);
@@ -388,6 +450,7 @@ describe("drainControlCache", () => {
       outputPath: output,
       cachePaths: [canonical],
       force: true,
+      allowLegacyCache: true,
     });
 
     expect(reused).toBe(0);
@@ -403,6 +466,7 @@ describe("drainControlCache", () => {
       outputPath: output,
       cachePaths: [],
       force: false,
+      allowLegacyCache: true,
     });
 
     expect(reused).toBe(0);
@@ -423,6 +487,7 @@ describe("drainControlCache", () => {
       outputPath: output,
       cachePaths: [canonical],
       force: false,
+      allowLegacyCache: true,
     });
 
     expect(reused).toBe(0);
@@ -448,7 +513,7 @@ describe("drainControlCache", () => {
 
     const { liveTasks, reused } = drainControlCache(
       [task("control-baseline"), task("control-baseline", 1)],
-      { outputPath: output, cachePaths: [canonical], force: false },
+      { outputPath: output, cachePaths: [canonical], force: false, allowLegacyCache: true },
     );
 
     expect(reused).toBe(2);
@@ -461,6 +526,261 @@ describe("drainControlCache", () => {
       [0, ["own"], "reused"],
       [1, ["cache1"], "reused"],
     ]);
+  });
+
+  describe("under output caps", () => {
+    const capped = (cap: number | null, provider = "amazon-bedrock"): Task => ({
+      ...task("control-baseline"),
+      model: { id: model.id, model: { provider } as never, maxOutputTokens: cap },
+    });
+
+    // The output's own (prior-version) row vs a canonical cache row for one key. The
+    // cache row is EARLIER, so earliest-wins alone can't explain an "own" result.
+    const exact = { provider: "amazon-bedrock", max_output_tokens: 4096 };
+    it.each([
+      ["exact", "exact", "own"],
+      ["exact", "legacy", "own"],
+      ["legacy", "exact", "cache"],
+      ["legacy", "legacy", "own"],
+    ] as const)("own %s vs cache %s → %s wins", (ownTier, cacheTier, winner) => {
+      const output = join(dir, "out.jsonl");
+      const canonical = join(dir, "agent.jsonl");
+      const tier = (t: "exact" | "legacy") => (t === "exact" ? exact : {});
+      writeCells(output, [
+        cached({
+          selected_skill_ids: ["own"],
+          generated_at: "2026-07-01T00:00:00.000Z",
+          ...tier(ownTier),
+        }),
+      ]);
+      writeCells(canonical, [
+        cached({
+          selected_skill_ids: ["cache"],
+          generated_at: "2026-06-01T00:00:00.000Z",
+          ...tier(cacheTier),
+        }),
+      ]);
+
+      const { liveTasks, reused, legacy } = drainControlCache([capped(4096)], {
+        outputPath: output,
+        cachePaths: [canonical],
+        force: false,
+        allowLegacyCache: true,
+      });
+
+      expect(reused).toBe(1);
+      expect(liveTasks).toEqual([]);
+      expect(readCells(output).at(-1)?.selected_skill_ids).toEqual([winner]);
+      const servedTier = winner === "own" ? ownTier : cacheTier;
+      expect(legacy).toBe(servedTier === "legacy" ? 1 : 0);
+    });
+
+    it.each([16, null])("an explicit --max-output-tokens (%s) never serves a legacy row", (cap) => {
+      const output = join(dir, "out.jsonl");
+      const canonical = join(dir, "agent.jsonl");
+      writeCells(output, [cached({ selected_skill_ids: ["own-legacy"] })]);
+      writeCells(canonical, [cached({ selected_skill_ids: ["cache-legacy"] })]);
+
+      const { liveTasks, reused } = drainControlCache([capped(cap)], {
+        outputPath: output,
+        cachePaths: [canonical],
+        force: false,
+        allowLegacyCache: false,
+      });
+
+      expect(reused).toBe(0);
+      expect(liveTasks).toHaveLength(1);
+    });
+
+    it.each([
+      16,
+      null,
+    ])("an explicit --max-output-tokens (%s) still serves exact-tier rows", (cap) => {
+      // run 0: legacy only (runs live); run 1: an exact row at the named cap (served).
+      const output = join(dir, "out.jsonl");
+      const canonical = join(dir, "agent.jsonl");
+      writeCells(output, [cached({ selected_skill_ids: ["own-legacy"] })]);
+      writeCells(canonical, [
+        cached({ selected_skill_ids: ["cache-legacy"] }),
+        cached({
+          run_index: 1,
+          selected_skill_ids: ["exact"],
+          provider: "amazon-bedrock",
+          max_output_tokens: cap,
+        }),
+      ]);
+
+      const { liveTasks, reused, legacy } = drainControlCache(
+        [capped(cap), { ...capped(cap), runIndex: 1 }],
+        { outputPath: output, cachePaths: [canonical], force: false, allowLegacyCache: false },
+      );
+
+      expect(reused).toBe(1);
+      expect(legacy).toBe(0);
+      expect(liveTasks.map((t) => t.runIndex)).toEqual([0]);
+      expect(readCells(output).at(-1)?.selected_skill_ids).toEqual(["exact"]);
+    });
+
+    it("resume ignores live rows of a model not in this run", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [
+        cached({
+          model: "other-model",
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          max_output_tokens: 16384,
+        }),
+      ]);
+      const { liveTasks } = drainControlCache([capped(4096)], {
+        outputPath: output,
+        cachePaths: [],
+        force: false,
+        allowLegacyCache: true,
+      });
+      expect(liveTasks).toHaveLength(1);
+    });
+
+    it("resume ignores capped rows from an older version", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [cached({ arm: "ratel-full", max_output_tokens: 4096 })]);
+      const { liveTasks } = drainControlCache([capped(16)], {
+        outputPath: output,
+        cachePaths: [],
+        force: false,
+        allowLegacyCache: true,
+      });
+      expect(liveTasks).toHaveLength(1);
+    });
+
+    it("resume throws on a reused current-version row with a different defined cap", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [
+        cached({
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          cache_source: "reused",
+          max_output_tokens: 16384,
+        }),
+      ]);
+      expect(() =>
+        drainControlCache([capped(4096)], {
+          outputPath: output,
+          cachePaths: [],
+          force: false,
+          allowLegacyCache: true,
+        }),
+      ).toThrow(/output has 16384, run uses 4096/);
+    });
+
+    it("runs live when only a different cap is cached", () => {
+      const output = join(dir, "out.jsonl");
+      const canonical = join(dir, "agent.jsonl");
+      writeCells(canonical, [cached({ provider: "amazon-bedrock", max_output_tokens: 16 })]);
+
+      const { liveTasks } = drainControlCache([capped(4096)], {
+        outputPath: output,
+        cachePaths: [canonical],
+        force: false,
+        allowLegacyCache: true,
+      });
+
+      expect(liveTasks).toHaveLength(1);
+    });
+
+    it("resume throws on live current-version rows with a different defined cap", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [
+        cached({
+          arm: "ratel-full",
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          max_output_tokens: 4096,
+        }),
+      ]);
+
+      expect(() =>
+        drainControlCache([capped(16)], {
+          outputPath: output,
+          cachePaths: [],
+          force: false,
+          allowLegacyCache: true,
+        }),
+      ).toThrow(/max_output_tokens.*output has 4096, run uses 16/);
+    });
+
+    it.each([
+      16, 4096,
+    ])("resume under an explicit cap (%s) refuses legacy controls an earlier run served", (cap) => {
+      const output = join(dir, "out.jsonl");
+      const canonical = join(dir, "agent.jsonl");
+      writeCells(canonical, [cached({ selected_skill_ids: ["legacy"] })]);
+      // Run A: catalog cap, legacy tier allowed → the legacy control is reused.
+      const a = drainControlCache([capped(4096)], {
+        outputPath: output,
+        cachePaths: [canonical],
+        force: false,
+        allowLegacyCache: true,
+      });
+      expect(a.legacy).toBe(1);
+      // Run B: same output, explicit cap → refuses to keep the unknown-cap control.
+      expect(() =>
+        drainControlCache([capped(cap)], {
+          outputPath: output,
+          cachePaths: [canonical],
+          force: false,
+          allowLegacyCache: false,
+        }),
+      ).toThrow(/output has legacy \(no recorded cap\), run uses/);
+    });
+
+    it("resume under `none` keeps a reused same-provider pre-cap row (exact: same request)", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [
+        cached({
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          cache_source: "reused",
+          provider: "amazon-bedrock",
+        }),
+      ]);
+      const { liveTasks } = drainControlCache([capped(null)], {
+        outputPath: output,
+        cachePaths: [],
+        force: false,
+        allowLegacyCache: false,
+      });
+      expect(liveTasks).toEqual([]);
+    });
+
+    it("--force skips the resume cap check (the output is truncated)", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [
+        cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, max_output_tokens: 4096 }),
+      ]);
+      const { liveTasks, reused } = drainControlCache([capped(16)], {
+        outputPath: output,
+        cachePaths: [],
+        force: true,
+        allowLegacyCache: true,
+      });
+      expect(reused).toBe(0);
+      expect(liveTasks).toHaveLength(1);
+      expect(readCells(output)).toEqual([]);
+    });
+
+    it("resume warns on legacy live current-version rows and skips them", () => {
+      const output = join(dir, "out.jsonl");
+      writeCells(output, [cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION })]);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { liveTasks } = drainControlCache([capped(4096)], {
+          outputPath: output,
+          cachePaths: [],
+          force: false,
+          allowLegacyCache: true,
+        });
+        expect(liveTasks).toEqual([]);
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 live row.*max_output_tokens/));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 });
 
@@ -512,6 +832,7 @@ describe("selectForCell", () => {
     model: {
       id: "claude-haiku-4-5",
       model: new MockLanguageModelV3({ provider: "anthropic.messages" }),
+      maxOutputTokens: null,
     },
     runIndex: 0,
     seed: 42,
@@ -618,5 +939,71 @@ describe("selectForCell", () => {
     expect(cell.provider).toBe("anthropic.messages");
     expect(cell.input_tokens).toBe(1200);
     expect(cell.dollar_cost).toBeCloseTo(expectedCost, 12);
+  });
+
+  it("forwards the cap to generateObject and stamps max_output_tokens (success and error)", async () => {
+    const ai = await import("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockResolvedValueOnce({
+      object: { selected_skill_ids: ["g1"] },
+      usage,
+      finishReason: "stop",
+      // biome-ignore lint/suspicious/noExplicitAny: only object/usage/finishReason matter here
+    } as any);
+    const capped = { ...args(), model: { ...args().model, maxOutputTokens: 1234 } };
+
+    const ok = await selectForCell(capped);
+    expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBe(1234);
+    expect(ok.max_output_tokens).toBe(1234);
+
+    mock.mockRejectedValueOnce(new Error("boom"));
+    const failed = await selectForCell(capped);
+    expect(failed.max_output_tokens).toBe(1234);
+  });
+
+  it("a null cap sends no maxOutputTokens and stamps null", async () => {
+    const ai = await import("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockResolvedValueOnce({
+      object: { selected_skill_ids: [] },
+      usage,
+      finishReason: "stop",
+      // biome-ignore lint/suspicious/noExplicitAny: only object/usage/finishReason matter here
+    } as any);
+
+    const cell = await selectForCell(args());
+    expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBeUndefined();
+    expect(cell.max_output_tokens).toBeNull();
+  });
+});
+
+describe("sragentsCapOptions", () => {
+  it("no flag: the catalog caps, legacy-tier controls allowed", () => {
+    expect(sragentsCapOptions(["--models", "m"])).toEqual({
+      override: undefined,
+      allowLegacyCache: true,
+    });
+  });
+
+  it("an explicit N or 'none' overrides and serves exact-tier controls only", () => {
+    expect(sragentsCapOptions(["--max-output-tokens", "8"])).toEqual({
+      override: 8,
+      allowLegacyCache: false,
+    });
+    expect(sragentsCapOptions(["--max-output-tokens", "none"])).toEqual({
+      override: "none",
+      allowLegacyCache: false,
+    });
+  });
+
+  it("rejects a non-positive-int or missing value (arg() would silently ignore it)", () => {
+    for (const bad of ["0", "-5", "1.5", "abc", ""]) {
+      expect(() => sragentsCapOptions(["--max-output-tokens", bad])).toThrow(/positive integer/);
+    }
+    expect(() => sragentsCapOptions(["--max-output-tokens"])).toThrow(/positive integer/);
+  });
+
+  it("rejects --judge-max-output-tokens: sragents-select has no judge", () => {
+    expect(() => sragentsCapOptions(["--judge-max-output-tokens", "8"])).toThrow(/no LLM judge/);
   });
 });

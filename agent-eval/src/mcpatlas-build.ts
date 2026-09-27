@@ -13,6 +13,7 @@
 import {
   type ClaudeResult,
   countCompactions,
+  countMaxTokensStops,
   effectiveCalls,
   promptTokens,
   type RawToolUse,
@@ -210,6 +211,9 @@ export interface ParsedTranscript {
   compactionEvents: number;
   /** Codex-only; see McpAtlasTokenBreakdown.reasoning_output_tokens. */
   reasoningOutputTokens?: number;
+  /** See McpAtlasCell.truncated_turns. Absent when the harness exposes no
+   *  max_tokens stop reason (codex) — the cell then carries none. */
+  truncatedTurns?: number;
 }
 
 export interface CellContext {
@@ -232,6 +236,9 @@ export interface CellContext {
   /** Stamped on every row this ctx produces. Absent (older callers/fixtures)
    *  means claude-code — the same default every reader applies. */
   agent_harness?: AgentHarness;
+  /** The run's opt-in output caps; stamped on the cell only when set. */
+  max_output_tokens?: number;
+  judge_max_output_tokens?: number;
 }
 
 export function buildToolCallRows(
@@ -697,6 +704,11 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     arm: ctx.arm,
     nativeBaselineMs: input.nativeBaselineMs,
   });
+  // Unmeasured is absent, never 0: a harness-supplied trace without the field
+  // leaves the cell without one.
+  const truncatedTurns = input.parsed
+    ? input.parsed.truncatedTurns
+    : countMaxTokensStops(input.transcriptText);
 
   return {
     run_type: "mcpatlas_task",
@@ -725,6 +737,10 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     agent_version: input.agentVersion,
     agent_harness: ctx.agent_harness ?? "claude-code",
     model: ctx.model,
+    ...(ctx.max_output_tokens != null ? { max_output_tokens: ctx.max_output_tokens } : {}),
+    ...(ctx.judge_max_output_tokens != null
+      ? { judge_max_output_tokens: ctx.judge_max_output_tokens }
+      : {}),
 
     enabled_tool_ids: ctx.task.enabled_tool_ids,
     gold_tool_ids: ctx.task.gold_tool_ids,
@@ -768,6 +784,7 @@ export function assembleCell(input: AssembleCellInput): McpAtlasCell {
     error: input.result.is_error
       ? (input.result.error_text ?? input.result.result ?? "error")
       : null,
+    ...(truncatedTurns !== undefined ? { truncated_turns: truncatedTurns } : {}),
 
     transcript_path: input.transcriptPath,
     telemetry_path: input.telemetryPath,

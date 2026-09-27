@@ -738,6 +738,49 @@ describe("assembleCell", () => {
     expect(cell.cache_source).toBe("reused");
   });
 
+  it("stamps truncated_turns from the claude transcript and the ctx's caps only when set", () => {
+    const base = {
+      result: result(),
+      transcriptPath: "/tmp/t.jsonl",
+      telemetryText: "",
+      telemetryPath: null,
+      claimRubric: claimRubric(),
+      nativeCatalogTokens: 500,
+      gatewaySchemaTokens: 50,
+      agentVersion: "2.1.246",
+      runIndex: 0,
+      cacheSource: "live" as const,
+    };
+    const stopped = (id: string) =>
+      JSON.stringify({
+        type: "assistant",
+        message: { id, role: "assistant", content: [], stop_reason: "max_tokens" },
+      });
+    const capped = assembleCell({
+      ...base,
+      ctx: ctx({ max_output_tokens: 4096, judge_max_output_tokens: 2048 }),
+      transcriptText: [stopped("m1"), stopped("m1"), stopped("m2")].join("\n"),
+    });
+    expect(capped.truncated_turns).toBe(2);
+    expect(capped.max_output_tokens).toBe(4096);
+    expect(capped.judge_max_output_tokens).toBe(2048);
+
+    const uncapped = assembleCell({ ...base, ctx: ctx(), transcriptText: transcript });
+    expect(uncapped.truncated_turns).toBe(0);
+    expect("max_output_tokens" in uncapped).toBe(false);
+    expect("judge_max_output_tokens" in uncapped).toBe(false);
+
+    // A harness-supplied trace (codex) has no Claude Code stop reasons:
+    // unmeasured is absent, never 0.
+    const codex = assembleCell({
+      ...base,
+      ctx: ctx({ agent_harness: "codex" }),
+      transcriptText: stopped("m1"),
+      parsed: { uses: [], turnUsages: [], compactionEvents: 0 },
+    });
+    expect("truncated_turns" in codex).toBe(false);
+  });
+
   it("gold_coverage reflects gold ∩ catalog, not raw gold count", () => {
     const cell = assembleCell({
       ctx: ctx({

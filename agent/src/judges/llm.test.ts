@@ -1,3 +1,4 @@
+import { NoObjectGeneratedError, RetryError } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { judgeLLM } from "./llm.js";
 
@@ -200,5 +201,96 @@ describe("judgeLLM", () => {
     const callArgs = mock.mock.calls.at(-1)?.[0];
     expect(callArgs?.system).toContain("SUCCESS_CRITERIA");
     expect(callArgs?.system).not.toContain("USER_REQUEST");
+  });
+
+  it("forwards maxOutputTokens to the judge call (unset → not sent)", async () => {
+    const ai = await import("ai");
+    const mock = vi.mocked(ai.generateObject);
+    const ok = { object: { verdict: "pass", explanation: "ok" } };
+    // biome-ignore lint/suspicious/noExplicitAny: only `object` matters for this test path
+    mock.mockResolvedValueOnce(ok as any).mockResolvedValueOnce(ok as any);
+
+    // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+    await judgeLLM({ prompt: "p", finalText: "x", model: {} as any, maxOutputTokens: 512 });
+    expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBe(512);
+
+    // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+    await judgeLLM({ prompt: "p", finalText: "x", model: {} as any });
+    expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBeUndefined();
+  });
+
+  const noObject = (
+    finishReason: "length" | "stop" = "length",
+    message = "No object generated: could not parse the response.",
+    text = '{"verdict": "pa',
+  ) =>
+    new NoObjectGeneratedError({
+      message,
+      text,
+      response: { id: "r1", timestamp: new Date(0), modelId: "judge" },
+      usage: {
+        inputTokens: 10,
+        outputTokens: 512,
+        totalTokens: 522,
+        inputTokenDetails: { noCacheTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokenDetails: { textTokens: 512, reasoningTokens: 0 },
+      },
+      finishReason,
+    });
+
+  it("a truncated judge answer (finish 'length') → n/a 'judge truncated at N'", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(noObject());
+
+    const result = await judgeLLM({
+      prompt: "p",
+      finalText: "x",
+      // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+      model: {} as any,
+      maxOutputTokens: 512,
+    });
+
+    expect(result.verdict).toBe("n/a");
+    expect(result.explanation).toMatch(/^judge truncated at 512 output tokens/);
+  });
+
+  it("[guard] a schema mismatch (finish 'stop') is 'judge failed', not truncation", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(
+      noObject(
+        "stop",
+        "No object generated: response did not match schema.",
+        '{"verdict":"PASS","explanation":"ok"}',
+      ),
+    );
+
+    const result = await judgeLLM({
+      prompt: "p",
+      finalText: "x",
+      // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+      model: {} as any,
+      maxOutputTokens: 512,
+    });
+
+    expect(result.verdict).toBe("n/a");
+    expect(result.explanation).toMatch(/^judge failed/);
+    expect(result.explanation).not.toMatch(/truncated/);
+  });
+
+  it("detects truncation through a RetryError too", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(
+      new RetryError({
+        message: "Failed after 2 attempts.",
+        reason: "errorNotRetryable",
+        errors: [new Error("Overloaded"), noObject()],
+      }),
+    );
+
+    // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+    const result = await judgeLLM({ prompt: "p", finalText: "x", model: {} as any });
+
+    expect(result.verdict).toBe("n/a");
+    expect(result.explanation).toMatch(/^judge truncated at the provider default/);
   });
 });

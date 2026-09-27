@@ -6,6 +6,7 @@ import {
   buildClaudeArgs,
   type ClaudeUsage,
   cacheHitRatio,
+  countMaxTokensStops,
   DISALLOWED_TOOLS,
   effectiveCalls,
   GATEWAY_INVOKE,
@@ -18,6 +19,7 @@ import {
   slugifyProjectPath,
   toolUsesFromTranscript,
   totalTokens,
+  turnUsagesFromTranscript,
 } from "./mcpatlas-agent.js";
 import { SYSTEM_PROMPT_ADDENDUM } from "./mcpatlas-prompt.js";
 import { CODING_SERVERS } from "./mcpatlas-servers.js";
@@ -279,6 +281,55 @@ describe("transcript parsing", () => {
   });
 });
 
+describe("transcript parsers share one line reader", () => {
+  const assistant = (message: Record<string, unknown>) =>
+    JSON.stringify({ type: "assistant", message: { role: "assistant", ...message } });
+
+  it("turnUsagesFromTranscript numbers turns per assistant line and skips usage-less ones", () => {
+    const text = [
+      assistant({ usage: { input_tokens: 10, output_tokens: 2 } }),
+      JSON.stringify({ message: { role: "user", content: [] } }),
+      assistant({ content: [] }),
+      assistant({ usage: { input_tokens: 30, cache_read_input_tokens: 5 } }),
+    ].join("\n");
+    expect(turnUsagesFromTranscript(text)).toEqual([
+      {
+        turn: 1,
+        input_tokens: 10,
+        output_tokens: 2,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      {
+        turn: 3,
+        input_tokens: 30,
+        output_tokens: 0,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 0,
+      },
+    ]);
+  });
+
+  // Valid JSON that is not an object (a literal `null`, a number) is skipped,
+  // never a TypeError that would turn a whole cell into an error.
+  it("skips non-object JSON lines in every parser", () => {
+    const text = [
+      "null",
+      "42",
+      '"str"',
+      assistant({
+        id: "m1",
+        stop_reason: "max_tokens",
+        usage: { input_tokens: 1 },
+        content: [{ type: "tool_use", name: "mcp__git__status", input: {} }],
+      }),
+    ].join("\n");
+    expect(toolUsesFromTranscript(text).map((u) => u.turn)).toEqual([1]);
+    expect(turnUsagesFromTranscript(text).map((u) => u.turn)).toEqual([1]);
+    expect(countMaxTokensStops(text)).toBe(1);
+  });
+});
+
 describe("effectiveCalls — what makes the arms comparable", () => {
   it("native calls reduce to canonical ids", () => {
     const e = effectiveCalls([use("mcp__github__get_issue", { id: 1 })], SERVERS);
@@ -462,4 +513,47 @@ describe("runClaude signal capture", () => {
     expect(r.signal).toBeNull();
     expect(r.exitCode).toBeNull();
   }, 20_000);
+});
+
+describe("countMaxTokensStops", () => {
+  // Claude Code writes one transcript line per content block, each repeating
+  // the parent message's id and stop_reason; counting lines would count one
+  // truncated response once per block.
+  const line = (message: Record<string, unknown>) =>
+    JSON.stringify({ type: "assistant", message: { role: "assistant", ...message } });
+
+  it("dedupes content-block lines by message.id", () => {
+    const transcript = [
+      line({ id: "msg_1", content: [{ type: "thinking" }], stop_reason: "max_tokens" }),
+      line({ id: "msg_1", content: [{ type: "text", text: "…" }], stop_reason: "max_tokens" }),
+      JSON.stringify({ type: "user", message: { role: "user", content: "continue" } }),
+      line({ id: "msg_2", content: [{ type: "tool_use" }], stop_reason: "tool_use" }),
+      // Defensive, not observed in CC 2.1.2xx main-session transcripts (every
+      // block line repeats the stop_reason): a null on an earlier block line,
+      // the subagent-sidechain shape, must not hide the truncation.
+      line({ id: "msg_3", content: [{ type: "text" }], stop_reason: null }),
+      line({ id: "msg_3", content: [{ type: "text" }], stop_reason: "max_tokens" }),
+    ].join("\n");
+    expect(countMaxTokensStops(transcript)).toBe(2);
+  });
+
+  it("counts an id-less max_tokens line on its own", () => {
+    const transcript = [
+      line({ content: [], stop_reason: "max_tokens" }),
+      line({ content: [], stop_reason: "max_tokens" }),
+    ].join("\n");
+    expect(countMaxTokensStops(transcript)).toBe(2);
+  });
+
+  it("ignores user lines, other stop reasons, and malformed lines", () => {
+    const transcript = [
+      "not json",
+      "",
+      JSON.stringify({ type: "user", message: { role: "user", stop_reason: "max_tokens" } }),
+      line({ id: "a", stop_reason: "end_turn" }),
+      line({ id: "b", stop_reason: "tool_use" }),
+    ].join("\n");
+    expect(countMaxTokensStops(transcript)).toBe(0);
+    expect(countMaxTokensStops("")).toBe(0);
+  });
 });

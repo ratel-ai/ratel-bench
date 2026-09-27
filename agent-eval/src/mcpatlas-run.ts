@@ -200,6 +200,10 @@ export interface BuildRunConfigInput {
   codexVersion?: string | null;
   codexPricing?: CodexPricing;
   codexLockdown?: CodexLockdown;
+  /** Opt-in output caps; unset (undefined/null) leaves the config — and so
+   *  config_hash — byte-identical to an uncapped run. */
+  maxOutputTokens?: number | null;
+  judgeMaxOutputTokens?: number | null;
 }
 
 export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
@@ -222,6 +226,12 @@ export function buildRunConfig(input: BuildRunConfigInput): FrozenConfigCore {
         }
       : {}),
     agent_model: input.agentModel,
+    // Same conditional spread as the codex keys: an unset cap must not move
+    // any existing config_hash.
+    ...(input.maxOutputTokens != null ? { max_output_tokens: input.maxOutputTokens } : {}),
+    ...(input.judgeMaxOutputTokens != null
+      ? { judge_max_output_tokens: input.judgeMaxOutputTokens }
+      : {}),
     backend: null,
     max_turns: input.maxTurns,
     per_cell_timeout_ms: input.perCellTimeoutMs,
@@ -315,6 +325,10 @@ export interface NativeCacheKeyInput {
   /** Defaulted to claude-code so pre-harness callers and legacy cells key
    *  identically to before. */
   harness?: AgentHarness;
+  /** Opt-in output caps. Appended ONLY when set, so every uncapped key — and
+   *  every existing cache file — is unchanged. */
+  maxOutputTokens?: number | null;
+  judgeMaxOutputTokens?: number | null;
 }
 
 /**
@@ -337,6 +351,10 @@ export interface NativeCacheKeyInput {
  * different measurements. Relying on `agentVersion` to differ is not enough —
  * both harnesses report "unknown" under --skip-doctor and would silently
  * cross-serve.
+ *
+ * The output caps are different measurements too (a capped agent may truncate;
+ * a capped judge may go n/a). Each is a labelled suffix, present only when set,
+ * so an agent cap and a judge cap of the same value never collide.
  */
 export function nativeCacheKey(input: NativeCacheKeyInput): string {
   return [
@@ -351,7 +369,35 @@ export function nativeCacheKey(input: NativeCacheKeyInput): string {
     input.taskListHash,
     input.datasetRevision,
     input.harness ?? "claude-code",
+    ...(input.maxOutputTokens != null ? [`max_output_tokens=${input.maxOutputTokens}`] : []),
+    ...(input.judgeMaxOutputTokens != null
+      ? [`judge_max_output_tokens=${input.judgeMaxOutputTokens}`]
+      : []),
   ].join("::");
+}
+
+/** The current run's key for a queued native item, derived from its frozen
+ *  config — the same fields runCell stamps on the cell and readNativeCacheIndex
+ *  reads back, so lookup and index can never disagree on a component (the
+ *  output caps above all). */
+export function runNativeCacheKey(
+  cfg: McpAtlasRunConfig,
+  item: QueueItem,
+  scope: McpAtlasScope,
+): string {
+  return nativeCacheKey({
+    taskId: item.task.task_id,
+    model: cfg.agent_model,
+    scope,
+    catalogTools: cfg.catalog_tools,
+    runIndex: item.runIndex,
+    agentVersion:
+      cfg.agent_harness === "codex" ? (cfg.codex_version ?? "unknown") : cfg.claude_code_version,
+    ...nativeCacheContext(cfg),
+    harness: cfg.agent_harness,
+    maxOutputTokens: cfg.max_output_tokens,
+    judgeMaxOutputTokens: cfg.judge_max_output_tokens,
+  });
 }
 
 export interface NativeCacheIndex {
@@ -395,6 +441,9 @@ export function readNativeCacheIndex(
       agentVersion: c.agent_version,
       // Same legacy pattern: rows predating the field are claude-code.
       harness: c.agent_harness ?? "claude-code",
+      // The cell's OWN caps, never the current run's: absent = uncapped.
+      maxOutputTokens: c.max_output_tokens,
+      judgeMaxOutputTokens: c.judge_max_output_tokens,
       promptHash: context.promptHash,
       taskListHash: context.taskListHash,
       datasetRevision: context.datasetRevision,
@@ -404,6 +453,20 @@ export function readNativeCacheIndex(
     if (!existing || c.generated_at < existing.generated_at) reuse.set(key, c);
   }
   return { current, reuse };
+}
+
+/** The CURRENT run's corpus/prompt identity for readNativeCacheIndex, from the
+ *  same frozen config runNativeCacheKey reads. */
+export function nativeCacheContext(cfg: McpAtlasRunConfig): {
+  promptHash: string;
+  taskListHash: string;
+  datasetRevision: string;
+} {
+  return {
+    promptHash: cfg.prompt_hash,
+    taskListHash: cfg.corpus.task_list_hash,
+    datasetRevision: cfg.corpus.dataset_revision,
+  };
 }
 
 export interface DrainNativeCacheResult {
@@ -655,6 +718,15 @@ function inheritedEnv(): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) out[k] = v;
   return out;
+}
+
+/** inheritedEnv() for the claude spawn, minus any ambient
+ *  CLAUDE_CODE_MAX_OUTPUT_TOKENS: only `--max-output-tokens` may cap Claude
+ *  Code, so every cap that applies is one the config and cell record (main
+ *  warns when it drops one — see ambientOutputCapWarning). */
+function claudeParentEnv(): Record<string, string> {
+  const { CLAUDE_CODE_MAX_OUTPUT_TOKENS: _ambientCap, ...env } = inheritedEnv();
+  return env;
 }
 
 /** Shared, run-independent cache for ratel-local's embedding model.
@@ -958,6 +1030,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
   const knownServers = manifest.servers.map((s) => s.server);
   const isCodex = cfg.agent_harness === "codex";
   const codexHomeDir = join(scratch.homeDir, ".codex");
+  const caps = outputCapsOf(cfg);
 
   try {
     // Catalog integrity, per cell, BEFORE any spend. The doctor asserts this
@@ -1086,9 +1159,15 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
           cwd: scratch.workspaceDir,
           homeDir: scratch.homeDir,
           env: {
-            ...inheritedEnv(),
+            ...claudeParentEnv(),
             ...embeddingCacheEnv(),
             MCP_TIMEOUT: String(MCP_STARTUP_TIMEOUT_MS),
+            // Only when --max-output-tokens was given. Claude Code already
+            // sends its own max_tokens and derives its compaction threshold
+            // from it, so a default here would silently move both.
+            ...(cfg.max_output_tokens != null
+              ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(cfg.max_output_tokens) }
+              : {}),
           },
           timeoutMs: cfg.per_cell_timeout_ms,
           appendSystemPrompt: SYSTEM_PROMPT_ADDENDUM,
@@ -1173,6 +1252,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       ratel_local_version: cfg.ratel_local_version,
       ratel_sdk_version: cfg.ratel_sdk_version,
       agent_harness: cfg.agent_harness,
+      ...caps,
     };
 
     const claimRubric = await deps.judgeClaims({
@@ -1181,6 +1261,7 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
       claims: item.task.claims,
       finalText: result.result,
       model: o.judgeModel,
+      maxOutputTokens: cfg.judge_max_output_tokens,
     });
 
     // The native codex arm has no ratel telemetry, so its tool-call
@@ -1268,6 +1349,8 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
         cfg.agent_harness === "codex" ? (cfg.codex_version ?? "unknown") : cfg.claude_code_version,
       agent_harness: cfg.agent_harness,
       model: cfg.agent_model,
+      // A timeout cell is reusable, so it must key under the caps it ran with.
+      ...caps,
       enabled_tool_ids: item.task.enabled_tool_ids,
       gold_tool_ids: item.task.gold_tool_ids,
       retrievable_gold_ids: retrievable,
@@ -1364,6 +1447,19 @@ export async function runCell(o: RunCellOptions): Promise<RunCellResult> {
   }
 }
 
+/** The run's output caps as cell fields — only the ones that are set, so an
+ *  uncapped cell carries neither key. */
+function outputCapsOf(
+  cfg: McpAtlasRunConfig,
+): Pick<McpAtlasCell, "max_output_tokens" | "judge_max_output_tokens"> {
+  return {
+    ...(cfg.max_output_tokens != null ? { max_output_tokens: cfg.max_output_tokens } : {}),
+    ...(cfg.judge_max_output_tokens != null
+      ? { judge_max_output_tokens: cfg.judge_max_output_tokens }
+      : {}),
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Worker pool
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1434,6 +1530,104 @@ export async function runCampaign<T>(
 export function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(name);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+}
+
+export interface CapFlags {
+  maxOutputTokens: number | null;
+  judgeMaxOutputTokens: number | null;
+}
+
+/** `--max-output-tokens` / `--judge-max-output-tokens`, validated. Shaped to
+ *  spread straight into buildRunConfig. Throws with the message the CLI prints. */
+export function parseCapFlags(argv: readonly string[], judgeModelId: string): CapFlags {
+  const caps = {
+    maxOutputTokens: optionalPositiveIntFlag(argv, "--max-output-tokens"),
+    judgeMaxOutputTokens: optionalPositiveIntFlag(argv, "--judge-max-output-tokens"),
+  };
+  // A screen-only run makes no judge call, so the cap would never apply — yet
+  // it would still move config_hash and the native cache key.
+  if (caps.judgeMaxOutputTokens != null && !judgeModelId) {
+    throw new Error("--judge-max-output-tokens requires --judge-model");
+  }
+  return caps;
+}
+
+/** runCell never forwards an inherited CLAUDE_CODE_MAX_OUTPUT_TOKENS to the
+ *  claude spawn: it would cap a run that config, cell and cache key all record
+ *  as uncapped. Returns the warning to print when such a value is being
+ *  ignored, else null. Claude-code only: codex inherits the variable but never
+ *  reads it, and rejects --max-output-tokens, so the advice would mislead. */
+export function ambientOutputCapWarning(
+  env: Readonly<Record<string, string | undefined>>,
+  harness: AgentHarness,
+  maxOutputTokens: number | null,
+): string | null {
+  const ambient = env.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+  if (harness !== "claude-code" || !ambient || maxOutputTokens != null) return null;
+  return (
+    `warning: ambient CLAUDE_CODE_MAX_OUTPUT_TOKENS=${ambient} is ignored — ` +
+    "pass --max-output-tokens to apply a cap and record it"
+  );
+}
+
+/** Strict positive integer: digits only, no sign/decimal/exponent/whitespace. */
+export function parsePositiveInt(flag: string, raw: string): number {
+  const n = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(n)) {
+    throw new Error(`${flag} must be a positive integer — got "${raw}"`);
+  }
+  return n;
+}
+
+/** An optional positive-int flag: null when absent. Unlike `arg()`, a present
+ *  flag with a missing or invalid value throws — a typo must never become a
+ *  silently uncapped run. */
+export function optionalPositiveIntFlag(argv: readonly string[], flag: string): number | null {
+  const i = argv.indexOf(flag);
+  return i < 0 ? null : parsePositiveInt(flag, argv[i + 1] ?? "");
+}
+
+export interface HarnessOptionsInput {
+  harness: string;
+  model: string;
+  /** --model or RATEL_BENCH_MODEL was given, not the claude default. */
+  modelExplicit: boolean;
+  maxOutputTokens: number | null;
+}
+
+export interface HarnessOptions {
+  harness: AgentHarness;
+  codexPricing?: CodexPricing;
+}
+
+/** Harness-dependent flag checks, before anything is spent. Throws with the
+ *  message the CLI prints. */
+export function validateHarnessOptions(input: HarnessOptionsInput): HarnessOptions {
+  if (!["claude-code", "codex"].includes(input.harness)) {
+    throw new Error(`--harness must be one of claude-code, codex — got "${input.harness}"`);
+  }
+  if (input.harness === "claude-code") return { harness: "claude-code" };
+  // The cap is applied through CLAUDE_CODE_MAX_OUTPUT_TOKENS; codex has no
+  // equivalent here, so accepting it would record a cap that never applied.
+  if (input.maxOutputTokens != null) {
+    throw new Error("--max-output-tokens is claude-code only; codex has no equivalent setting");
+  }
+  // No silent claude-model default on a codex run: the model names an OpenAI
+  // model and doubles as the pricing-table key.
+  if (!input.modelExplicit) {
+    throw new Error(
+      "--harness codex requires an explicit --model (e.g. gpt-5.6-luna); " +
+        "the claude default does not apply",
+    );
+  }
+  const codexPricing = CODEX_PRICING[input.model];
+  if (!codexPricing) {
+    throw new Error(
+      `no pricing entry for codex model "${input.model}" — add it to CODEX_PRICING in ` +
+        "mcpatlas-codex.ts (cost enforcement for --dollar-global depends on it)",
+    );
+  }
+  return { harness: "codex", codexPricing };
 }
 
 export function formatDoneLine(summary: CampaignSummary, cellsCached: number): string {
@@ -1555,40 +1749,31 @@ export async function main(): Promise<void> {
     return;
   }
   const retrieverMethod = retrieverMethodArg as "bm25" | "semantic" | "hybrid";
+  // Opt-in output caps. No defaults anywhere: Claude Code already sends its
+  // own max_tokens and derives its compaction threshold from it, so an
+  // implicit cap would silently change the agent under test. Unset = no cap
+  // sent or recorded, config_hash and native cache keys unchanged.
+  let caps: CapFlags;
   // Which agent CLI drives the cells. An experimental dimension, not a
   // convenience switch: harness is part of cell keys, the native cache key,
   // every summary group key, and the report nesting.
-  const harnessArg = arg("--harness", "claude-code");
-  if (!["claude-code", "codex"].includes(harnessArg)) {
-    console.error(`--harness must be one of claude-code, codex — got "${harnessArg}"`);
+  let harness: AgentHarness;
+  let codexPricing: CodexPricing | undefined;
+  try {
+    caps = parseCapFlags(process.argv, judgeModelId);
+    ({ harness, codexPricing } = validateHarnessOptions({
+      harness: arg("--harness", "claude-code"),
+      model,
+      modelExplicit: process.argv.includes("--model") || Boolean(process.env.RATEL_BENCH_MODEL),
+      maxOutputTokens: caps.maxOutputTokens,
+    }));
+  } catch (err) {
+    console.error((err as Error).message);
     process.exitCode = 1;
     return;
   }
-  const harness = harnessArg as AgentHarness;
-  let codexPricing: CodexPricing | undefined;
-  if (harness === "codex") {
-    // No silent claude-model default on a codex run: the model names an
-    // OpenAI model and doubles as the pricing-table key.
-    const modelExplicit =
-      process.argv.includes("--model") || Boolean(process.env.RATEL_BENCH_MODEL);
-    if (!modelExplicit) {
-      console.error(
-        "--harness codex requires an explicit --model (e.g. gpt-5.6-luna); " +
-          "the claude default does not apply",
-      );
-      process.exitCode = 1;
-      return;
-    }
-    codexPricing = CODEX_PRICING[model];
-    if (!codexPricing) {
-      console.error(
-        `no pricing entry for codex model "${model}" — add it to CODEX_PRICING in ` +
-          "mcpatlas-codex.ts (cost enforcement for --dollar-global depends on it)",
-      );
-      process.exitCode = 1;
-      return;
-    }
-  }
+  const ambientCapWarning = ambientOutputCapWarning(process.env, harness, caps.maxOutputTokens);
+  if (ambientCapWarning) console.warn(ambientCapWarning);
 
   const manifest = JSON.parse(
     readFileSync(resolveRepoPath(`fixtures/mcpatlas/catalog-${scope}.json`), "utf8"),
@@ -1682,6 +1867,7 @@ export async function main(): Promise<void> {
       atlasImageDigests: {},
       dollarCapGlobal: dollarCap,
       declaredLimitations: [],
+      ...caps,
       harness,
       ...(harness === "codex"
         ? {
@@ -1762,29 +1948,10 @@ export async function main(): Promise<void> {
     let cacheSourceCells: McpAtlasCell[] = [];
     if (cacheSourcePath)
       cacheSourceCells = readJsonl<McpAtlasCell>(resolveRepoPath(cacheSourcePath));
-    const cacheIndex = readNativeCacheIndex(cacheSourceCells, {
-      promptHash: PROMPT_HASH,
-      taskListHash: pinned.task_list_hash,
-      datasetRevision: cfg.corpus.dataset_revision,
-    });
+    const cacheIndex = readNativeCacheIndex(cacheSourceCells, nativeCacheContext(cfg));
     const { toRun, reusedCells } = drainNativeCache(
       queue,
-      (item) =>
-        nativeCacheKey({
-          taskId: item.task.task_id,
-          model,
-          scope,
-          catalogTools: cfg.catalog_tools,
-          runIndex: item.runIndex,
-          agentVersion:
-            cfg.agent_harness === "codex"
-              ? (cfg.codex_version ?? "unknown")
-              : cfg.claude_code_version,
-          promptHash: PROMPT_HASH,
-          taskListHash: pinned.task_list_hash,
-          datasetRevision: cfg.corpus.dataset_revision,
-          harness: cfg.agent_harness,
-        }),
+      (item) => runNativeCacheKey(cfg, item, scope),
       cacheIndex.reuse,
       refreshNative,
       (cell, item) => ({

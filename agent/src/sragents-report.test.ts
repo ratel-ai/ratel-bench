@@ -20,6 +20,7 @@ function task(over: Partial<SragentsTaskSummaryRow>): SragentsTaskSummaryRow {
     excluded_cells: 0,
     errored_cells: 0,
     truncated_cells: 0,
+    max_output_tokens: null,
     ...over,
   };
 }

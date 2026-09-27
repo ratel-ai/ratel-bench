@@ -33,6 +33,7 @@ import { astArgRecall } from "./judges/ast.js";
 import { effectiveCalls } from "./metering.js";
 import { resolveRepoPath } from "./paths.js";
 import {
+  capProvenance,
   corpusOf,
   isTruncated,
   labelledCellKeyOf,
@@ -197,6 +198,7 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[]): TaskRow[] {
       error_class: errorClassOf(c),
       excluded: isInfraError(c),
       truncated: isTruncated(c),
+      max_output_tokens: c.max_output_tokens ?? null,
     });
   }
   return out;
@@ -231,6 +233,7 @@ function summarizeTask(rows: TaskRow[], timestamps: Map<string, string>): TaskSu
       excluded_cells: arr.length - kept.length,
       errored_cells: kept.length - clean.length,
       truncated_cells: kept.filter((r) => r.truncated).length,
+      max_output_tokens: capProvenance(kept.map((r) => r.max_output_tokens)),
     });
   }
   return out.sort(

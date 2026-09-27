@@ -18,7 +18,15 @@ import { dirname } from "node:path";
 import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
-import { corpusOf, isTruncated, mean, meanOrNull, median, medianOrNull } from "./report.js";
+import {
+  capProvenance,
+  corpusOf,
+  isTruncated,
+  mean,
+  meanOrNull,
+  median,
+  medianOrNull,
+} from "./report.js";
 import type {
   SragentsRetrievalRow,
   SragentsRetrievalSummaryRow,
@@ -203,6 +211,7 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
       error_class: errorClassOf(c),
       excluded: isInfraError(c),
       truncated: isTruncated(c),
+      max_output_tokens: c.max_output_tokens ?? null,
     });
   }
   return out;
@@ -242,6 +251,7 @@ function summarizeTask(
       excluded_cells: arr.length - kept.length,
       errored_cells: kept.length - clean.length,
       truncated_cells: kept.filter((r) => r.truncated).length,
+      max_output_tokens: capProvenance(kept.map((r) => r.max_output_tokens)),
     });
   }
   const rank = (d: string) => (d === ALL_DATASET ? 1 : 0);

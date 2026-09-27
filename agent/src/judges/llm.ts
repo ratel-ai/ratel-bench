@@ -11,7 +11,7 @@
 // accepts this softness because the headline claim for v0.1.1 is "tokens at
 // equal selection accuracy," carried by the programmatic judge.
 
-import { generateObject, type LanguageModel } from "ai";
+import { generateObject, type LanguageModel, NoObjectGeneratedError, RetryError } from "ai";
 import { z } from "zod";
 import type { JudgeVerdict } from "../types.js";
 
@@ -44,6 +44,8 @@ export interface LLMJudgeArgs {
   model: LanguageModel;
   /** Defaults to `"strict"`. Pass `"coherence"` to reproduce v0.1.1 reports. */
   promptVariant?: JudgePromptVariant;
+  /** `--judge-max-output-tokens`: cap on the judge call. Unset = no cap sent. */
+  maxOutputTokens?: number;
 }
 
 export interface LLMJudgeResult {
@@ -119,9 +121,20 @@ export async function judgeLLM(args: LLMJudgeArgs): Promise<LLMJudgeResult> {
       schema: VerdictSchema,
       system,
       prompt: userPrompt,
+      maxOutputTokens: args.maxOutputTokens,
     });
     return { verdict: object.verdict, explanation: object.explanation };
   } catch (err) {
+    // A verdict cut off by the output cap is no verdict: n/a, labelled so a
+    // too-tight `--judge-max-output-tokens` is visible (not a judge outage).
+    const cause = RetryError.isInstance(err) ? err.lastError : err;
+    if (NoObjectGeneratedError.isInstance(cause) && cause.finishReason === "length") {
+      const cap = args.maxOutputTokens ?? "the provider default";
+      return {
+        verdict: "n/a",
+        explanation: `judge truncated at ${cap} output tokens: ${cause.message}`,
+      };
+    }
     return {
       verdict: "n/a",
       explanation: `judge failed: ${(err as Error).message ?? String(err)}`,

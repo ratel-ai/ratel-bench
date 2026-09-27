@@ -79,9 +79,21 @@ export interface McpAtlasTaskSummaryRow {
    *  COUNTED ONLY: unlike bfcl/sragents, they stay in every denominator above
    *  as fails, so a non-zero value marks a group whose rates infra depressed. */
   excluded_cells: number;
+  /** Cells with truncated_turns > 0: an output limit bound at least once
+   *  (the `--max-output-tokens` cap, or Claude Code's own default when unset).
+   *  COUNTED ONLY, like excluded_cells — truncation stays a scored outcome in
+   *  every denominator. Codex, legacy and runCell error rows (finish_reason
+   *  'error') never count. */
+  truncated_cells: number;
   no_search_rate: number;
   /** k=1: false everywhere until a repeat subset runs. */
   variance_measured: boolean;
+  /** The group's `--max-output-tokens` / `--judge-max-output-tokens`: the value
+   *  every cell shares, or "mixed". A METRIC, not a group key — it marks a
+   *  capped row that report.json would otherwise show as the headline. Absent
+   *  when no cell was capped, so uncapped summaries are unchanged. */
+  max_output_tokens?: number | "mixed";
+  judge_max_output_tokens?: number | "mixed";
 }
 
 export interface McpAtlasRetrievalSummaryRow {
@@ -199,6 +211,9 @@ export interface McpAtlasCostSummaryRow {
   added_latency_p90_ms: number;
   ratel_mean_search_ms_total: number;
   added_turns_mean: number;
+  /** See McpAtlasTaskSummaryRow.max_output_tokens; over both arms' cells. */
+  max_output_tokens?: number | "mixed";
+  judge_max_output_tokens?: number | "mixed";
 }
 
 export interface SummarizeInput {
@@ -319,9 +334,11 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       mean_turns: mean(cells.map((c) => c.latency.turns)),
       errored: cells.filter((c) => c.error !== null).length,
       excluded_cells: cells.filter(isInfraErrorCell).length,
+      truncated_cells: cells.filter((c) => (c.truncated_turns ?? 0) > 0).length,
       no_search_rate:
         first.arm === "ratel" ? cells.filter((c) => c.search_count === 0).length / n : 0,
       variance_measured: false,
+      ...capsOf(cells),
     });
   }
 
@@ -526,10 +543,31 @@ export function summarizeMcpAtlas(input: SummarizeInput): SummarizeResult {
       added_latency_p90_ms: percentile(rWalls, 0.9) - percentile(nWalls, 0.9),
       ratel_mean_search_ms_total: mean(r.map((c) => c.latency.search_ms_total)),
       added_turns_mean: mean(r.map((c) => c.latency.turns)) - mean(n.map((c) => c.latency.turns)),
+      ...capsOf([...n, ...r]),
     });
   }
 
   return { taskSummary, retrievalSummary, failureSummary, costSummary };
+}
+
+/** Cap provenance for a group: each cap only when some cell carries it. */
+function capsOf(
+  cells: readonly McpAtlasCell[],
+): Pick<McpAtlasTaskSummaryRow, "max_output_tokens" | "judge_max_output_tokens"> {
+  const agent = capOf(cells.map((c) => c.max_output_tokens));
+  const judge = capOf(cells.map((c) => c.judge_max_output_tokens));
+  return {
+    ...(agent !== undefined ? { max_output_tokens: agent } : {}),
+    ...(judge !== undefined ? { judge_max_output_tokens: judge } : {}),
+  };
+}
+
+/** undefined when no cell was capped; the shared value; else "mixed" (an
+ *  uncapped cell next to a capped one is mixed too). */
+function capOf(values: readonly (number | undefined)[]): number | "mixed" | undefined {
+  const distinct = new Set(values);
+  if (distinct.size <= 1) return [...distinct][0];
+  return "mixed";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

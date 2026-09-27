@@ -43,6 +43,7 @@ function task(over: Partial<TaskSummaryRow>): TaskSummaryRow {
     excluded_cells: 0,
     errored_cells: 0,
     truncated_cells: 0,
+    max_output_tokens: null,
     ...over,
   };
 }
@@ -63,6 +64,14 @@ describe("buildReport", () => {
     const m = v.task_completion["claude-haiku-4-5"]["ratel-full"].simple.metrics;
     expect(m).not.toHaveProperty("timestamp");
     expect(m).not.toHaveProperty("arm");
+  });
+
+  it("[guard] carries max_output_tokens provenance into report.json metrics", () => {
+    const report = buildReport([], [task({ max_output_tokens: "mixed" })], NOW);
+    const tc = report.ratel_versions["0.2.0"].task_completion;
+    expect(tc["claude-haiku-4-5"]["ratel-full"].simple.metrics).toMatchObject({
+      max_output_tokens: "mixed",
+    });
   });
 
   it("breaks task completion down per arm under each LLM", () => {

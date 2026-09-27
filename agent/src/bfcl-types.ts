@@ -103,6 +103,8 @@ export interface TaskRow {
   excluded: boolean;
   /** A step stopped on the output-token limit. Kept (not excluded); scored on its verdict. */
   truncated: boolean;
+  /** Output cap the cell requested; `null` when none was sent or the row predates the field. */
+  max_output_tokens: number | null;
 }
 
 /**
@@ -139,6 +141,11 @@ export interface TaskSummaryRow {
   errored_cells: number;
   /** Kept rows cut off by the output-token limit (scored on their verdict; not necessarily fails). */
   truncated_cells: number;
+  /**
+   * Output cap of the kept rows: the shared value, `null` when none recorded one
+   * (legacy or uncapped), or `"mixed"` (e.g. capped rows beside legacy controls).
+   */
+  max_output_tokens: number | "mixed" | null;
 }
 
 export type SummaryRow = RetrievalSummaryRow | TaskSummaryRow;

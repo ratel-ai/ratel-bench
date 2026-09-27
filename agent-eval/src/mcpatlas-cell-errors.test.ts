@@ -416,6 +416,14 @@ describe("isReusableCell", () => {
         }),
       ),
     ).toBe(true);
+    for (const judge_error of [
+      "judge truncated at 64 output tokens",
+      "judge truncated at the provider's default output limit",
+    ]) {
+      expect(isReusableCell(row({ error: null, finish_reason: "success", judge_error }))).toBe(
+        true,
+      );
+    }
     expect(
       isReusableCell(
         row({

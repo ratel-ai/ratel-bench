@@ -21,18 +21,24 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
-import {
-  generateObject,
-  type LanguageModel,
-  type LanguageModelUsage,
-  NoObjectGeneratedError,
-  RetryError,
-} from "ai";
+import { generateObject, type LanguageModelUsage, NoObjectGeneratedError, RetryError } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { classifyError, isRerunnable } from "./cell-errors.js";
+import { parseOutputCapFlag } from "./cli-args.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import { dollarCost, providerOf } from "./metering.js";
+import {
+  buildRunnerModels,
+  cacheTier,
+  capsLine,
+  guardResumeCaps,
+  type Harness,
+  harnessByModel,
+  loadModelCatalog,
+  type OutputCapOverride,
+  preferCacheRow,
+} from "./output-limits.js";
 import { loadModelPricing } from "./pricing.js";
 
 // Per-model rates from models.json (backend-aware, read once). Empty when
@@ -42,6 +48,7 @@ const PRICING = loadModelPricing();
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
+import type { ResolvedModel, RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
@@ -55,14 +62,9 @@ const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-orac
 const CACHEABLE_ARMS = new Set<SragentsArm>(["control-baseline", "control-oracle"]);
 
 // ── Model resolution (mirrors cli.ts:resolveModel, kept local to avoid importing
-//    the campaign CLI) ────────────────────────────────────────────────────────
+//    the campaign CLI). Output caps are attached afterwards (`buildRunnerModels`). ──
 
-interface RunnerModel {
-  id: string;
-  model: LanguageModel;
-}
-
-function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): RunnerModel {
+function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): ResolvedModel {
   // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
   const ep = parseCustomEndpoint(modelId);
   if (ep) {
@@ -308,6 +310,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     wall_ms: 0,
     error: null,
     cache_source: "live",
+    max_output_tokens: args.model.maxOutputTokens,
   };
 
   const startedAt = Date.now();
@@ -317,6 +320,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       schema: SelectionSchema,
       system: SYSTEM,
       prompt: buildPrompt(args.query, candidates),
+      maxOutputTokens: args.model.maxOutputTokens ?? undefined,
     });
     return {
       ...base,
@@ -328,8 +332,9 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     };
   } catch (err) {
     // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
-    // carries its usage and finish reason (`length` = truncated output). After a
-    // retried attempt the SDK wraps it in a RetryError; only that last call is billed.
+    // carries its usage and finish reason (`length` = truncated at the output cap:
+    // an `outcome` error, final — never re-run or excluded). After a retried
+    // attempt the SDK wraps it in a RetryError; only that last call is billed.
     const cause = RetryError.isInstance(err) ? err.lastError : err;
     const noObject = NoObjectGeneratedError.isInstance(cause) ? cause : undefined;
     return {
@@ -434,16 +439,26 @@ export function controlKey(
 }
 
 /**
- * Index existing control cells for reuse. `reuse` maps each key to the earliest-
- * produced cell across all `paths` (the original baseline); `current` holds keys
+ * Index existing control cells for reuse. `reuse` maps each key to the best cell
+ * across all `paths` (harness tier, then earliest: the original baseline); `current` holds keys
  * already present at the current ratel version, so a resumed run neither re-runs
  * nor duplicates them. Missing paths are skipped.
  *
  * Rerunnable errors (transient|access|request) never enter `reuse` — serving
  * them would re-count an outage as a miss forever — but still count as `current`
  * (resume is unchanged). Timeout/outcome errors are final and stay reusable.
+ *
+ * Reuse also matches each model's current `harness` (provider + requested output
+ * cap, see `cacheTier`): exact-tier rows beat legacy rows (no recorded cap), then
+ * earliest wins; a different recorded provider or cap never enters `reuse`, nor
+ * does a legacy row when `allowLegacy` is false. A model absent from `harness`
+ * is served legacy rows only.
  */
-export function readControlIndex(...paths: string[]): {
+export function readControlIndex(
+  paths: readonly string[],
+  harness: ReadonlyMap<string, Harness> = new Map(),
+  allowLegacy = true,
+): {
   reuse: Map<string, SragentsSelectCell>;
   current: Set<string>;
 } {
@@ -456,8 +471,8 @@ export function readControlIndex(...paths: string[]): {
       const key = controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
       if (c.ratel_ai_core_version === RATEL_AI_CORE_VERSION) current.add(key);
       if (isRerunnable(c)) continue;
-      const prev = reuse.get(key);
-      if (!prev || (c.generated_at ?? "") < (prev.generated_at ?? "")) reuse.set(key, c);
+      const best = preferCacheRow(reuse.get(key), c, harness.get(c.model), allowLegacy);
+      if (best) reuse.set(key, best);
     }
   }
   return { reuse, current };
@@ -465,26 +480,50 @@ export function readControlIndex(...paths: string[]): {
 
 /**
  * Serve control cells from the cache and return the tasks that must run live.
- * The output's own prior controls take precedence; `cachePaths` (earliest
- * eligible row across them) only fill gaps. Controls already at the current
- * version are skipped (resume); reused ones are appended re-stamped to the
- * current version with `cache_source: "reused"`. `force` truncates the output
- * and disables reuse, so a forced run never appends a duplicate set.
+ * Within a harness tier the output's own prior controls take precedence and
+ * `cachePaths` (best tier, then earliest, across them) only fill gaps; an
+ * exact-tier cache row beats the output's own legacy row. Controls already at the
+ * current version are skipped (resume); reused ones are appended re-stamped to
+ * the current version with `cache_source: "reused"`; `legacy` counts those served
+ * from the legacy tier. `force` truncates the output and disables reuse, so a
+ * forced run never appends a duplicate set. `allowLegacyCache: false` (any
+ * explicit `--max-output-tokens`; see `sragentsCapOptions`) serves exact-tier
+ * rows only.
+ *
+ * Throws (before writing anything) when the output holds current-version rows
+ * produced under a different recorded output cap, or — with `allowLegacyCache:
+ * false` — reused legacy rows an earlier invocation served (`checkResumeCaps`).
  */
 export function drainControlCache(
   tasks: Task[],
-  opts: { outputPath: string; cachePaths: string[]; force: boolean },
-): { liveTasks: Task[]; reused: number } {
+  opts: { outputPath: string; cachePaths: string[]; force: boolean; allowLegacyCache: boolean },
+): { liveTasks: Task[]; reused: number; legacy: number } {
   if (opts.force) {
     truncateJsonl(opts.outputPath);
-    return { liveTasks: tasks, reused: 0 };
+    return { liveTasks: tasks, reused: 0, legacy: 0 };
   }
-  const { reuse: reuseIndex, current: currentKeys } = readControlIndex(opts.outputPath);
-  const ext = readControlIndex(...opts.cachePaths.filter((p) => p !== opts.outputPath));
-  for (const [k, v] of ext.reuse) if (!reuseIndex.has(k)) reuseIndex.set(k, v);
+  const allowLegacy = opts.allowLegacyCache;
+  checkOutputCaps(opts.outputPath, tasks, allowLegacy);
+  const harness = harnessByModel(tasks.map((t) => t.model));
+  const tierOf = (c: SragentsSelectCell) => cacheTier(c, harness.get(c.model), allowLegacy);
+  const { reuse: reuseIndex, current: currentKeys } = readControlIndex(
+    [opts.outputPath],
+    harness,
+    allowLegacy,
+  );
+  const ext = readControlIndex(
+    opts.cachePaths.filter((p) => p !== opts.outputPath),
+    harness,
+    allowLegacy,
+  );
+  for (const [k, v] of ext.reuse) {
+    const own = reuseIndex.get(k);
+    if (!own || (tierOf(v) === "exact" && tierOf(own) !== "exact")) reuseIndex.set(k, v);
+  }
 
   const liveTasks: Task[] = [];
   let reused = 0;
+  let legacy = 0;
   for (const t of tasks) {
     if (CACHEABLE_ARMS.has(t.arm)) {
       const poolForArm = t.arm === "control-oracle" ? null : t.sc.poolSize;
@@ -499,12 +538,51 @@ export function drainControlCache(
           cache_source: "reused",
         });
         reused++;
+        if (tierOf(prior) === "legacy") legacy++;
         continue;
       }
     }
     liveTasks.push(t);
   }
-  return { liveTasks, reused };
+  return { liveTasks, reused, legacy };
+}
+
+/**
+ * Resume guard: current-version rows must share this run's recorded caps (and,
+ * without `allowLegacy`, not be reused legacy rows); live legacy ones warn.
+ */
+function checkOutputCaps(outputPath: string, tasks: Task[], allowLegacy: boolean): void {
+  if (!existsSync(outputPath)) return;
+  const rows = readJsonl<SragentsSelectCell>(outputPath).filter(
+    (c) => c.ratel_ai_core_version === RATEL_AI_CORE_VERSION,
+  );
+  guardResumeCaps(
+    rows,
+    tasks.map((t) => t.model),
+    RATEL_AI_CORE_VERSION,
+    allowLegacy,
+  );
+}
+
+/**
+ * The run's cap options from `argv`: `override` is `--max-output-tokens N|none`
+ * (undefined when absent), validated here because `arg()` ignores unknown flags
+ * and malformed values alike. An explicit override (N or `none`) must measure
+ * the cap it names, so it serves exact-tier controls only
+ * (`allowLegacyCache: false`). The judge-cap flag is `pnpm start`/`rejudge`-only,
+ * so it fails loudly here.
+ */
+export function sragentsCapOptions(argv: readonly string[]): {
+  override: OutputCapOverride | undefined;
+  allowLegacyCache: boolean;
+} {
+  if (argv.includes("--judge-max-output-tokens")) {
+    throw new Error("--judge-max-output-tokens: sragents-select has no LLM judge");
+  }
+  const idx = argv.indexOf("--max-output-tokens");
+  const override =
+    idx < 0 ? undefined : parseOutputCapFlag("--max-output-tokens", argv[idx + 1] ?? "");
+  return { override, allowLegacyCache: override === undefined };
 }
 
 /**
@@ -548,6 +626,7 @@ async function main(): Promise<void> {
   const ollamaBaseURL = process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL;
   // Bearer token for user-hosted `<url>#<model>` endpoints (optional).
   const modelApiKey = arg("--model-api-key", process.env.AWS_BEDROCK_BEARER ?? "");
+  const caps = sragentsCapOptions(process.argv);
 
   const rows = readJsonl<SragentsRetrievalRow>(candidatesPath);
   if (rows.length === 0) {
@@ -565,7 +644,12 @@ async function main(): Promise<void> {
     scenarios = stratifiedSample(scenarios, scenarioLimit, seed);
   }
 
-  const resolved = models.map((m) => resolveModel(m, ollamaBaseURL, modelApiKey));
+  // Caps are attached after resolution, so no resolver branch can skip them.
+  const resolved = buildRunnerModels(models, (m) => resolveModel(m, ollamaBaseURL, modelApiKey), {
+    catalog: loadModelCatalog(),
+    override: caps.override,
+  });
+  console.log(capsLine(resolved, caps.override));
   // Warm any user-hosted endpoints once before the campaign (no-op for cloud/ollama ids).
   await warmUpModels(models, modelApiKey);
   const catalog = await loadCatalogMeta(catalogPath);
@@ -599,13 +683,22 @@ async function main(): Promise<void> {
     process.argv.includes("--cache-source") ? arg("--cache-source", "") : undefined,
     outputPath,
   );
-  const { liveTasks, reused } = drainControlCache(tasks, { outputPath, cachePaths, force });
+  const { liveTasks, reused, legacy } = drainControlCache(tasks, {
+    outputPath,
+    cachePaths,
+    force,
+    allowLegacyCache: caps.allowLegacyCache,
+  });
 
   console.log(
     `sragents-select: ${tasks.length} cells ` +
       `(${scenarios.length} scenarios × ${arms.length} arms × ${resolved.length} models × ${runs} runs), ` +
       `pool=${poolSize} ratel-k=${ratelTopK}, cap $${dollarCap}` +
-      (reused ? ` — reused ${reused} control cells, ${liveTasks.length} live` : ""),
+      (reused
+        ? ` — reused ${reused} control cells` +
+          (legacy ? ` (${legacy} legacy-tier: no recorded cap)` : "") +
+          `, ${liveTasks.length} live`
+        : ""),
   );
 
   const { cells, dollars, stopped } = await runCampaign(liveTasks, {
