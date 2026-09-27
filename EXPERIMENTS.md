@@ -99,6 +99,30 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
   `none`, plus the noise repeat) must run every side with `--force` (or a fresh output and
   `--cache-source <nonexistent path>`) so controls run live: otherwise the catalog-cap side takes
   legacy controls and the repeat is served the first run's exact rows (noise 0 by construction).
+- **Retries & deadlines:** agent calls (`start` arms, `sragents-select`) run with the SDK's
+  retries off (`maxRetries: 0`) under one policy (`agent/src/llm-retry.ts`): only `transient`
+  errors (429/5xx/overload/network) are retried, with equal-jitter capped exponential backoff
+  (`Retry-After` honoured up to the cap; beyond the cap or the remaining wait budget the call fails
+  fast as `transient`); gated/missing models, Bedrock's daily token cap ("Too many tokens per
+  day") and OpenAI's exhausted credit (429 `insufficient_quota`) fail at once (`access`). Each retry logs one line tagged with its cell (off under
+  `--quiet`). Env knobs, echoed at startup with the active deadline (`retry: …` line):
+  `RATEL_LLM_RETRY_MAX_ATTEMPTS` (8), `RATEL_LLM_RETRY_BASE_MS` (2000),
+  `RATEL_LLM_RETRY_MAX_DELAY_MS` (60000), `RATEL_LLM_RETRY_MAX_WAIT_MS` (180000, per cell),
+  `RATEL_CELL_TIMEOUT_GRACE_MS` (30000). `--timeout-ms` is **active time** (retry sleeps don't
+  count) and actually aborts the request; a layer that ignores the abort is cut off at deadline +
+  grace. A timeout after any retry is `transient` (excluded) — even when that retry cost no active
+  time (an instant 429 early in a cell that later hangs) — otherwise `timeout` (a scored fail).
+  **SR:** `sragents-select --timeout-ms` (default 300000) now bounds the whole call, active time,
+  and aborts it — previously undici allowed ~300s *per attempt* with no abort — so SR gains a
+  `timeout` outcome. Rows record `retries`, `throttled_retries` (429/503/529), `retry_wait_ms` and
+  `retry_policy` (e.g. `a8/b2000/c60000/w180000;timeout=active:180000+g30000`); summaries add
+  `retries`, `throttled_retries` (`null` for all-legacy groups, a lower bound beside legacy
+  rows), `retry_policy` (value, `"mixed"` beside legacy rows, or `null`)
+  and `latency_p50_net_ms` (median of `wall_ms − retry_wait_ms`); REPORT.md's Headline adds
+  `mean wall (net)` (`mean_wall_net_ms`). Retries change a cell's completion probability, **not
+  its answer**, so accuracy stays comparable across policies; `latency_p50_ms`, `mean_wall_ms` and
+  `wall_savings_pct` are unchanged (wall-clock, waits included). The BFCL LLM judge is not
+  wrapped: it passes `maxRetries: 6` to the SDK and never feeds the agent's counters.
 - **Models:** whatever LLM(s) under test — cloud (`claude-sonnet-4-6`, `gpt-5.4-mini`) or
   user-hosted via URL (`https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b`).
 

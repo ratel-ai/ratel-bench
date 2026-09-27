@@ -3,7 +3,6 @@ import {
   CANONICAL_AGENT_JSONL,
   parseArgs,
   parseOutputCapFlag,
-  parsePositiveInt,
   parseRejudgeArgs,
   resolveRunTarget,
 } from "./cli-args.js";
@@ -123,6 +122,14 @@ describe("output cap flags", () => {
     expect(parse("--judge-max-output-tokens", "512").judgeMaxOutputTokens).toBe(512);
   });
 
+  it("--timeout-ms (the active-time deadline) rejects non-positive-int values", () => {
+    expect(parse("--timeout-ms", "180000").timeoutMs).toBe(180_000);
+    for (const bad of ["0", "-1", "1.5", "abc", "1e3"]) {
+      expect(() => parse("--timeout-ms", bad)).toThrow(/--timeout-ms must be a positive integer/);
+    }
+    expect(() => parse("--timeout-ms", "2147483648")).toThrow(/--timeout-ms must be ≤ 2147483647/);
+  });
+
   it("cap flags reject non-positive-int values", () => {
     // "1e3", "+5", "0x10", "1.0" pass Number()/isInteger; only the digits-only rule rejects them.
     for (const bad of ["0", "-1", "1.5", "abc", "", "16,32", "1e3x", "1e3", "+5", "0x10", "1.0"]) {
@@ -138,10 +145,7 @@ describe("output cap flags", () => {
     expect(() => parse("--max-output-tokens")).toThrow("missing value for --max-output-tokens");
   });
 
-  it("parsePositiveInt / parseOutputCapFlag", () => {
-    expect(parsePositiveInt("--x", "7")).toBe(7);
-    expect(parsePositiveInt("--x", " 7 ")).toBe(7);
-    expect(() => parsePositiveInt("--x", " ")).toThrow('--x must be a positive integer (got " ")');
+  it("parseOutputCapFlag", () => {
     expect(parseOutputCapFlag("--x", "none")).toBe("none");
     expect(parseOutputCapFlag("--x", "42")).toBe(42);
   });

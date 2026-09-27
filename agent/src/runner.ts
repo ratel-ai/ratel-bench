@@ -36,6 +36,7 @@ import { loadScenarios } from "./corpus.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
+import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
 import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
 import {
   cacheTier,
@@ -87,7 +88,13 @@ export interface RunnerConfig {
    */
   poolSizes: number[];
   maxSteps: number;
+  /** Active-time budget per cell: retry sleeps don't count (see `llm-retry.ts`). */
   perRunTimeoutMs: number;
+  /**
+   * LLM retry policy + deadline backstop grace (the CLI reads them from
+   * `RATEL_LLM_RETRY_*` / `RATEL_CELL_TIMEOUT_GRACE_MS`). Unset = defaults.
+   */
+  retry?: RetrySettings;
   dollarGlobalCap: number;
   force: boolean;
   judgeModel?: LanguageModel;
@@ -410,6 +417,7 @@ export function makeRegistryRunCell(
       retriever: config.retriever,
       maxSteps: config.maxSteps,
       perRunTimeoutMs: config.perRunTimeoutMs,
+      retry: cellRetrySettings(config),
       seed: config.seed,
       pricing: config.pricing,
     });
@@ -445,6 +453,13 @@ export function makeRegistryRunCell(
     }
     return cell;
   };
+}
+
+/** The retry settings a cell runs under: one log line per retry, unless `quiet`. */
+function cellRetrySettings(config: RunnerConfig): RetrySettings {
+  const retry = config.retry ?? DEFAULT_RETRY_SETTINGS;
+  if ((config.logLevel ?? "normal") === "quiet" || retry.log) return retry;
+  return { ...retry, log: console.log };
 }
 
 /**

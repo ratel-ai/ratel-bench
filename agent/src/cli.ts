@@ -24,6 +24,7 @@ import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
+import { retrySettingsFromEnv, retrySettingsLine } from "./llm-retry.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
@@ -200,6 +201,9 @@ async function runMain(): Promise<void> {
     override: parsed.maxOutputTokens,
   });
   console.log(capsLine(models, parsed.maxOutputTokens));
+  // Retry knobs (RATEL_LLM_RETRY_*, RATEL_CELL_TIMEOUT_GRACE_MS), validated and echoed once.
+  const retry = retrySettingsFromEnv(process.env);
+  console.log(retrySettingsLine(retry, parsed.timeoutMs));
   // Warm any user-hosted endpoints once so early cells don't burn their timeout on
   // a cold start (no-op for cloud/ollama model ids).
   await warmUpModels(parsed.models, parsed.modelApiKey);
@@ -224,6 +228,7 @@ async function runMain(): Promise<void> {
     poolSizes: parsed.poolSizes,
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,
+    retry,
     dollarGlobalCap: parsed.dollarGlobal,
     // Per-model rates from models.json (backend-aware). Empty when unpriced →
     // $0 rows, and the dollar cap simply doesn't bound the run.

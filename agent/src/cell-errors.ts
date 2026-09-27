@@ -49,6 +49,37 @@ export interface ErrorRow {
   error_class?: ErrorClass;
 }
 
+/**
+ * The retry wrapper (`llm-retry.ts`) gave up on a transient error: attempts
+ * spent, the next wait would pass the wait budget, or a `Retry-After` beyond the
+ * cap/budget (`reason`). Not an
+ * `APICallError`, so the AI SDK rethrows it unchanged; classified by its cause.
+ */
+export class RetriesExhaustedError extends Error {
+  readonly attempts: number;
+  readonly reason?: string;
+
+  constructor(cause: unknown, attempts: number, reason?: string) {
+    const why = reason ? ` (${reason})` : "";
+    super(`Failed after ${attempts} attempts${why}. Last error: ${messageOf(cause)}`, { cause });
+    this.name = "RetriesExhaustedError";
+    this.attempts = attempts;
+    this.reason = reason;
+  }
+}
+
+/**
+ * The retry wrapper met a fatal provider error (fatal marker or `access`): the
+ * model is gated/missing, so no retry can help. Keeps the cause's message; not an
+ * `APICallError`, so the AI SDK never retries it. Always `access`.
+ */
+export class FatalProviderError extends Error {
+  constructor(cause: unknown) {
+    super(messageOf(cause), { cause });
+    this.name = "FatalProviderError";
+  }
+}
+
 /** A cell's deadline expired. The message is the one legacy rows carry. */
 export class CellTimeoutError extends Error {
   readonly timeoutMs: number;
@@ -63,7 +94,16 @@ export class CellTimeoutError extends Error {
 const CONTEXT_TOO_LONG =
   /prompt is too long|Input is too long|context_length_exceeded|maximum context length/i;
 const CONTENT_FILTER = /content[ _-]?filter/i;
-const ACCESS = /not available for this account|AWS credential provider failed|model .* not found/i;
+// Provider quota conditions: retryable 429s that no in-cell backoff can outwait,
+// so the model is out as if gated. Bedrock's daily token cap ("Too many tokens
+// per day") matches by message; OpenAI's exhausted credit by its structured
+// `insufficient_quota` code (`isInsufficientQuota`), since Gemini-compatible
+// endpoints reuse its message for per-minute limits. Legacy rows keep only the
+// message, so `LEGACY_QUOTA` matches it there.
+const ACCESS =
+  /not available for this account|AWS credential provider failed|model .* not found|Too many tokens per day/i;
+const INSUFFICIENT_QUOTA = "insufficient_quota";
+const LEGACY_QUOTA = /exceeded your current quota, please check your plan and billing details/i;
 const NETWORK = /fetch failed|ECONNRESET|UND_ERR_|other side closed/;
 // Node/undici error codes on a cause link whose message may not say "network".
 const NETWORK_CODE = /^(UND_ERR_|ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT)/;
@@ -74,7 +114,8 @@ const MAX_CAUSE_DEPTH = 5;
 const INVALID_JSON_RESPONSE = /^Invalid JSON response/;
 const LEGACY_TRANSIENT =
   /Overloaded|Internal server error|Service Unavailable|Invalid JSON response|Cannot connect to API/i;
-const LEGACY_RETRY_LAST = /^Failed after \d+ attempts\. Last error: ([\s\S]*)$/;
+// `(reason)` is RetriesExhaustedError's fail-fast form.
+const LEGACY_RETRY_LAST = /^Failed after \d+ attempts(?: \([^)]*\))?\. Last error: ([\s\S]*)$/;
 const LEGACY_RETRY_NON_RETRYABLE = /non-retryable error: '([\s\S]*)'$/;
 
 /** Classify a thrown error. Rules are ordered; the first match wins. */
@@ -82,6 +123,9 @@ export function classifyError(err: unknown, opts: ClassifyOptions = {}): ErrorCl
   // `maxRetriesExceeded` fires for ANY error kind on the last try, so the
   // wrapper says nothing — the last underlying error decides.
   if (RetryError.isInstance(err)) return classifyError(err.lastError, opts);
+  // The retry wrapper's own errors: exhaustion says nothing new, the cause decides.
+  if (err instanceof RetriesExhaustedError) return classifyError(err.cause, opts);
+  if (err instanceof FatalProviderError) return "access";
 
   const marker = providerErrorInfo(err);
   if (marker) return marker.kind === "fatal" ? "access" : "transient";
@@ -95,6 +139,7 @@ export function classifyError(err: unknown, opts: ClassifyOptions = {}): ErrorCl
   if (byMessage) return byMessage;
 
   if (APICallError.isInstance(err)) {
+    if (isInsufficientQuota(err)) return "access";
     if (err.isRetryable || INVALID_JSON_RESPONSE.test(message)) return "transient";
     const status = err.statusCode ?? 0;
     if (status === 401 || status === 403 || status === 404) return "access";
@@ -118,6 +163,7 @@ export function classifyErrorMessage(message: string): ErrorClass {
 
   const byMessage = classifyByMessage(message);
   if (byMessage) return byMessage;
+  if (LEGACY_QUOTA.test(message)) return "access";
   if (LEGACY_TRANSIENT.test(message) || NETWORK.test(message)) return "transient";
   if (message.startsWith("run timed out after")) return "timeout";
   return "outcome";
@@ -181,6 +227,13 @@ function providerErrorInfo(err: unknown): ProviderErrorInfo | undefined {
  */
 function isCellTimeout(err: unknown): boolean {
   return causeChain(err).some((link) => link instanceof CellTimeoutError);
+}
+
+/** OpenAI's out-of-credit error: `insufficient_quota` in the parsed body, else the raw one. */
+function isInsufficientQuota(err: APICallError): boolean {
+  const body = (err.data as { error?: { code?: unknown; type?: unknown } } | undefined)?.error;
+  if (body?.code === INSUFFICIENT_QUOTA || body?.type === INSUFFICIENT_QUOTA) return true;
+  return err.responseBody?.includes(`"${INSUFFICIENT_QUOTA}"`) ?? false;
 }
 
 /** A connection-level failure: a network message or a Node/undici error code. */

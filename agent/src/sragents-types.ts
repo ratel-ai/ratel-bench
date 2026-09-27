@@ -103,6 +103,18 @@ export interface SragentsSelectCell {
    * the control cache (re-stamped). Legacy rows lack it.
    */
   cache_source?: "live" | "reused";
+  /** Retries the call spent (`llm-retry.ts`). Legacy rows lack it (SDK retries, uncounted). */
+  retries?: number;
+  /** Of `retries`, those after a throttle/overload status (429/503/529). */
+  throttled_retries?: number;
+  /** Backoff slept by the retries, in ms: part of `wall_ms`, not of the active-time deadline. */
+  retry_wait_ms?: number;
+  /**
+   * Retry policy + `--timeout-ms` deadline the cell ran under, e.g.
+   * `a8/b2000/c60000/w180000;timeout=active:300000+g30000`. Legacy rows lack it
+   * (then: SDK retries, a per-attempt 300s undici limit, no abort).
+   */
+  retry_policy?: string;
 }
 
 /** Per-row skill-selection record (`results/raw/sragents/task-completion-rows.jsonl`). */
@@ -136,6 +148,14 @@ export interface SragentsTaskRow {
   truncated: boolean;
   /** Output cap the cell requested; `null` when none was sent or the row predates the field. */
   max_output_tokens: number | null;
+  /** Retries the call spent (`llm-retry.ts`); `null` for legacy rows (SDK retries, uncounted). */
+  retries: number | null;
+  /** Of `retries`, those after a 429/503/529; `null` for legacy rows. */
+  throttled_retries: number | null;
+  /** Retry backoff inside `wall_ms`, in ms; `null` for legacy rows (read as no wait). */
+  retry_wait_ms: number | null;
+  /** Retry policy + `--timeout-ms` deadline the call ran under; `null` for legacy rows. */
+  retry_policy: string | null;
 }
 
 /**
@@ -164,8 +184,10 @@ export interface SragentsTaskSummaryRow {
   precision: number | null;
   /** Over non-errored rows only. */
   mean_total_tokens: number | null;
-  /** Over non-errored rows only. */
+  /** Over non-errored rows only; wall-clock (retry waits included). */
   latency_p50_ms: number | null;
+  /** p50 of `wall_ms − retry_wait_ms` over the same rows: latency net of retry backoff. */
+  latency_p50_net_ms: number | null;
   /** Final `transient|access` rows left out of every metric (not in `scenarios`). */
   excluded_cells: number;
   /** Kept rows that errored (`request|timeout|outcome`): scored as fails. */
@@ -177,4 +199,18 @@ export interface SragentsTaskSummaryRow {
    * (legacy or uncapped), or `"mixed"` (e.g. capped rows beside legacy controls).
    */
   max_output_tokens: number | "mixed" | null;
+  /**
+   * Retries spent by every superseding row of the group that recorded them,
+   * excluded ones included; `null` when none did (legacy). Beside legacy rows a
+   * lower bound — not always flagged by `retry_policy` `"mixed"`, which reads kept
+   * rows only (an excluded legacy row leaves it single-valued).
+   */
+  retries: number | null;
+  /** Of `retries`, those after a throttle/overload status (429/503/529); `null` likewise. */
+  throttled_retries: number | null;
+  /**
+   * Retry policy of the kept rows: the shared value, `null` when none recorded one
+   * (legacy), or `"mixed"`. Retries change completion probability, not answers.
+   */
+  retry_policy: string | "mixed" | null;
 }

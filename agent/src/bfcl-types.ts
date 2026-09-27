@@ -105,6 +105,14 @@ export interface TaskRow {
   truncated: boolean;
   /** Output cap the cell requested; `null` when none was sent or the row predates the field. */
   max_output_tokens: number | null;
+  /** Retries the cell spent (`llm-retry.ts`); `null` for legacy rows (SDK retries, uncounted). */
+  retries: number | null;
+  /** Of `retries`, those after a 429/503/529; `null` for legacy rows. */
+  throttled_retries: number | null;
+  /** Retry backoff inside `wall_ms`, in ms; `null` for legacy rows (read as no wait). */
+  retry_wait_ms: number | null;
+  /** Retry policy + deadline the cell ran under; `null` for legacy rows. */
+  retry_policy: string | null;
 }
 
 /**
@@ -133,8 +141,10 @@ export interface TaskSummaryRow {
   recall: number | null;
   /** 4 — token cost: mean total (input+output) tokens per non-errored scenario. */
   mean_total_tokens: number | null;
-  /** 5 — p50 (median) wall-clock latency in ms over non-errored scenarios. */
+  /** 5 — p50 (median) wall-clock latency in ms over non-errored scenarios (retry waits included). */
   latency_p50_ms: number | null;
+  /** p50 of `wall_ms − retry_wait_ms` over the same rows: latency net of retry backoff. */
+  latency_p50_net_ms: number | null;
   /** Final `transient|access` rows left out of every metric (not in `scenarios`). */
   excluded_cells: number;
   /** Kept rows that errored (`request|timeout|outcome`): scored as fails. */
@@ -146,6 +156,20 @@ export interface TaskSummaryRow {
    * (legacy or uncapped), or `"mixed"` (e.g. capped rows beside legacy controls).
    */
   max_output_tokens: number | "mixed" | null;
+  /**
+   * Retries spent by every superseding row of the group that recorded them,
+   * excluded ones included; `null` when none did (legacy). Beside legacy rows a
+   * lower bound — not always flagged by `retry_policy` `"mixed"`, which reads kept
+   * rows only (an excluded legacy row leaves it single-valued).
+   */
+  retries: number | null;
+  /** Of `retries`, those after a throttle/overload status (429/503/529); `null` likewise. */
+  throttled_retries: number | null;
+  /**
+   * Retry policy of the kept rows: the shared value, `null` when none recorded one
+   * (legacy), or `"mixed"`. Retries change completion probability, not answers.
+   */
+  retry_policy: string | "mixed" | null;
 }
 
 export type SummaryRow = RetrievalSummaryRow | TaskSummaryRow;

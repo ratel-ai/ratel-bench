@@ -6,7 +6,7 @@
 
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { type Tool as AISDKTool, jsonSchema, stepCountIs, ToolLoopAgent, tool } from "ai";
-import { CellTimeoutError } from "../cell-errors.js";
+import { cellRetry } from "../llm-retry.js";
 import {
   type AgentLikeResult,
   meter,
@@ -141,26 +141,6 @@ export function emptyToolBundle(): ToolBundle {
 }
 
 /**
- * Race `p` against a deadline. On expiry, reject with a `CellTimeoutError`
- * (message `run timed out after <ms>ms`, as legacy rows carry).
- */
-export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(() => reject(new CellTimeoutError(ms)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(id);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(id);
-        reject(e);
-      },
-    );
-  });
-}
-
-/**
  * Run the metered agent loop over `bundle.tools` and return a `CellResult` with
  * judging fields left as `n/a` (the runner overlays those). Each agent file
  * builds its own bundle (with whatever Ratel/SDK wiring it wants to demonstrate)
@@ -170,6 +150,11 @@ export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * Honours the output-cap contract on `AgentRunInput.model`: every step's call
  * requests `maxOutputTokens` (omitted when the cap is `null`), and the row
  * records it as `max_output_tokens`, errored cells included.
+ *
+ * The model is wrapped per cell by the retry policy (`input.retry`, see
+ * `llm-retry.ts`; the SDK's own retries are off) and the loop is aborted after
+ * `perRunTimeoutMs` of active time (retry sleeps don't count), with a hard
+ * backstop at deadline + grace. Retry counters and the policy land on the row.
  */
 export async function runMeteredLoop(
   armId: string,
@@ -178,19 +163,25 @@ export async function runMeteredLoop(
 ): Promise<CellResult> {
   // Records each finished step, so a later step throwing still meters the ones before it.
   const recorder = new StepRecorder();
+  const retry = cellRetry(
+    input.model.model,
+    input.perRunTimeoutMs,
+    input.retry,
+    `${input.scenario.id} · ${armId} · ${input.model.id} · #${input.runIndex}`,
+  );
   const agent = new ToolLoopAgent({
-    model: input.model.model,
+    model: retry.model,
     tools: bundle.tools,
     toolChoice: "auto",
     stopWhen: stepCountIs(input.maxSteps),
     maxOutputTokens: input.model.maxOutputTokens ?? undefined,
+    maxRetries: 0, // retries are `withRetry`'s job
     onStepFinish: recorder.record,
   });
 
   const generate = async (): Promise<AgentLikeResult> => {
-    const result = await withTimeout(
-      agent.generate({ prompt: input.scenario.prompt }),
-      input.perRunTimeoutMs,
+    const result = await retry.run(() =>
+      agent.generate({ prompt: input.scenario.prompt, abortSignal: retry.signal }),
     );
     return result as unknown as AgentLikeResult;
   };
@@ -207,11 +198,13 @@ export async function runMeteredLoop(
       seed: input.seed,
       nameToId: bundle.nameToId,
       provider: providerOf(input.model.model),
+      retryStats: retry.stats,
     },
     generate,
     input.pricing as PricingTable | undefined,
     recorder,
   );
   cell.max_output_tokens = input.model.maxOutputTokens;
+  Object.assign(cell, retry.rowFields());
   return cell;
 }

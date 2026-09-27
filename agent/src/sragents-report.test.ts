@@ -17,10 +17,14 @@ function task(over: Partial<SragentsTaskSummaryRow>): SragentsTaskSummaryRow {
     precision: 0.6,
     mean_total_tokens: 1200,
     latency_p50_ms: 800,
+    latency_p50_net_ms: 800,
     excluded_cells: 0,
     errored_cells: 0,
     truncated_cells: 0,
     max_output_tokens: null,
+    retries: 0,
+    throttled_retries: 0,
+    retry_policy: null,
     ...over,
   };
 }

@@ -13,9 +13,11 @@ import {
   classifyErrorMessage,
   type ErrorClass,
   errorClassOf,
+  FatalProviderError,
   isInfraError,
   isRerunnable,
   PROVIDER_ERROR_MARKER,
+  RetriesExhaustedError,
   supersede,
 } from "./cell-errors.js";
 
@@ -25,6 +27,21 @@ function apiError(statusCode: number, message = `HTTP ${statusCode}`): APICallEr
     url: "https://api.test/v1",
     requestBodyValues: {},
     statusCode,
+  });
+}
+
+const OPENAI_QUOTA_MESSAGE =
+  "You exceeded your current quota, please check your plan and billing details.";
+
+/** A 429 carrying a parsed OpenAI-style error body (`createJsonErrorResponseHandler` → `data`). */
+function quota429(error: Record<string, unknown>): APICallError {
+  return new APICallError({
+    message: OPENAI_QUOTA_MESSAGE,
+    url: "https://api.test/v1",
+    requestBodyValues: {},
+    statusCode: 429,
+    isRetryable: true,
+    data: { error: { message: OPENAI_QUOTA_MESSAGE, ...error } },
   });
 }
 
@@ -95,6 +112,44 @@ describe("classifyError maps structured errors", () => {
       new Error("openai.gpt-6-astra is not available for this account."),
       "access",
     ],
+    // Bedrock's daily token cap: a retryable 429 no wait inside a cell can clear.
+    [
+      "APICallError 429 Too many tokens per day (unmarked)",
+      apiError(429, "Too many tokens per day, please wait before trying again."),
+      "access",
+    ],
+    // OpenAI's out-of-credit 429: retryable per the SDK, but no backoff can outwait it.
+    [
+      "APICallError 429 insufficient_quota (OpenAI)",
+      quota429({ type: "insufficient_quota", code: "insufficient_quota" }),
+      "access",
+    ],
+    [
+      "APICallError 429 insufficient_quota in the raw body only",
+      new APICallError({
+        message: OPENAI_QUOTA_MESSAGE,
+        url: "https://api.test/v1",
+        requestBodyValues: {},
+        statusCode: 429,
+        isRetryable: true,
+        responseBody: '{"error":{"code":"insufficient_quota"}}',
+      }),
+      "access",
+    ],
+    // Gemini-compatible endpoints reuse the sentence for per-minute limits: the code decides.
+    [
+      "APICallError 429 quota message without insufficient_quota stays transient",
+      quota429({ code: 429, status: "RESOURCE_EXHAUSTED" }),
+      "transient",
+    ],
+    [
+      "OpenAI rate limit 429 stays transient",
+      apiError(
+        429,
+        "Rate limit reached for gpt-5.4-mini in organization org-x on tokens per min (TPM): Limit 200000, Used 199000",
+      ),
+      "transient",
+    ],
     // Without the content-filter rule running before the status rules this would be `request`.
     [
       "content filter (Anthropic 400)",
@@ -102,13 +157,50 @@ describe("classifyError maps structured errors", () => {
       "outcome",
     ],
     ["fatal marker", marked("fatal"), "access"],
+    // The retry wrapper's own errors (llm-retry.ts): both are non-APICallError.
+    [
+      "RetriesExhaustedError → its cause (503)",
+      new RetriesExhaustedError(apiError(503, "Service Unavailable"), 8),
+      "transient",
+    ],
+    [
+      "RetriesExhaustedError fail-fast on Retry-After → its cause (429)",
+      new RetriesExhaustedError(apiError(429), 1, "Retry-After 90000ms > max delay 60000ms"),
+      "transient",
+    ],
+    ["FatalProviderError (wrapping a 403)", new FatalProviderError(apiError(403)), "access"],
+    [
+      "FatalProviderError (wrapping a fatal-marked 429)",
+      new FatalProviderError(
+        Object.assign(apiError(429, "Too many tokens per day"), {
+          [PROVIDER_ERROR_MARKER]: { kind: "fatal", scope: "model", reason: "daily cap" },
+        }),
+      ),
+      "access",
+    ],
     ["transient marker", marked("transient"), "transient"],
+    // Marker precedence: the messages below match no message rule, so only the
+    // marker (checked before message and status rules) decides.
     [
       "fatal marker wins over a retryable APICallError",
-      Object.assign(apiError(429, "Too many tokens per day"), {
+      Object.assign(apiError(429, "Too Many Requests"), {
         [PROVIDER_ERROR_MARKER]: { kind: "fatal", scope: "model", reason: "daily cap" },
       }),
       "access",
+    ],
+    [
+      "transient marker wins over a 403 (Bedrock ExpiredTokenException)",
+      Object.assign(apiError(403, "ExpiredTokenException: token expired"), {
+        [PROVIDER_ERROR_MARKER]: { kind: "transient", scope: "model", reason: "expired token" },
+      }),
+      "transient",
+    ],
+    [
+      "transient marker wins over an access message rule",
+      Object.assign(new Error("model foo not found"), {
+        [PROVIDER_ERROR_MARKER]: { kind: "transient", scope: "model", reason: "flaky lookup" },
+      }),
+      "transient",
     ],
     ["CellTimeoutError", new CellTimeoutError(180000), "timeout"],
     ["CellTimeoutError with retries", new CellTimeoutError(180000), "transient", { retries: 1 }],
@@ -234,6 +326,20 @@ describe("classifyErrorMessage classifies every audited S3 string", () => {
     ],
   ];
 
+  it("a legacy daily-cap row is access", () => {
+    expect(
+      classifyErrorMessage(
+        "Failed after 3 attempts. Last error: Too many tokens per day, please wait before trying again.",
+      ),
+    ).toBe("access");
+  });
+
+  it("a legacy OpenAI out-of-credit row is access", () => {
+    expect(
+      classifyErrorMessage(`Failed after 3 attempts. Last error: ${OPENAI_QUOTA_MESSAGE}`),
+    ).toBe("access");
+  });
+
   it.each(audited)("%s", (message, expected) => {
     expect(classifyErrorMessage(message)).toBe(expected);
   });
@@ -243,6 +349,23 @@ describe("classifyErrorMessage classifies every audited S3 string", () => {
       "outcome",
     );
     expect(classifyErrorMessage("Failed after 3 attempts. Last error: boom")).toBe("outcome");
+    // RetriesExhaustedError's fail-fast form carries its reason in parentheses.
+    expect(
+      classifyErrorMessage(
+        "Failed after 1 attempts (Retry-After 90000ms > max delay 60000ms). Last error: Overloaded",
+      ),
+    ).toBe("transient");
+    // Both fail-fast reasons: only recursion past the parenthesised reason gets these.
+    for (const reason of [
+      "Retry-After 90000ms > max delay 60000ms",
+      "retry wait budget 60000ms: next wait 2000ms > 500ms left",
+    ]) {
+      expect(
+        classifyErrorMessage(
+          `Failed after 1 attempts (${reason}). Last error: run timed out after 5ms`,
+        ),
+      ).toBe("timeout");
+    }
     // The timeout rule is the only anchored one (startsWith), so it is the case
     // where only recursion into the wrapped message gets the class right.
     expect(

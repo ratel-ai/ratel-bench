@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
 import type { LanguageModel } from "ai";
 import { classifyError, type ErrorClass } from "./cell-errors.js";
+import type { RetryStats } from "./llm-retry.js";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -123,6 +124,13 @@ export interface MeterContext {
   nameToId?: ReadonlyMap<string, string>;
   /** AI SDK provider id of the model (see {@link providerOf}); stamped on the row. */
   provider?: string;
+  /**
+   * The cell's retry counters (`llm-retry.ts`), read once `generate` settles.
+   * Plan-pinned U1/U4 rule: a timeout in a cell that saw any retry classifies
+   * `transient`. Retry sleeps are paused out of the deadline, so only failed
+   * attempts' own active time is the provider's; even an instant 429 flips it.
+   */
+  retryStats?: Pick<RetryStats, "retries">;
 }
 
 const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
@@ -148,7 +156,7 @@ export async function meter(
     raw = await generate();
   } catch (err) {
     error = (err as Error).message ?? String(err);
-    errorClass = classifyError(err);
+    errorClass = classifyError(err, { retries: ctx.retryStats?.retries });
   }
   const wallMs = Date.now() - startedAt;
 

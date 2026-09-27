@@ -5,6 +5,7 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
+import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
 import {
   appendRow,
   makeRegistryRunCell,
@@ -1401,6 +1402,7 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
     perRunTimeoutMs: number,
     judgeModel?: MockLanguageModelV3,
     caps: { maxOutputTokens?: number; judgeMaxOutputTokens?: number } = {},
+    retry?: RetrySettings,
   ) {
     const registry = new Map([[controlBaseline.id, controlBaseline]]);
     return makeRegistryRunCell(
@@ -1416,6 +1418,7 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
       config: {
         ...baseConfig("unused", "unused"),
         perRunTimeoutMs,
+        retry,
         judgeMaxOutputTokens: caps.judgeMaxOutputTokens,
         pricing: {
           "priced-model": {
@@ -1526,10 +1529,59 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
     expect(judgeModel.doGenerateCalls[0].maxOutputTokens).toBeUndefined();
   });
 
-  it("stays fail/fail when step 2 hangs past the deadline", async () => {
+  it("stays fail/fail when step 2 hangs past the deadline (forwards config.retry)", async () => {
+    // Ignores the abort, so only the forwarded 20ms backstop grace ends the cell.
     const model = modelFailingStep2(() => new Promise<never>(() => {}));
-    const cell = await runCell(model, 50);
+    const cell = await runCell(
+      model,
+      50,
+      undefined,
+      {},
+      { ...DEFAULT_RETRY_SETTINGS, graceMs: 20 },
+    );
     expect(cell.error_class).toBe("timeout");
+    expect(cell.retry_policy).toBe("a8/b2000/c60000/w180000;timeout=active:50+g20");
     expectUnscoredButMetered(cell);
+  });
+  it("logs each retry with the cell's tag, unless logLevel is quiet", async () => {
+    const e503 = new APICallError({
+      message: "Service Unavailable",
+      url: "https://api.test/v1",
+      requestBodyValues: {},
+      statusCode: 503,
+      isRetryable: true,
+    });
+    const retry = { ...DEFAULT_RETRY_SETTINGS, sleep: async () => {}, random: () => 0 };
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (const logLevel of ["normal", "quiet"] as const) {
+        logs.mockClear();
+        const model = modelFailingStep2(async () => {
+          throw e503;
+        });
+        const registry = new Map([[controlBaseline.id, controlBaseline]]);
+        const cell = await makeRegistryRunCell(registry)({
+          scenario: goldScenario,
+          arm: controlBaseline.id,
+          model: { id: "m", model, maxOutputTokens: null },
+          runIndex: 2,
+          pool: goldScenario.candidate_pool,
+          poolSize: 1,
+          config: { ...baseConfig("unused", "unused"), perRunTimeoutMs: 5_000, retry, logLevel },
+        });
+        expect(cell.retries).toBe(7);
+        const lines = logs.mock.calls.map(([line]) => String(line));
+        if (logLevel === "quiet") {
+          expect(lines).toEqual([]);
+        } else {
+          expect(lines).toHaveLength(7);
+          expect(lines[0]).toMatch(
+            /^\[fs-001 · control-baseline · m · #2\] retry: .* attempt 1\/8 failed \(503\)/,
+          );
+        }
+      }
+    } finally {
+      logs.mockRestore();
+    }
   });
 });
