@@ -21,16 +21,24 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI, openai } from "@ai-sdk/openai";
-import { generateObject, type LanguageModel } from "ai";
+import {
+  generateObject,
+  type LanguageModel,
+  type LanguageModelUsage,
+  NoObjectGeneratedError,
+  RetryError,
+} from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
+import { classifyError } from "./cell-errors.js";
 import { appendJsonl, readJsonl } from "./io.js";
-import { dollarCost } from "./metering.js";
+import { dollarCost, providerOf } from "./metering.js";
 import { loadModelPricing } from "./pricing.js";
 
 // Per-model rates from models.json (backend-aware, read once). Empty when
 // unpriced → $0 cells and the dollar cap simply doesn't bound the run.
 const PRICING = loadModelPricing();
+
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
@@ -262,7 +270,7 @@ export async function loadCatalogMeta(
 
 // ── One cell: prompt the model, meter it ──────────────────────────────────────
 
-interface SelectArgs {
+export interface SelectArgs {
   arm: SragentsArm;
   sc: ScenarioCandidates;
   query: string;
@@ -272,7 +280,7 @@ interface SelectArgs {
   catalog: Map<string, { name: string; description: string }>;
 }
 
-async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
+export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
   const { ids, poolSize } = armCandidates(args.arm, args.sc, args.seed);
   const candidates = ids
     .map((id) => ({ id, ...(args.catalog.get(id) ?? { name: id, description: "" }) }))
@@ -287,6 +295,7 @@ async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
     category: args.sc.category,
     arm: args.arm,
     model: args.model.id,
+    provider: providerOf(args.model.model),
     run_index: args.runIndex,
     pool_size: poolSize,
     candidate_count: candidates.length,
@@ -302,33 +311,52 @@ async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
 
   const startedAt = Date.now();
   try {
-    const { object, usage } = await generateObject({
+    const { object, usage, finishReason } = await generateObject({
       model: args.model.model,
       schema: SelectionSchema,
       system: SYSTEM,
       prompt: buildPrompt(args.query, candidates),
     });
-    const input = usage?.inputTokens ?? 0;
-    const output = usage?.outputTokens ?? 0;
-    const cachedInput = usage?.cachedInputTokens ?? 0;
     return {
       ...base,
       // Drop hallucinated ids the model wasn't shown.
       selected_skill_ids: object.selected_skill_ids.filter((id) => candidateIdSet.has(id)),
-      input_tokens: input,
-      output_tokens: output,
-      total_tokens: usage?.totalTokens ?? input + output,
-      // generateObject's usage doesn't surface cache-creation tokens separately.
-      dollar_cost: dollarCost(args.model.id, { input, output, cachedInput, cacheCreation: 0 }, PRICING),
+      ...usageFields(args.model.id, usage),
+      finish_reason: finishReason,
       wall_ms: Date.now() - startedAt,
     };
   } catch (err) {
+    // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
+    // carries its usage and finish reason (`length` = truncated output). After a
+    // retried attempt the SDK wraps it in a RetryError; only that last call is billed.
+    const cause = RetryError.isInstance(err) ? err.lastError : err;
+    const noObject = NoObjectGeneratedError.isInstance(cause) ? cause : undefined;
     return {
       ...base,
+      ...(noObject ? usageFields(args.model.id, noObject.usage) : {}),
+      finish_reason: noObject?.finishReason ?? "error",
       wall_ms: Date.now() - startedAt,
       error: (err as Error).message ?? String(err),
+      error_class: classifyError(err),
     };
   }
+}
+
+/** Token and dollar fields of a cell from one call's usage. */
+function usageFields(
+  modelId: string,
+  usage: LanguageModelUsage | undefined,
+): Pick<SragentsSelectCell, "input_tokens" | "output_tokens" | "total_tokens" | "dollar_cost"> {
+  const input = usage?.inputTokens ?? 0;
+  const output = usage?.outputTokens ?? 0;
+  const cachedInput = usage?.cachedInputTokens ?? 0;
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    total_tokens: usage?.totalTokens ?? input + output,
+    // generateObject's usage doesn't surface cache-creation tokens separately.
+    dollar_cost: dollarCost(modelId, { input, output, cachedInput, cacheCreation: 0 }, PRICING),
+  };
 }
 
 // ── Bounded-concurrency worker pool with a best-effort dollar cap ──────────────

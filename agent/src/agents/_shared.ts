@@ -6,7 +6,14 @@
 
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { type Tool as AISDKTool, jsonSchema, stepCountIs, ToolLoopAgent, tool } from "ai";
-import { type AgentLikeResult, meter, type PricingTable } from "../metering.js";
+import { CellTimeoutError } from "../cell-errors.js";
+import {
+  type AgentLikeResult,
+  meter,
+  type PricingTable,
+  providerOf,
+  StepRecorder,
+} from "../metering.js";
 import type { AgentRunInput, CellResult, ToolSpec } from "../types.js";
 
 const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -133,9 +140,13 @@ export function emptyToolBundle(): ToolBundle {
   return { tools: {}, activeToolIds: [], nameToId: new Map() };
 }
 
+/**
+ * Race `p` against a deadline. On expiry, reject with a `CellTimeoutError`
+ * (message `run timed out after <ms>ms`, as legacy rows carry).
+ */
 export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(() => reject(new Error(`run timed out after ${ms}ms`)), ms);
+    const id = setTimeout(() => reject(new CellTimeoutError(ms)), ms);
     p.then(
       (v) => {
         clearTimeout(id);
@@ -161,11 +172,14 @@ export async function runMeteredLoop(
   input: AgentRunInput,
   bundle: ToolBundle,
 ): Promise<CellResult> {
+  // Records each finished step, so a later step throwing still meters the ones before it.
+  const recorder = new StepRecorder();
   const agent = new ToolLoopAgent({
     model: input.model.model,
     tools: bundle.tools,
     toolChoice: "auto",
     stopWhen: stepCountIs(input.maxSteps),
+    onStepFinish: recorder.record,
   });
 
   const generate = async (): Promise<AgentLikeResult> => {
@@ -187,9 +201,11 @@ export async function runMeteredLoop(
       poolSize: input.poolSize,
       seed: input.seed,
       nameToId: bundle.nameToId,
+      provider: providerOf(input.model.model),
     },
     generate,
     input.pricing as PricingTable | undefined,
+    recorder,
   );
   return cell;
 }

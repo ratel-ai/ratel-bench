@@ -4,6 +4,8 @@
 
 import { createRequire } from "node:module";
 import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
+import type { LanguageModel } from "ai";
+import { classifyError, type ErrorClass } from "./cell-errors.js";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -20,16 +22,35 @@ export const SDK_VERSION: string = (() => {
 export interface AgentLikeResult {
   text?: string;
   finishReason?: string;
-  steps: Array<{
-    toolCalls?: Array<{ toolName: string; input?: unknown }>;
-    usage?: {
-      inputTokens?: number;
-      outputTokens?: number;
-      cachedInputTokens?: number;
-      cacheCreationInputTokens?: number;
-      totalTokens?: number;
-    };
-  }>;
+  steps: AgentStep[];
+}
+
+/** One agent-loop step, as found in `AgentLikeResult.steps` and passed to `onStepFinish`. */
+export interface AgentStep {
+  /** `"length"` means the step stopped on the output-token limit (truncated). */
+  finishReason?: string;
+  toolCalls?: Array<{ toolName: string; input?: unknown }>;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    totalTokens?: number;
+  };
+}
+
+/**
+ * Collects each completed step as the loop runs (wire `record` into
+ * `ToolLoopAgent({ onStepFinish })`). When a later step throws, `generate()`
+ * returns nothing, so `meter` falls back to these steps to keep the usage, cost
+ * and truncation the cell already incurred. Their tool calls are never scored.
+ */
+export class StepRecorder {
+  readonly steps: AgentStep[] = [];
+
+  readonly record = (step: AgentStep): void => {
+    this.steps.push(step);
+  };
 }
 
 export interface ModelPrice {
@@ -100,6 +121,8 @@ export interface MeterContext {
    * `toolName` may differ from the canonical id; this map restores it.
    */
   nameToId?: ReadonlyMap<string, string>;
+  /** AI SDK provider id of the model (see {@link providerOf}); stamped on the row. */
+  provider?: string;
 }
 
 const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
@@ -107,31 +130,39 @@ const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
 /**
  * Run `generate`, time it, and roll the result into a `CellResult`. Returns the
  * row plus the trace of tool calls so judges can run on the same captured data
- * without re-driving the agent.
+ * without re-driving the agent. When `generate` throws, the row's usage and cost
+ * come from the steps `recorder` saw complete, so a mid-loop failure keeps its
+ * cost; the scored trace (tool calls, turns) stays empty so the cell still fails.
  */
 export async function meter(
   ctx: MeterContext,
   generate: () => Promise<AgentLikeResult>,
   pricing: PricingTable = DEFAULT_PRICING,
+  recorder?: StepRecorder,
 ): Promise<{ cell: CellResult; raw: AgentLikeResult | null }> {
   const startedAt = Date.now();
   let raw: AgentLikeResult | null = null;
   let error: string | null = null;
+  let errorClass: ErrorClass | undefined;
   try {
     raw = await generate();
   } catch (err) {
     error = (err as Error).message ?? String(err);
+    errorClass = classifyError(err);
   }
   const wallMs = Date.now() - startedAt;
 
-  const summary = summarize(raw, ctx.nameToId);
+  // `trace` feeds the judges: empty when generate threw, so an errored cell never
+  // scores on its partial trace. `usage` meters what the cell spent either way.
+  const trace = summarize(raw, ctx.nameToId);
+  const usage = raw || !recorder ? trace : summarize({ steps: recorder.steps }, ctx.nameToId);
   const dollars = dollarCost(
     ctx.model,
     {
-      input: summary.inputTokens,
-      output: summary.outputTokens,
-      cachedInput: summary.cachedInputTokens,
-      cacheCreation: summary.cacheCreationTokens,
+      input: usage.inputTokens,
+      output: usage.outputTokens,
+      cachedInput: usage.cachedInputTokens,
+      cacheCreation: usage.cacheCreationTokens,
     },
     pricing,
   );
@@ -141,32 +172,36 @@ export async function meter(
     category: ctx.category ?? null,
     arm: ctx.arm,
     model: ctx.model,
+    provider: ctx.provider,
     run_index: ctx.runIndex,
     ratel_version: SDK_VERSION,
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
     seed: ctx.seed,
-    input_tokens: summary.inputTokens,
-    output_tokens: summary.outputTokens,
-    cached_input_tokens: summary.cachedInputTokens,
-    cache_creation_tokens: summary.cacheCreationTokens,
-    total_tokens: summary.totalTokens,
-    tool_calls_total: summary.toolCallsTotal,
-    tool_calls_unique: summary.toolCallsUnique,
-    gateway_calls: summary.gatewayCalls,
-    non_gateway_calls: summary.nonGatewayCalls,
-    turns: summary.turns,
-    effective_tool_ids: summary.effectiveToolIds,
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cached_input_tokens: usage.cachedInputTokens,
+    cache_creation_tokens: usage.cacheCreationTokens,
+    total_tokens: usage.totalTokens,
+    tool_calls_total: trace.toolCallsTotal,
+    tool_calls_unique: trace.toolCallsUnique,
+    gateway_calls: trace.gatewayCalls,
+    non_gateway_calls: trace.nonGatewayCalls,
+    turns: trace.turns,
+    effective_tool_ids: trace.effectiveToolIds,
     programmatic_verdict: "n/a" as ProgrammaticVerdict,
     ast_verdict: "n/a" as ProgrammaticVerdict,
     judge_verdict: "n/a",
     final_text: raw?.text ?? "",
     finish_reason: raw?.finishReason ?? (error ? "error" : "unknown"),
     error,
+    error_class: errorClass,
+    truncated_steps: usage.truncatedSteps,
+    max_step_output_tokens: usage.maxStepOutputTokens,
     wall_ms: wallMs,
     dollar_cost: dollars,
-    tool_calls: summary.toolCalls,
+    tool_calls: trace.toolCalls,
   };
   return { cell, raw };
 }
@@ -184,6 +219,18 @@ interface Summary {
   turns: number;
   toolCalls: ToolCall[];
   effectiveToolIds: string[];
+  /** Steps with `finishReason: "length"` (hit the output-token limit). */
+  truncatedSteps: number;
+  /** Largest `outputTokens` of any single step. */
+  maxStepOutputTokens: number;
+}
+
+/**
+ * AI SDK provider id of a model (`anthropic.messages`, `amazon-bedrock`, ...);
+ * undefined for a plain string id, which the SDK resolves elsewhere.
+ */
+export function providerOf(model: LanguageModel): string | undefined {
+  return typeof model === "string" ? undefined : model.provider;
 }
 
 /**
@@ -259,6 +306,8 @@ export function summarize(
       turns: 0,
       toolCalls: [],
       effectiveToolIds: [],
+      truncatedSteps: 0,
+      maxStepOutputTokens: 0,
     };
   }
   let input = 0;
@@ -269,9 +318,13 @@ export function summarize(
   const calls: ToolCall[] = [];
   let gateway = 0;
   let nonGateway = 0;
+  let truncatedSteps = 0;
+  let maxStepOutput = 0;
   for (const step of result.steps) {
+    if (step.finishReason === "length") truncatedSteps++;
     const u = step.usage;
     if (u) {
+      maxStepOutput = Math.max(maxStepOutput, u.outputTokens ?? 0);
       input += u.inputTokens ?? 0;
       output += u.outputTokens ?? 0;
       cached += u.cachedInputTokens ?? 0;
@@ -307,5 +360,7 @@ export function summarize(
     turns: result.steps.length,
     toolCalls: calls,
     effectiveToolIds: effectiveToolIds(calls),
+    truncatedSteps,
+    maxStepOutputTokens: maxStepOutput,
   };
 }

@@ -3,6 +3,7 @@
 // files without an adapter.
 
 import type { LanguageModel } from "ai";
+import type { ErrorClass } from "./cell-errors.js";
 
 export interface ToolSpec {
   id: string;
@@ -156,6 +157,8 @@ export interface CellResult {
   category: string | null;
   arm: Arm;
   model: string;
+  /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
+  provider?: string;
   run_index: number;
   /** `@ratel-ai/sdk` version this row was produced against. Cache key dimension. */
   ratel_version: string;
@@ -207,6 +210,15 @@ export interface CellResult {
   final_text: string;
   finish_reason: string;
   error: string | null;
+  /**
+   * Taxonomy class of `error` (see `cell-errors.ts`). Set only on errored rows;
+   * legacy rows lack it and are classified from the message instead.
+   */
+  error_class?: ErrorClass;
+  /** Steps that stopped on the output-token limit (`finishReason: "length"`). */
+  truncated_steps?: number;
+  /** Largest single-step `outputTokens`; the headroom signal for output caps. */
+  max_step_output_tokens?: number;
   // Performance
   wall_ms: number;
   dollar_cost: number;

@@ -1,12 +1,17 @@
 import type { ExecutableTool } from "@ratel-ai/sdk";
+import { APICallError } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import type { ToolSpec } from "../types.js";
+import { CellTimeoutError } from "../cell-errors.js";
+import type { AgentRunInput, ToolSpec } from "../types.js";
 import {
   buildToolBundle,
   emptyToolBundle,
   normalizeInputSchema,
   registerGateway,
+  runMeteredLoop,
   sanitizeToolName,
+  withTimeout,
 } from "./_shared.js";
 
 describe("sanitizeToolName", () => {
@@ -139,5 +144,121 @@ describe("registerGateway", () => {
     const bundle = emptyToolBundle();
     registerGateway(stub, bundle);
     expect(() => registerGateway(stub, bundle)).toThrow(/already registered/);
+  });
+});
+
+describe("withTimeout", () => {
+  it("rejects with CellTimeoutError, message unchanged", async () => {
+    const never = new Promise<never>(() => {});
+    const err = await withTimeout(never, 5).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CellTimeoutError);
+    expect((err as Error).message).toBe("run timed out after 5ms");
+  });
+});
+
+describe("runMeteredLoop", () => {
+  const spec: ToolSpec = {
+    id: "fs.read_file",
+    name: "read_file",
+    description: "Read a file from disk.",
+    input_schema: { type: "object", properties: { path: { type: "string" } } },
+  };
+
+  const usage = (input: number, output: number) => ({
+    inputTokens: { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: output, text: output, reasoning: 0 },
+  });
+
+  function input(model: MockLanguageModelV3): AgentRunInput {
+    return {
+      scenario: {
+        id: "s-1",
+        prompt: "read /etc/hosts",
+        candidate_pool: [spec],
+        gold_tools: [spec.id],
+      },
+      pool: [spec],
+      poolSize: 1,
+      model: { id: "priced-model", model },
+      runIndex: 0,
+      topK: 5,
+      retriever: "bm25",
+      maxSteps: 5,
+      perRunTimeoutMs: 5_000,
+      seed: 1,
+      pricing: {
+        "priced-model": {
+          inputPer1M: 1,
+          outputPer1M: 5,
+          cachedInputPer1M: 0,
+          cacheCreationPer1M: 0,
+        },
+      },
+    };
+  }
+
+  it("keeps usage of completed steps when a later step throws", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        call++;
+        if (call === 1) {
+          return {
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "c1",
+                toolName: "fs_read_file",
+                input: JSON.stringify({ path: "/etc/hosts" }),
+              },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool_use" },
+            usage: usage(120, 30),
+            warnings: [],
+          };
+        }
+        // Non-retryable, so the SDK's real backoff never runs.
+        throw new APICallError({
+          message: "tools: too many tools",
+          url: "https://api.test/v1",
+          requestBodyValues: {},
+          statusCode: 400,
+          isRetryable: false,
+        });
+      },
+    });
+
+    const cell = await runMeteredLoop("control-baseline", input(model), buildToolBundle([spec]));
+
+    expect(call).toBe(2);
+    expect(cell.error).toMatch(/too many tools/);
+    expect(cell.error_class).toBe("request");
+    expect(cell.input_tokens).toBe(120);
+    expect(cell.output_tokens).toBe(30);
+    expect(cell.max_step_output_tokens).toBe(30);
+    expect(cell.dollar_cost).toBeGreaterThan(0);
+    // The partial trace is not scored: an errored cell stays a fail.
+    expect(cell.effective_tool_ids).toEqual([]);
+    expect(cell.turns).toBe(0);
+  });
+
+  it("stamps provider = model.provider and records per-step truncation", async () => {
+    const model = new MockLanguageModelV3({
+      provider: "mock-provider",
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "partial" }],
+        finishReason: { unified: "length", raw: "max_tokens" },
+        usage: usage(10, 64),
+        warnings: [],
+      }),
+    });
+
+    const cell = await runMeteredLoop("control-baseline", input(model), buildToolBundle([spec]));
+
+    expect(cell.error).toBeNull();
+    expect(cell.provider).toBe("mock-provider");
+    expect(cell.finish_reason).toBe("length");
+    expect(cell.truncated_steps).toBe(1);
+    expect(cell.max_step_output_tokens).toBe(64);
   });
 });
