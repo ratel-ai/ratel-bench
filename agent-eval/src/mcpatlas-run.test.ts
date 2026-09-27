@@ -8,18 +8,23 @@ import { CODEX_PRICING, codexLockdown } from "./mcpatlas-codex.js";
 import type { JudgeClaimsArgs } from "./mcpatlas-judge.js";
 import { SYSTEM_PROMPT_ADDENDUM } from "./mcpatlas-prompt.js";
 import {
+  abortAfterConsecutiveErrorsFromEnv,
   ambientOutputCapWarning,
   appendJsonl,
   buildQueue,
   buildRunConfig,
   type CampaignSummary,
+  campaignExitCode,
   cellKeyFor,
   collectNativeBaselineMs,
   computeConfigHash,
+  createInfraErrorBreaker,
   drainNativeCache,
+  formatAbortLine,
   formatDoneLine,
   freezeConfig,
   makeScratch,
+  mergeCampaignSummaries,
   missingFromSandbox,
   nativeCacheContext,
   nativeCacheKey,
@@ -684,9 +689,21 @@ describe("collectNativeBaselineMs", () => {
 });
 
 describe("runCampaign", () => {
-  function fakeResult(dollarCost: number, error: string | null = null) {
+  function fakeResult(
+    dollarCost: number,
+    error: string | null = null,
+    finish_reason = "success",
+    judgeError: string | null = null,
+  ) {
     return {
-      cell: { cell_key: "k", error, task_pass: !error } as unknown as McpAtlasCell,
+      cell: {
+        cell_key: "k",
+        error,
+        finish_reason,
+        task_pass: !error && !judgeError,
+        judge_verdict: judgeError ? "n/a" : "pass",
+        claim_rubric: { judge_error: judgeError, verdict: judgeError ? "n/a" : "pass" },
+      } as unknown as McpAtlasCell,
       toolCallRows: [],
       searchEventRows: [],
       retrievalRows: [],
@@ -779,6 +796,351 @@ describe("runCampaign", () => {
     const summary = await done;
     expect(summary.cells_run).toBe(3);
   });
+
+  describe("consecutive infra-error breaker", () => {
+    // Cell shapes by class (mcpatlas-cell-errors.ts): a status the harness
+    // reports, a gated model, then the non-infra kinds.
+    const INFRA_503 = { error: "API Error: 503 Service Unavailable", finish_reason: "success" };
+    const ACCESS = {
+      error: "API Error: 403 model not available for this account",
+      finish_reason: "success",
+    };
+    const TIMEOUT = { error: "claude run timed out", finish_reason: "error_timeout" };
+    const MAX_TURNS = { error: "Reached max turns (256)", finish_reason: "error_max_turns" };
+    const OUTCOME = { error: "the model gave up", finish_reason: "success" };
+    const REQUEST = { error: "API Error: 400 bad request", finish_reason: "success" };
+    const OK = { error: null, finish_reason: "success" };
+    type Shape = { error: string | null; finish_reason: string; judgeError?: string | null };
+
+    const runShape = async (s: Shape) => fakeResult(0.1, s.error, s.finish_reason, s.judgeError);
+
+    function campaign(shapes: readonly Shape[], k: number, concurrency = 1) {
+      const delivered: string[] = [];
+      const done = runCampaign(shapes, {
+        concurrency,
+        dollarCap: null,
+        quiet: true,
+        breaker: createInfraErrorBreaker(k),
+        runOne: runShape,
+        onCell: (r) => delivered.push(r.cell.error ?? "ok"),
+      });
+      return { done, delivered };
+    }
+
+    it("runCampaign stops after K consecutive infra errors", async () => {
+      const shapes = [OK, INFRA_503, ACCESS, INFRA_503, OK, OK, OK];
+      const { done, delivered } = campaign(shapes, 3);
+      const summary = await done;
+      expect(summary.stopped_reason).toBe("error_circuit");
+      expect(summary.cells_run).toBe(4);
+      expect(summary.cells_skipped).toBe(3);
+      expect(delivered).toHaveLength(4);
+      expect(summary.abort_reason).toBe(
+        "3 consecutive infra-errored cells (last: transient: API Error: 503 Service Unavailable)",
+      );
+    });
+
+    it("stops after repeated judge access failures while their cells remain unscored", async () => {
+      const gated = {
+        ...OK,
+        judgeError: "judge failed: Bedrock AccessDeniedException: model access denied",
+      };
+      const delivered: McpAtlasCell[] = [];
+      const summary = await runCampaign([gated, gated, gated], {
+        concurrency: 1,
+        dollarCap: null,
+        quiet: true,
+        breaker: createInfraErrorBreaker(2),
+        runOne: runShape,
+        onCell: (r) => delivered.push(r.cell),
+      });
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 2,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining("access: Bedrock AccessDeniedException"),
+      });
+      expect(delivered.map((c) => [c.error, c.claim_rubric.judge_error, c.judge_verdict])).toEqual([
+        [null, gated.judgeError, "n/a"],
+        [null, gated.judgeError, "n/a"],
+      ]);
+    });
+
+    it("counts exhausted judge throttles; an unrelated judge failure leaves the streak intact", async () => {
+      const throttled = {
+        ...OK,
+        judgeError: "judge failed: Failed after 7 attempts. Last error: Too many requests",
+      };
+      const unparseable = { ...OK, judgeError: "judge failed: No object generated" };
+      const summary = await campaign([throttled, unparseable, throttled, OK], 2).done;
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 3,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining("transient: Failed after 7 attempts"),
+      });
+    });
+
+    it.each([
+      ["ResourceNotFoundException: requested model identifier could not be resolved", "access"],
+      [
+        "ValidationException: Invocation of model ID with on-demand throughput isn't supported",
+        "access",
+      ],
+      ["ExpiredTokenException: security token has expired", "transient"],
+      ["ModelNotReadyException: model is warming up", "transient"],
+    ] as const)("trips on repeated Bedrock judge failure: %s", async (message, cls) => {
+      const failed = { ...OK, judgeError: `judge failed: ${message}` };
+      const summary = await campaign([failed, failed, OK], 2).done;
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 2,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining(`${cls}: ${message}`),
+      });
+    });
+
+    it("does not treat every judge ValidationException as an access gate", async () => {
+      const invalid = {
+        ...OK,
+        judgeError: "judge failed: ValidationException: request payload is malformed",
+      };
+      const summary = await campaign([invalid, invalid, OK], 2).done;
+      expect(summary).toMatchObject({ stopped_reason: "completed", cells_run: 3 });
+    });
+
+    it("a success resets the count", async () => {
+      const shapes = [INFRA_503, INFRA_503, OK, INFRA_503, INFRA_503, OK, INFRA_503, INFRA_503];
+      const summary = await campaign(shapes, 3).done;
+      expect(summary.stopped_reason).toBe("completed");
+      expect(summary.cells_run).toBe(8);
+      expect(summary.abort_reason).toBeUndefined();
+    });
+
+    it("is off at 0", async () => {
+      const summary = await campaign(Array(12).fill(ACCESS), 0).done;
+      expect(summary.stopped_reason).toBe("completed");
+      expect(summary.cells_run).toBe(12);
+    });
+
+    it("is off when no breaker is passed", async () => {
+      const summary = await runCampaign(Array(12).fill(ACCESS), {
+        concurrency: 1,
+        dollarCap: null,
+        quiet: true,
+        runOne: runShape,
+        onCell: () => {},
+      });
+      expect(summary.stopped_reason).toBe("completed");
+    });
+
+    it("timeouts, max-turns, request and outcome errors never count", async () => {
+      const shapes = [TIMEOUT, MAX_TURNS, REQUEST, OUTCOME, TIMEOUT, MAX_TURNS, REQUEST, OUTCOME];
+      const summary = await campaign(shapes, 2).done;
+      expect(summary.stopped_reason).toBe("completed");
+      expect(summary.cells_run).toBe(8);
+    });
+
+    // Only an error-free cell proves the model reachable; a timeout or 4xx does not.
+    it("non-infra errors neither count nor reset", async () => {
+      const shapes = [INFRA_503, TIMEOUT, MAX_TURNS, REQUEST, OUTCOME, INFRA_503, OK];
+      const summary = await campaign(shapes, 2).done;
+      expect(summary.stopped_reason).toBe("error_circuit");
+      expect(summary.cells_run).toBe(6);
+    });
+
+    it("stops launching new cells but still delivers the in-flight ones", async () => {
+      const resolvers: Array<() => void> = [];
+      const runOne = vi.fn(
+        (s: Shape) =>
+          new Promise<ReturnType<typeof fakeResult>>((resolve) =>
+            resolvers.push(() => resolve(fakeResult(0.1, s.error, s.finish_reason))),
+          ),
+      );
+      const delivered: string[] = [];
+      const breaker = createInfraErrorBreaker(2);
+      const done = runCampaign(Array(10).fill(INFRA_503), {
+        concurrency: 3,
+        dollarCap: null,
+        quiet: true,
+        breaker,
+        runOne,
+        onCell: (r) => delivered.push(r.cell.error ?? "ok"),
+      });
+      const flush = () => new Promise((r) => setTimeout(r, 0));
+      expect(runOne).toHaveBeenCalledTimes(3);
+
+      // Cells 0 and 1 trip it; cell 0's worker launched cell 3 before the trip.
+      resolvers[0]();
+      await flush();
+      resolvers[1]();
+      await flush();
+      expect(breaker.tripReason).not.toBeNull();
+      expect(runOne).toHaveBeenCalledTimes(4);
+      expect(delivered).toHaveLength(2);
+
+      // Cells 2 and 3 were in flight at the trip: both still reach onCell.
+      resolvers[2]();
+      resolvers[3]();
+      const summary = await done;
+      expect(runOne).toHaveBeenCalledTimes(4);
+      expect(delivered).toHaveLength(4);
+      expect(summary).toMatchObject({
+        cells_run: 4,
+        cells_skipped: 6,
+        stopped_reason: "error_circuit",
+      });
+    });
+
+    // Envelope errors embed stderr; the reason must stay one log line.
+    it("flattens a multi-line error into a one-line abort reason", async () => {
+      const MULTILINE = {
+        error:
+          "claude produced no parseable result envelope (timedOut=false, exitCode=1, signal=null): Error: boom\n    at x (cli.js:1:1)\n",
+        finish_reason: "error",
+      };
+      const summary = await campaign([MULTILINE, MULTILINE], 2).done;
+      expect(summary.stopped_reason).toBe("error_circuit");
+      expect(summary.abort_reason).toBe(
+        "2 consecutive infra-errored cells (last: transient: claude produced no parseable result envelope (timedOut=false, exitCode=1, signal=null): Error: boom at x (cli.js:1:1))",
+      );
+      expect(formatAbortLine("m", summary)).not.toContain("\n");
+    });
+
+    // Flatten before slicing, so the cap counts one-line chars.
+    it("caps the last error at 200 chars", async () => {
+      const msg = `claude produced no parseable result envelope (timedOut=false, exitCode=1, signal=null): ${"x\n".repeat(300)}`;
+      const LONG = { error: msg, finish_reason: "error" };
+      const summary = await campaign([LONG, LONG], 2).done;
+      const flat = msg.replace(/\s+/g, " ").trim();
+      expect(summary.abort_reason).toBe(
+        `2 consecutive infra-errored cells (last: transient: ${flat.slice(0, 200)})`,
+      );
+    });
+
+    // Needs concurrency > 1: worker A hits the cap after cell 0 (stopped=true)
+    // while worker B's cell 1 trips the breaker, so both stops are set at once.
+    // The trip must win, or the pass exits 0 with no aborted: line.
+    it("a trip outranks a dollar-cap stop in the same campaign", async () => {
+      const summary = await runCampaign([INFRA_503, INFRA_503, INFRA_503], {
+        concurrency: 2,
+        dollarCap: 0.1,
+        quiet: true,
+        breaker: createInfraErrorBreaker(2),
+        runOne: runShape,
+        onCell: () => {},
+      });
+      expect(summary).toMatchObject({
+        cells_run: 2,
+        cells_skipped: 1,
+        stopped_reason: "error_circuit",
+        abort_reason: expect.stringMatching(/^2 consecutive infra-errored cells/),
+      });
+    });
+
+    // main() shares one breaker between the native and ratel passes, so the
+    // ratel pass never starts on a model the native pass found broken.
+    it("a breaker tripped by an earlier campaign stops the next before it launches", async () => {
+      const breaker = createInfraErrorBreaker(2);
+      await runCampaign([INFRA_503, INFRA_503], {
+        concurrency: 1,
+        dollarCap: null,
+        quiet: true,
+        breaker,
+        runOne: runShape,
+        onCell: () => {},
+      });
+      const runOne = vi.fn(runShape);
+      const next = await runCampaign([OK, OK, OK], {
+        concurrency: 1,
+        dollarCap: null,
+        quiet: true,
+        breaker,
+        runOne,
+        onCell: () => {},
+      });
+      expect(runOne).not.toHaveBeenCalled();
+      expect(next).toMatchObject({
+        cells_run: 0,
+        cells_skipped: 3,
+        stopped_reason: "error_circuit",
+        abort_reason: expect.stringMatching(/^2 consecutive infra-errored cells/),
+      });
+    });
+  });
+});
+
+// Same grammar as agent/'s breakerThresholdFromEnv: one build env sets the
+// knob for both packages, so both must accept exactly the same values.
+describe("abortAfterConsecutiveErrorsFromEnv", () => {
+  const KEY = "RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS";
+
+  it("defaults to 10 when unset", () => {
+    expect(abortAfterConsecutiveErrorsFromEnv({})).toBe(10);
+  });
+
+  it("accepts 0 (off) and non-negative integers, padding allowed", () => {
+    expect(abortAfterConsecutiveErrorsFromEnv({ [KEY]: "0" })).toBe(0);
+    expect(abortAfterConsecutiveErrorsFromEnv({ [KEY]: "25" })).toBe(25);
+    expect(abortAfterConsecutiveErrorsFromEnv({ [KEY]: " 3 " })).toBe(3);
+    expect(abortAfterConsecutiveErrorsFromEnv({ [KEY]: "03" })).toBe(3);
+    expect(abortAfterConsecutiveErrorsFromEnv({ [KEY]: "9007199254740991" })).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it("rejects anything else, empty included, naming the variable and the value", () => {
+    for (const raw of ["", "-1", "1.5", "abc", "1e3", "off", "9007199254740993"]) {
+      expect(() => abortAfterConsecutiveErrorsFromEnv({ [KEY]: raw })).toThrow(
+        `${KEY} must be a non-negative integer (got "${raw}")`,
+      );
+    }
+  });
+});
+
+describe("mergeCampaignSummaries / campaignExitCode", () => {
+  const base: CampaignSummary = {
+    cells_run: 2,
+    cells_skipped: 1,
+    total_dollars: 1.5,
+    stopped_reason: "completed",
+  };
+
+  it("sums counts; completed only when both passes completed", () => {
+    expect(mergeCampaignSummaries(base, base)).toEqual<CampaignSummary>({
+      cells_run: 4,
+      cells_skipped: 2,
+      total_dollars: 3,
+      stopped_reason: "completed",
+    });
+    expect(
+      mergeCampaignSummaries(base, { ...base, stopped_reason: "global_cap" }).stopped_reason,
+    ).toBe("global_cap");
+  });
+
+  it("error_circuit wins over global_cap and keeps the abort reason", () => {
+    const tripped: CampaignSummary = {
+      ...base,
+      stopped_reason: "error_circuit",
+      abort_reason: "2 consecutive infra-errored cells (last: access: x)",
+    };
+    for (const merged of [
+      mergeCampaignSummaries(tripped, { ...base, stopped_reason: "global_cap" }),
+      mergeCampaignSummaries({ ...base, stopped_reason: "global_cap" }, tripped),
+    ]) {
+      expect(merged.stopped_reason).toBe("error_circuit");
+      expect(merged.abort_reason).toBe(tripped.abort_reason);
+    }
+  });
+
+  it("exits 2 on error_circuit only; a dollar cap stop stays 0", () => {
+    expect(campaignExitCode(base)).toBe(0);
+    expect(campaignExitCode({ ...base, stopped_reason: "global_cap" })).toBe(0);
+    expect(campaignExitCode({ ...base, stopped_reason: "error_circuit" })).toBe(2);
+  });
 });
 
 describe("formatDoneLine", () => {
@@ -802,6 +1164,23 @@ describe("formatDoneLine", () => {
       stopped_reason: "global_cap",
     };
     expect(formatDoneLine(summary, 0)).toContain("stopped=global_cap");
+  });
+
+  it("reports error_circuit in the same shape, with an aborted: line beside it", () => {
+    const summary: CampaignSummary = {
+      cells_run: 10,
+      cells_skipped: 100,
+      total_dollars: 0,
+      stopped_reason: "error_circuit",
+      abort_reason: "10 consecutive infra-errored cells (last: access: x)",
+    };
+    expect(formatDoneLine(summary, 0)).toBe(
+      "done: 10 cells run, 0 cached, 100 skipped, $0.0000 spent, stopped=error_circuit",
+    );
+    expect(formatAbortLine("claude-haiku-4-5", summary)).toBe(
+      "aborted: claude-haiku-4-5 — 10 consecutive infra-errored cells (last: access: x)",
+    );
+    expect(formatAbortLine("claude-haiku-4-5", { ...summary, abort_reason: undefined })).toBe(null);
   });
 });
 

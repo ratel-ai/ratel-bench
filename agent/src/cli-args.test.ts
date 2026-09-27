@@ -158,6 +158,40 @@ describe("output cap flags", () => {
   });
 });
 
+describe("rerun flags", () => {
+  it("default to --retry-errors infra, --max-attempts 3, --retry-rounds 1, --retry-delay-s 60", () => {
+    expect(parse().rerun).toEqual({ policy: "infra", maxAttempts: 3, rounds: 1, delayMs: 60_000 });
+  });
+
+  it("parse --retry-errors, --max-attempts (0 = unlimited), --retry-rounds, --retry-delay-s", () => {
+    const args = parse(
+      "--retry-errors",
+      "all",
+      "--max-attempts",
+      "0",
+      "--retry-rounds",
+      "0",
+      "--retry-delay-s",
+      "5",
+    );
+    expect(args.rerun).toEqual({ policy: "all", maxAttempts: 0, rounds: 0, delayMs: 5_000 });
+  });
+
+  it("reject bad values", () => {
+    expect(() => parse("--retry-errors", "transient")).toThrow(
+      '--retry-errors must be infra, all or none (got "transient")',
+    );
+    for (const flag of ["--max-attempts", "--retry-rounds", "--retry-delay-s"]) {
+      for (const bad of ["-1", "1.5", "x"]) {
+        expect(() => parse(flag, bad)).toThrow(`${flag} must be a non-negative integer`);
+      }
+      expect(() => parse(flag)).toThrow(`missing value for ${flag}`);
+    }
+    // The delay becomes a timer: at most 2147483 s.
+    expect(() => parse("--retry-delay-s", "2147484")).toThrow(/--retry-delay-s must be ≤ 2147483/);
+  });
+});
+
 describe("parseRejudgeArgs", () => {
   it("parses --judge-max-output-tokens N; unset by default", () => {
     expect(

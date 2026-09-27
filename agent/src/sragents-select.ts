@@ -13,8 +13,10 @@
 //   retrieved@k=P       → full pool (baseline)   retrieved@k=K_ratel → ratel list
 //   golden_answer       → oracle
 //
-// Pure core (`buildCandidateSets`, `selectForCell`) + a CLI shell that meters
-// tokens/cost/latency and appends one cell per (instance, arm, model) to agent.jsonl.
+// Pure core (`buildCandidateSets`, `selectForCell`, `planCells`) + a CLI shell that
+// meters tokens/cost/latency and appends one cell per (instance, arm, model) to
+// agent.jsonl. Resume, retry rounds, the breaker and the final `done:` line work as
+// in `pnpm start` (see `rerun.ts`, `createBreaker`).
 
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,11 +26,19 @@ import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, type LanguageModelUsage, NoObjectGeneratedError, RetryError } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
-import { classifyError, isRerunnable } from "./cell-errors.js";
+import {
+  classifyError,
+  FatalProviderError,
+  isRerunnable,
+  type RerunPolicy,
+} from "./cell-errors.js";
 import { parseOutputCapFlag } from "./cli-args.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import {
+  breakerLine,
+  breakerThresholdFromEnv,
   cellRetry,
+  createBreaker,
   type RetrySettings,
   retrySettingsFromEnv,
   retrySettingsLine,
@@ -54,6 +64,29 @@ const PRICING = loadModelPricing();
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
 import { parseTimerMs } from "./positive-int.js";
+import {
+  applyRerunFlag,
+  capGuardRows,
+  countResume,
+  DEFAULT_RERUN_SETTINGS,
+  type DoneSummary,
+  doneLines,
+  emptyResumeCounts,
+  newRunTally,
+  nextAttempt,
+  planResume,
+  type RERUN_FLAGS,
+  type RerunSettings,
+  type ResumeCounts,
+  requeuedTotal,
+  rerunLabel,
+  rerunOutcome,
+  rerunSettingsLine,
+  resumeLine,
+  runExitCode,
+  runRounds,
+  tallyRow,
+} from "./rerun.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -65,6 +98,17 @@ const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
 /** `--timeout-ms` default: active time per selection call (retry sleeps don't count). */
 const DEFAULT_TIMEOUT_MS = 300_000;
+/**
+ * `RERUN_FLAGS`, spelled out (the type keeps them in sync): ratel-bench-aws
+ * `bench-flags.mjs` passes a flag to SR only when this file holds it as a quoted
+ * literal, like `"--timeout-ms"` below.
+ */
+const SR_RERUN_FLAGS: typeof RERUN_FLAGS = [
+  "--retry-errors",
+  "--max-attempts",
+  "--retry-rounds",
+  "--retry-delay-s",
+];
 
 /** Control arms don't use Ratel retrieval, so their cells are version-independent
  *  and reusable across ratel versions (re-stamped to the current version). */
@@ -299,7 +343,9 @@ export interface SelectArgs {
  * Prompt the model with the arm's candidates and meter the call into a row. The
  * model is wrapped by the retry policy (the SDK's own retries are off) and the
  * call is aborted after `timeoutMs` of active time; the retry counters and the
- * policy are stamped on the row, errored or not.
+ * policy are stamped on the row, errored or not. A fatal provider error (gated
+ * model, daily cap) writes no row: it is rethrown as a `FatalProviderError` after
+ * metering, carrying the call's spend (`dollarCost`).
  */
 export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
   const { ids, poolSize } = armCandidates(args.arm, args.sc, args.seed);
@@ -369,7 +415,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     // is a guard in case SDK retries are re-enabled (only that last call is billed).
     const cause = RetryError.isInstance(err) ? err.lastError : err;
     const noObject = NoObjectGeneratedError.isInstance(cause) ? cause : undefined;
-    return {
+    const row: SragentsSelectCell = {
       ...base,
       ...retry.rowFields(),
       ...(noObject ? usageFields(args.model.id, noObject.usage) : {}),
@@ -381,6 +427,12 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       // provider's, yet even an instant 429 flips the class.
       error_class: classifyError(err, { retries: retry.stats.retries }),
     };
+    if (retry.stats.fatal) {
+      const fatal = err instanceof FatalProviderError ? err : new FatalProviderError(err);
+      fatal.dollarCost = row.dollar_cost;
+      throw fatal;
+    }
+    return row;
   }
 }
 
@@ -409,59 +461,156 @@ export interface Task {
   query: string;
   model: RunnerModel;
   runIndex: number;
+  /** Live attempt at the cell (prior live attempts + 1, see `planCells`); unset = 1. */
+  attempt?: number;
 }
 
-async function runCampaign(
-  tasks: Task[],
-  opts: {
-    concurrency: number;
-    dollarCap: number;
-    seed: number;
-    quiet: boolean;
-    onCell: (c: SragentsSelectCell) => void;
-    catalog: Map<string, { name: string; description: string }>;
-    timeoutMs: number;
-    retry: RetrySettings;
-  },
-): Promise<{ cells: number; dollars: number; stopped: boolean }> {
-  let i = 0;
-  let dollars = 0;
-  let stopped = false;
-  let done = 0;
-  const total = tasks.length;
+export interface CampaignOptions {
+  concurrency: number;
+  dollarCap: number;
+  seed: number;
+  quiet: boolean;
+  onCell: (c: SragentsSelectCell) => void;
+  catalog: Map<string, { name: string; description: string }>;
+  timeoutMs: number;
+  retry: RetrySettings;
+  /** Which errored rows the retry rounds re-run, and the rounds themselves. */
+  rerun: RerunSettings;
+  /** The breaker's streak (`RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`; 0 = off). */
+  abortAfterConsecutiveErrors: number;
+}
 
-  async function worker(): Promise<void> {
-    while (true) {
+/** The campaign's share of the `done:` counts (the cache and resume add the rest). */
+export type CampaignSummary = Omit<DoneSummary, "cells_cached" | "cells_skipped">;
+
+type QueuedTask = Task & { attempt: number };
+
+/**
+ * Run `tasks` on a bounded worker pool under a best-effort dollar cap, stamping
+ * each row's `attempt` and handing it to `onCell`. A per-model breaker skips an
+ * aborted model's remaining tasks: a `FatalProviderError` cell writes no row
+ * (in-flight ones too), and so aborts its model at once, as do K consecutive
+ * `transient|access` rows. After the main pass, up to `rerun.rounds` retry
+ * rounds re-run the rerunnable cells under the same cap.
+ */
+export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise<CampaignSummary> {
+  const breaker = createBreaker(opts.abortAfterConsecutiveErrors);
+  const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
+  const tally = newRunTally();
+  let dollars = 0;
+  let capHit = false;
+  let done = 0;
+  let total = tasks.length;
+
+  const spend = (dollarCost: number): void => {
+    dollars += dollarCost;
+    if (dollars >= opts.dollarCap) capHit = true;
+  };
+
+  const runPass = async (queue: QueuedTask[]): Promise<QueuedTask[]> => {
+    const retryable: QueuedTask[] = [];
+    let i = 0;
+    const pick = (): QueuedTask | null => {
       if (dollars >= opts.dollarCap) {
-        stopped = true;
-        return;
+        capHit = true;
+        return null;
       }
-      const idx = i++;
-      if (idx >= tasks.length) return;
-      const t = tasks[idx];
-      const cell = await selectForCell({
-        ...t,
-        seed: opts.seed,
-        catalog: opts.catalog,
-        timeoutMs: opts.timeoutMs,
-        retry: opts.retry,
-      });
-      dollars += cell.dollar_cost;
-      opts.onCell(cell);
-      done++;
-      if (!opts.quiet) {
-        const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
-        console.log(
-          `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
-            `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
-            `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
-        );
+      while (i < queue.length) {
+        const t = queue[i++];
+        if (!breaker.isAborted(t.model.id)) return t;
+      }
+      return null;
+    };
+
+    async function worker(): Promise<void> {
+      while (true) {
+        const t = pick();
+        if (!t) return;
+        let cell: SragentsSelectCell;
+        try {
+          cell = await selectForCell({
+            ...t,
+            seed: opts.seed,
+            catalog: opts.catalog,
+            timeoutMs: opts.timeoutMs,
+            retry,
+          });
+        } catch (err) {
+          if (!(err instanceof FatalProviderError)) throw err;
+          breaker.fatal(t.model.id, err);
+          spend(err.dollarCost);
+          if (!opts.quiet) {
+            console.log(
+              `${t.sc.scenarioId} ${t.arm}/${t.model.id} → FATAL ${err.message} (no row; model aborted)`,
+            );
+          }
+          continue;
+        }
+        // A peer cell may have aborted this model while this call was in flight.
+        // Charge its spend, but leave the aborted model's output untouched.
+        if (breaker.isAborted(t.model.id)) {
+          spend(cell.dollar_cost);
+          continue;
+        }
+        cell.attempt = t.attempt;
+        spend(cell.dollar_cost);
+        opts.onCell(cell);
+        done++;
+        tallyRow(tally, cell);
+        breaker.record(t.model.id, cell);
+        const outcome = rerunOutcome(cell, t.attempt, opts.rerun);
+        if (outcome === "retry") retryable.push(t);
+        else if (outcome === "exhausted") tally.exhausted++;
+        if (!opts.quiet) {
+          const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
+          console.log(
+            `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
+              `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
+              `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
+          );
+        }
       }
     }
-  }
 
-  await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()));
-  return { cells: done, dollars, stopped };
+    await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()));
+    return retryable;
+  };
+
+  tally.requeued += await runRounds(
+    await runPass(tasks.map((t) => ({ ...t, attempt: t.attempt ?? 1 }))),
+    opts.rerun,
+    (queue) => {
+      total += queue.length;
+      return runPass(queue);
+    },
+    (t) => !capHit && !breaker.isAborted(t.model.id),
+  );
+
+  return {
+    cells_run: done,
+    total_dollars: dollars,
+    stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
+    cap_hit: capHit,
+    ...tally,
+    aborted: breaker.aborted(),
+  };
+}
+
+/**
+ * The run's `done:` counts: the campaign's, plus what the cache drain served
+ * (`reused`), resume skipped, and resume re-queued or exhausted.
+ */
+export function campaignDoneSummary(
+  result: CampaignSummary,
+  drained: { reused: number; skipped: number; resume: ResumeCounts },
+): DoneSummary {
+  return {
+    ...result,
+    cells_cached: drained.reused,
+    cells_skipped: drained.skipped,
+    requeued: result.requeued + requeuedTotal(drained.resume),
+    exhausted: result.exhausted + drained.resume.exhausted,
+  };
 }
 
 // ── CLI shell ─────────────────────────────────────────────────────────────────
@@ -483,18 +632,19 @@ export function controlKey(
 }
 
 /**
- * Index existing control cells for reuse. `reuse` maps each key to the best cell
- * across all `paths` (harness tier, then earliest: the original baseline); `current` holds keys
- * already present at the current ratel version, so a resumed run neither re-runs
- * nor duplicates them. Missing paths are skipped.
+ * Index existing control cells for reuse: maps each key to the best cell across
+ * all `paths` (harness tier, then earliest: the original baseline).
+ * Missing paths are skipped. Resume (what already ran at the current version) is
+ * `planCells`' job.
  *
- * Rerunnable errors (transient|access|request) never enter `reuse` — serving
- * them would re-count an outage as a miss forever — but still count as `current`
- * (resume is unchanged). Timeout/outcome errors are final and stay reusable.
+ * Rerunnable errors (transient|access|request) are never indexed — serving
+ * them would re-count an outage as a miss forever. Timeout/outcome errors are
+ * final and stay reusable, unless `policy` (`--retry-errors all`) re-runs them:
+ * then resume re-queues them, and serving one back would undo that.
  *
  * Reuse also matches each model's current `harness` (provider + requested output
  * cap, see `cacheTier`): exact-tier rows beat legacy rows (no recorded cap), then
- * earliest wins; a different recorded provider or cap never enters `reuse`, nor
+ * earliest wins; a different recorded provider or cap is never indexed, nor
  * does a legacy row when `allowLegacy` is false. A model absent from `harness`
  * is served legacy rows only.
  */
@@ -502,65 +652,109 @@ export function readControlIndex(
   paths: readonly string[],
   harness: ReadonlyMap<string, Harness> = new Map(),
   allowLegacy = true,
-): {
-  reuse: Map<string, SragentsSelectCell>;
-  current: Set<string>;
-} {
+  policy: RerunPolicy = "infra",
+): Map<string, SragentsSelectCell> {
   const reuse = new Map<string, SragentsSelectCell>();
-  const current = new Set<string>();
   for (const path of paths) {
     if (!existsSync(path)) continue;
     for (const c of readJsonl<SragentsSelectCell>(path)) {
       if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
-      const key = controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
-      if (c.ratel_ai_core_version === RATEL_AI_CORE_VERSION) current.add(key);
-      if (isRerunnable(c)) continue;
+      if (isRerunnable(c) || isRerunnable(c, policy)) continue;
+      const key = rowKey(c);
       const best = preferCacheRow(reuse.get(key), c, harness.get(c.model), allowLegacy);
       if (best) reuse.set(key, best);
     }
   }
-  return { reuse, current };
+  return reuse;
 }
 
 /**
- * Serve control cells from the cache and return the tasks that must run live.
- * Within a harness tier the output's own prior controls take precedence and
- * `cachePaths` (best tier, then earliest, across them) only fill gaps; an
- * exact-tier cache row beats the output's own legacy row. Controls already at the
- * current version are skipped (resume); reused ones are appended re-stamped to
- * the current version with `cache_source: "reused"`; `legacy` counts those served
- * from the legacy tier. `force` truncates the output and disables reuse, so a
- * forced run never appends a duplicate set. `allowLegacyCache: false` (any
- * explicit `--max-output-tokens`; see `sragentsCapOptions`) serves exact-tier
- * rows only.
+ * Resume over the output's `rows` for EVERY arm (ratel-full included): a task is
+ * skipped once its cell has a final row at `version`, or rerunnable rows out of
+ * `--max-attempts` (live attempts; reused rows don't count, see `planResume`);
+ * otherwise it is pending, numbered by its next live `attempt`. `resume` counts
+ * the re-queued and exhausted tasks for the `resume:` line; `requeued` holds the
+ * re-queued tasks' keys.
+ */
+export function planCells(
+  tasks: Task[],
+  rows: readonly SragentsSelectCell[],
+  rerun: Pick<RerunSettings, "policy" | "maxAttempts">,
+  version: string = RATEL_AI_CORE_VERSION,
+): { pending: Task[]; skipped: number; resume: ResumeCounts; requeued: Set<string> } {
+  const plan = planResume(
+    rows.filter((c) => c.ratel_ai_core_version === version),
+    rowKey,
+    rerun,
+  );
+  const resume = emptyResumeCounts();
+  const pending: Task[] = [];
+  const requeued = new Set<string>();
+  let skipped = 0;
+  for (const t of tasks) {
+    const key = taskKey(t);
+    countResume(plan, key, resume);
+    if (plan.completed.has(key)) {
+      skipped++;
+      continue;
+    }
+    if (plan.requeue.has(key)) requeued.add(key);
+    pending.push({ ...t, attempt: nextAttempt(plan, key) });
+  }
+  return { pending, skipped, resume, requeued };
+}
+
+/**
+ * Resume every arm over the output (`planCells`: `skipped` cells, `resume`
+ * counts), then serve the pending control cells from the cache and return the
+ * tasks that must run live. Within a harness tier the output's own prior controls
+ * take precedence and `cachePaths` (best tier, then earliest, across them) only
+ * fill gaps; an exact-tier cache row beats the output's own legacy row. A control
+ * resume re-queued (its rerunnable error) is served like any other. Reused ones
+ * are appended re-stamped to the current version with `cache_source: "reused"`;
+ * `legacy` counts those served from the legacy tier. `force` truncates the output
+ * and disables resume and reuse, so a forced run never appends a duplicate set.
+ * `allowLegacyCache: false` (any explicit `--max-output-tokens`; see
+ * `sragentsCapOptions`) serves exact-tier rows only. `rerun` defaults to
+ * `DEFAULT_RERUN_SETTINGS`.
  *
  * Throws (before writing anything) when the output holds current-version rows
  * produced under a different recorded output cap, or — with `allowLegacyCache:
  * false` — reused legacy rows an earlier invocation served (`checkResumeCaps`).
+ * Rows whose cell this run re-queues are exempt (`capGuardRows`): re-running them
+ * at this run's cap is how a rejected cap gets fixed.
  */
 export function drainControlCache(
   tasks: Task[],
-  opts: { outputPath: string; cachePaths: string[]; force: boolean; allowLegacyCache: boolean },
-): { liveTasks: Task[]; reused: number; legacy: number } {
+  opts: {
+    outputPath: string;
+    cachePaths: string[];
+    force: boolean;
+    allowLegacyCache: boolean;
+    rerun?: Pick<RerunSettings, "policy" | "maxAttempts">;
+  },
+): { liveTasks: Task[]; reused: number; legacy: number; skipped: number; resume: ResumeCounts } {
   if (opts.force) {
     truncateJsonl(opts.outputPath);
-    return { liveTasks: tasks, reused: 0, legacy: 0 };
+    return { liveTasks: tasks, reused: 0, legacy: 0, skipped: 0, resume: emptyResumeCounts() };
   }
+  const rerun = opts.rerun ?? DEFAULT_RERUN_SETTINGS;
   const allowLegacy = opts.allowLegacyCache;
-  checkOutputCaps(opts.outputPath, tasks, allowLegacy);
+  const current = readJsonl<SragentsSelectCell>(opts.outputPath).filter(
+    (c) => c.ratel_ai_core_version === RATEL_AI_CORE_VERSION,
+  );
+  const { pending, skipped, resume, requeued } = planCells(tasks, current, rerun);
+  checkOutputCaps(capGuardRows(current, rowKey, requeued), tasks, allowLegacy);
   const harness = harnessByModel(tasks.map((t) => t.model));
   const tierOf = (c: SragentsSelectCell) => cacheTier(c, harness.get(c.model), allowLegacy);
-  const { reuse: reuseIndex, current: currentKeys } = readControlIndex(
-    [opts.outputPath],
-    harness,
-    allowLegacy,
-  );
+  const reuseIndex = readControlIndex([opts.outputPath], harness, allowLegacy, rerun.policy);
   const ext = readControlIndex(
     opts.cachePaths.filter((p) => p !== opts.outputPath),
     harness,
     allowLegacy,
+    rerun.policy,
   );
-  for (const [k, v] of ext.reuse) {
+  for (const [k, v] of ext) {
     const own = reuseIndex.get(k);
     if (!own || (tierOf(v) === "exact" && tierOf(own) !== "exact")) reuseIndex.set(k, v);
   }
@@ -568,12 +762,9 @@ export function drainControlCache(
   const liveTasks: Task[] = [];
   let reused = 0;
   let legacy = 0;
-  for (const t of tasks) {
+  for (const t of pending) {
     if (CACHEABLE_ARMS.has(t.arm)) {
-      const poolForArm = t.arm === "control-oracle" ? null : t.sc.poolSize;
-      const key = controlKey(t.sc.scenarioId, t.arm, t.model.id, poolForArm, t.runIndex);
-      if (currentKeys.has(key)) continue; // already have this version's control (resume)
-      const prior = reuseIndex.get(key);
+      const prior = reuseIndex.get(taskKey(t));
       if (prior) {
         appendJsonl(opts.outputPath, {
           ...prior,
@@ -588,18 +779,29 @@ export function drainControlCache(
     }
     liveTasks.push(t);
   }
-  return { liveTasks, reused, legacy };
+  return { liveTasks, reused, legacy, skipped, resume };
+}
+
+/** A task's cell identity, as `controlKey` spells it (the oracle arm has no pool). */
+function taskKey(t: Task): string {
+  const poolForArm = t.arm === "control-oracle" ? null : t.sc.poolSize;
+  return controlKey(t.sc.scenarioId, t.arm, t.model.id, poolForArm, t.runIndex);
+}
+
+/** A row's cell identity (`controlKey`; version-agnostic, callers filter by version). */
+function rowKey(c: SragentsSelectCell): string {
+  return controlKey(c.scenario_id, c.arm, c.model, c.pool_size, c.run_index);
 }
 
 /**
- * Resume guard: current-version rows must share this run's recorded caps (and,
+ * Resume guard: current-version `rows` must share this run's recorded caps (and,
  * without `allowLegacy`, not be reused legacy rows); live legacy ones warn.
  */
-function checkOutputCaps(outputPath: string, tasks: Task[], allowLegacy: boolean): void {
-  if (!existsSync(outputPath)) return;
-  const rows = readJsonl<SragentsSelectCell>(outputPath).filter(
-    (c) => c.ratel_ai_core_version === RATEL_AI_CORE_VERSION,
-  );
+function checkOutputCaps(
+  rows: readonly SragentsSelectCell[],
+  tasks: Task[],
+  allowLegacy: boolean,
+): void {
   guardResumeCaps(
     rows,
     tasks.map((t) => t.model),
@@ -638,6 +840,20 @@ export function sragentsCapOptions(argv: readonly string[]): {
 export function sragentsTimeoutMs(argv: readonly string[]): number {
   const idx = argv.indexOf("--timeout-ms");
   return idx < 0 ? DEFAULT_TIMEOUT_MS : parseTimerMs("--timeout-ms", argv[idx + 1] ?? "");
+}
+
+/**
+ * The rerun flags (`--retry-errors`, `--max-attempts`, `--retry-rounds`,
+ * `--retry-delay-s`; defaults `DEFAULT_RERUN_SETTINGS`), validated here because
+ * `arg()` ignores malformed values: a bad or missing value throws.
+ */
+export function sragentsRerunOptions(argv: readonly string[]): RerunSettings {
+  const settings = { ...DEFAULT_RERUN_SETTINGS };
+  for (const flag of SR_RERUN_FLAGS) {
+    const idx = argv.indexOf(flag);
+    if (idx >= 0) applyRerunFlag(settings, flag, argv[idx + 1] ?? "");
+  }
+  return settings;
 }
 
 /**
@@ -683,8 +899,11 @@ async function main(): Promise<void> {
   const modelApiKey = arg("--model-api-key", process.env.AWS_BEDROCK_BEARER ?? "");
   const caps = sragentsCapOptions(process.argv);
   const timeoutMs = sragentsTimeoutMs(process.argv);
-  // Retry knobs (RATEL_LLM_RETRY_*, RATEL_CELL_TIMEOUT_GRACE_MS), validated and echoed once.
+  const rerun = sragentsRerunOptions(process.argv);
+  // Retry knobs (RATEL_LLM_RETRY_*, RATEL_CELL_TIMEOUT_GRACE_MS) and the breaker's
+  // (RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS), validated and echoed once.
   const retry = retrySettingsFromEnv(process.env);
+  const abortAfterConsecutiveErrors = breakerThresholdFromEnv(process.env);
 
   const rows = readJsonl<SragentsRetrievalRow>(candidatesPath);
   if (rows.length === 0) {
@@ -709,6 +928,8 @@ async function main(): Promise<void> {
   });
   console.log(capsLine(resolved, caps.override));
   console.log(retrySettingsLine(retry, timeoutMs));
+  console.log(breakerLine(abortAfterConsecutiveErrors));
+  console.log(rerunSettingsLine(rerun));
   // Warm any user-hosted endpoints once before the campaign (no-op for cloud/ollama ids).
   await warmUpModels(models, modelApiKey);
   const catalog = await loadCatalogMeta(catalogPath);
@@ -742,11 +963,12 @@ async function main(): Promise<void> {
     process.argv.includes("--cache-source") ? arg("--cache-source", "") : undefined,
     outputPath,
   );
-  const { liveTasks, reused, legacy } = drainControlCache(tasks, {
+  const { liveTasks, reused, legacy, skipped, resume } = drainControlCache(tasks, {
     outputPath,
     cachePaths,
     force,
     allowLegacyCache: caps.allowLegacyCache,
+    rerun,
   });
 
   console.log(
@@ -759,8 +981,10 @@ async function main(): Promise<void> {
           `, ${liveTasks.length} live`
         : ""),
   );
+  const resumed = resumeLine(resume);
+  if (resumed) console.log(resumed);
 
-  const { cells, dollars, stopped } = await runCampaign(liveTasks, {
+  const result = await runCampaign(liveTasks, {
     concurrency,
     dollarCap,
     seed,
@@ -769,14 +993,23 @@ async function main(): Promise<void> {
     timeoutMs,
     // One line per retry, unless --quiet.
     retry: quiet ? retry : { ...retry, log: console.log },
+    rerun,
+    abortAfterConsecutiveErrors,
     onCell: (c) => appendJsonl(outputPath, c),
   });
 
+  const capped = result.cap_hit;
   console.log(
-    `sragents-select: wrote ${cells} live + ${reused} reused cells to ` +
+    `sragents-select: wrote ${result.cells_run} live + ${reused} reused cells to ` +
       `${arg("--output", "results/raw/sragents/agent.jsonl")} ` +
-      `($${dollars.toFixed(3)}${stopped ? `, STOPPED at $${dollarCap} cap` : ""})`,
+      `($${result.total_dollars.toFixed(3)}${capped ? `, STOPPED at $${dollarCap} cap` : ""})`,
   );
+  // The same `done:` line (and `aborted:` lines) as `pnpm start`, for the AWS runner.
+  const summary = campaignDoneSummary(result, { reused, skipped, resume });
+  for (const line of doneLines(summary)) console.log(line);
+  // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
+  const exitCode = runExitCode(summary);
+  if (exitCode !== 0) process.exitCode = exitCode;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

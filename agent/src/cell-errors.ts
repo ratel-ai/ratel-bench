@@ -72,8 +72,15 @@ export class RetriesExhaustedError extends Error {
  * The retry wrapper met a fatal provider error (fatal marker or `access`): the
  * model is gated/missing, so no retry can help. Keeps the cause's message; not an
  * `APICallError`, so the AI SDK never retries it. Always `access`.
+ *
+ * A cell that meets one writes no row: the agent loop / selection call rethrows
+ * it after metering, with the cell's spend in `dollarCost`, and the runner
+ * aborts the model (see `createBreaker`).
  */
 export class FatalProviderError extends Error {
+  /** What the cell had already spent (set after metering); still counts toward the dollar cap. */
+  dollarCost = 0;
+
   constructor(cause: unknown) {
     super(messageOf(cause), { cause });
     this.name = "FatalProviderError";

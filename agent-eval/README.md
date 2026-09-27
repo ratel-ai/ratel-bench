@@ -60,6 +60,9 @@ spawns it to proxy the sandbox servers to the agent and log every tool call and 
 | `--skip-doctor` | off | skip the preflight doctor check |
 | `--keep-stack` / `--keep-artifacts` | off | leave the sandbox stack / per-cell artifacts running after the campaign for debugging |
 
+Environment: `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS` (default `10`, `0` = off) — see
+[Error circuit](#error-circuit).
+
 ### Output caps
 
 Both caps are opt-in and have **no default**. Claude Code already sends its own `max_tokens` and
@@ -171,13 +174,36 @@ is not an error.
   `timeout` and `outcome` errors are in `errored` but not in `excluded_cells`). A non-zero
   `excluded_cells` means that group's rates are depressed by infra — re-run before quoting it.
 
+### Error circuit
+
+`mcpatlas-run` stops launching cells after `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS` consecutive
+agent or judge infra failures (`transient | access`) — a gated, daily-capped or unreachable model.
+Judge access gates (`AccessDeniedException`, `ResourceNotFoundException`, on-demand-throughput
+`ValidationException`) and transient failures (`ExpiredTokenException`, `ModelNotReadyException`,
+exhausted throttles) count even when the agent succeeded and its cell has `error: null`; the failed
+judge still leaves the verdict `n/a`. Same knob name and default as the `agent/` breaker.
+
+- Default `10`; `0` turns it off. Unset = default; any other value, empty included, must be a
+  non-negative integer (surrounding spaces allowed, as in `agent/`), else it errors before anything
+  is spent.
+- A cell without an agent error or failed judge resets the count. `timeout`, max-turns, `request`,
+  `outcome` and non-infra judge failures neither count nor reset. `request` is still re-run (see
+  [Errored cells](#errored-cells)).
+- Counted in completion order across both passes: a trip in the native pass means the ratel pass
+  launches nothing. Cells already in flight finish and are written.
+- The run ends with `aborted: <model> — N consecutive infra-errored cells (last: <class>: <error>)`,
+  then the usual `done: … stopped=error_circuit` line (not-launched cells count as `skipped`), and
+  exits **2**. A `--dollar-global` stop (`stopped=global_cap`) still exits 0.
+- Not recorded in the frozen config: it decides when a run stops, never how a cell scores, so
+  `config_hash` and native cache keys are unchanged.
+
 ## Layout
 
 ```
 src/
   mcpatlas-build.ts       assembleCell() — assembles one McpAtlasCell (task + arm + config)
   mcpatlas-run.ts         mcpatlas-run — the campaign driver (process spawning, kill-signal
-                           capture, process-group reaping, per-cell timeouts)
+                           capture, process-group reaping, per-cell timeouts, error circuit)
   mcpatlas-agent.ts       claude-code invocation, transcript/turn/token-usage parsing
   mcpatlas-codex.ts       Codex CLI harness (approval handling, config.toml building)
 
@@ -189,7 +215,7 @@ src/
   mcpatlas-doctor.ts      preflight — asserts the served tool set and catalog integrity
 
   mcpatlas-cell-errors.ts error classes for a cell (local copy of agent/src/cell-errors.ts):
-                           native-cache reuse and summary excluded_cells
+                           native-cache reuse, summary excluded_cells and the error circuit
 
   mcpatlas-claim-match.ts deterministic claim pre-screen
   mcpatlas-judge.ts       LLM judge scoring the pre-screen's residual (sees only task + claims +

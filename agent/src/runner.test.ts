@@ -5,7 +5,9 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
+import { FatalProviderError } from "./cell-errors.js";
 import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
+import { DEFAULT_RERUN_SETTINGS } from "./rerun.js";
 import {
   appendRow,
   makeRegistryRunCell,
@@ -109,6 +111,17 @@ function baseConfig(corpusPath: string, outputPath: string): RunnerConfig {
     // runner stamps it on every row it writes.
     ratelVersion: "test",
   };
+}
+
+function writeRows(path: string, rows: CellResult[]): void {
+  writeFileSync(path, rows.map((r) => `${JSON.stringify(r)}\n`).join(""));
+}
+
+function readRows(path: string): CellResult[] {
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as CellResult);
 }
 
 describe("runner", () => {
@@ -840,17 +853,6 @@ describe("control cache", () => {
     });
   }
 
-  function writeRows(path: string, rows: CellResult[]): void {
-    writeFileSync(path, rows.map((r) => `${JSON.stringify(r)}\n`).join(""));
-  }
-
-  function readRows(path: string): CellResult[] {
-    return readFileSync(path, "utf-8")
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l) as CellResult);
-  }
-
   async function runBaseline(
     output: string,
     over: Partial<RunnerConfig>,
@@ -986,24 +988,26 @@ describe("control cache", () => {
     expect(summary.cells_run).toBe(1);
   });
 
-  // U5 flips this when resume starts re-queueing rerunnable errors.
-  it("[guard] resume still skips a current-version rerunnable-errored control", async () => {
+  // The Phase 9 re-drain: a label's errored control is re-queued and served from the cache.
+  it("resume re-queues a current-version rerunnable-errored control; the cache serves it", async () => {
     const output = join(tempDir, "out.jsonl");
     const canonical = join(tempDir, "canonical.jsonl");
     writeRows(output, [erroredRow("Overloaded", { ratel_version: "test" })]);
-    writeRows(canonical, [cachedRow({ final_text: "good" })]); // must not be served either
+    writeRows(canonical, [cachedRow({ final_text: "good" })]);
 
     const { summary, called } = await runBaseline(output, { cacheSourcePaths: [canonical] });
 
-    expect(summary.cells_skipped).toBe(1);
-    expect(summary.cells_cached).toBe(0);
+    expect(summary.cells_skipped).toBe(0);
+    expect(summary.cells_cached).toBe(1);
     expect(summary.cells_run).toBe(0);
     expect(called).toEqual([]);
-    expect(readRows(output)).toHaveLength(1);
+    const rows = readRows(output);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ error: null, final_text: "good", cache_source: "reused" });
   });
 
-  // U5 flips this too. ratel-full is never cached, so only resume can skip it.
-  it("[guard] resume still skips a current-version rerunnable-errored ratel-full cell", async () => {
+  // ratel-full is never cached, so only resume decides; it now re-runs it live.
+  it("resume re-queues a current-version rerunnable-errored ratel-full cell", async () => {
     const output = join(tempDir, "out.jsonl");
     writeRows(output, [
       erroredRow("Overloaded", { arm: "ratel-full", ratel_version: "test", pool_size: 1 }),
@@ -1011,9 +1015,26 @@ describe("control cache", () => {
 
     const { summary, called } = await runBaseline(output, { arms: ["ratel-full"] });
 
-    expect(summary.cells_skipped).toBe(1);
-    expect(summary.cells_run).toBe(0);
-    expect(called).toEqual([]);
+    expect(summary.cells_skipped).toBe(0);
+    expect(summary.cells_run).toBe(1);
+    expect(called).toEqual(["fs-001::ratel-full::fake-model::0"]);
+    expect(readRows(output)[1]).toMatchObject({ error: null, attempt: 2 });
+  });
+
+  it("under --retry-errors all, a re-queued timeout control is not served its timeout again", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const canonical = join(tempDir, "canonical.jsonl");
+    const timedOut = erroredRow("run timed out after 60000ms");
+    writeRows(output, [{ ...timedOut, ratel_version: "test" }]);
+    writeRows(canonical, [timedOut]);
+
+    const { summary, called } = await runBaseline(output, {
+      cacheSourcePaths: [canonical],
+      rerun: { ...DEFAULT_RERUN_SETTINGS, policy: "all", rounds: 0 },
+    });
+
+    expect(summary.cells_cached).toBe(0);
+    expect(called).toEqual(["fs-001::control-baseline::fake-model::0"]);
   });
 
   it("explicit cache sources replace the output as a source", async () => {
@@ -1079,7 +1100,7 @@ describe("control cache", () => {
       expect(summary.cells_run).toBe(1);
     });
 
-    it("ignores infra-error rows (access) at a different cap; they are unmeasured", async () => {
+    it("ignores infra-error rows (access) at a different cap; they are unmeasured (and re-queued)", async () => {
       const output = join(tempDir, "out.jsonl");
       writeRows(output, [
         liveRow({
@@ -1089,7 +1110,72 @@ describe("control cache", () => {
         }),
       ]);
       const { summary } = await runBaseline(output, capped(16384));
-      expect(summary.cells_skipped).toBe(1);
+      expect(summary.cells_skipped).toBe(0);
+      expect(summary.cells_run).toBe(1);
+    });
+
+    describe("rows this run re-queues are exempt (a rejected cap is fixed by re-running)", () => {
+      // A cap the provider rejects turns every cell into a `request` row at that cap.
+      const rejected = (over: Partial<CellResult> = {}) =>
+        liveRow({
+          ...erroredRow("max_tokens: 200000 > 64000", { error_class: "request" }),
+          ratel_version: "test",
+          max_output_tokens: 200000,
+          ...over,
+        });
+
+      it("re-queues a request row at a different cap instead of throwing", async () => {
+        const output = join(tempDir, "out.jsonl");
+        writeRows(output, [rejected()]);
+        const { summary, called } = await runBaseline(output, capped(4096));
+        expect(called).toHaveLength(1);
+        expect(summary).toMatchObject({ cells_run: 1, requeued: 1 });
+        expect(readRows(output).at(-1)?.attempt).toBe(2);
+      });
+
+      it("a later resume over [request at the old cap, success at the new] does not throw", async () => {
+        const output = join(tempDir, "out.jsonl");
+        writeRows(output, [rejected(), liveRow({ max_output_tokens: 4096 })]);
+        for (const policy of ["infra", "none"] as const) {
+          const { summary } = await runBaseline(output, {
+            ...capped(4096),
+            rerun: { ...DEFAULT_RERUN_SETTINGS, policy },
+          });
+          expect(summary.cells_skipped).toBe(1);
+        }
+      });
+
+      it("still throws on an exhausted request row, under `none`, and for a cell not in this run", async () => {
+        const output = join(tempDir, "out.jsonl");
+        writeRows(output, [rejected(), rejected(), rejected()]);
+        await expect(runBaseline(output, capped(4096))).rejects.toThrow(/output has 200000/);
+        writeRows(output, [rejected()]);
+        await expect(
+          runBaseline(output, {
+            ...capped(4096),
+            rerun: { ...DEFAULT_RERUN_SETTINGS, policy: "none" },
+          }),
+        ).rejects.toThrow(/output has 200000/);
+        writeRows(output, [rejected({ arm: "control-oracle", pool_size: null })]);
+        await expect(runBaseline(output, capped(4096))).rejects.toThrow(/output has 200000/);
+      });
+
+      it("still throws on a timeout row `all` re-queues (a final row summaries keep)", async () => {
+        const output = join(tempDir, "out.jsonl");
+        writeRows(output, [
+          liveRow({
+            ...erroredRow("run timed out after 1000ms"),
+            ratel_version: "test",
+            max_output_tokens: 200000,
+          }),
+        ]);
+        await expect(
+          runBaseline(output, {
+            ...capped(4096),
+            rerun: { ...DEFAULT_RERUN_SETTINGS, policy: "all" },
+          }),
+        ).rejects.toThrow(/output has 200000/);
+      });
     });
 
     it("warns on legacy live rows (no max_output_tokens) and resumes over them", async () => {
@@ -1540,8 +1626,28 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
       { ...DEFAULT_RETRY_SETTINGS, graceMs: 20 },
     );
     expect(cell.error_class).toBe("timeout");
-    expect(cell.retry_policy).toBe("a8/b2000/c60000/w180000;timeout=active:50+g20");
+    expect(cell.retry_policy).toBe("a8/b2000/c60000/w180000;timeout=active:50+g20;rerun=infra/3");
     expectUnscoredButMetered(cell);
+  });
+
+  it("appends the run's rerun policy to retry_policy (;rerun=<policy>/<max-attempts>)", async () => {
+    const registry = new Map([[controlBaseline.id, controlBaseline]]);
+    const cell = await makeRegistryRunCell(registry)({
+      scenario: goldScenario,
+      arm: controlBaseline.id,
+      model: { id: "m", model: textAnswerModel(), maxOutputTokens: null },
+      runIndex: 0,
+      pool: goldScenario.candidate_pool,
+      poolSize: 1,
+      config: {
+        ...baseConfig("unused", "unused"),
+        perRunTimeoutMs: 5_000,
+        rerun: { ...DEFAULT_RERUN_SETTINGS, policy: "all", maxAttempts: 0 },
+      },
+    });
+    expect(cell.retry_policy).toBe(
+      "a8/b2000/c60000/w180000;timeout=active:5000+g30000;rerun=all/0",
+    );
   });
   it("logs each retry with the cell's tag, unless logLevel is quiet", async () => {
     const e503 = new APICallError({
@@ -1583,5 +1689,465 @@ describe("makeRegistryRunCell: errored cells and the judge gate", () => {
     } finally {
       logs.mockRestore();
     }
+  });
+});
+
+describe("breaker, resume re-queue and retry rounds", () => {
+  const scenarios = (n: number): Scenario[] =>
+    Array.from({ length: n }, (_, i) => ({ ...scenario, id: `s-${i}` }));
+
+  function corpusOf(n: number): string {
+    const path = join(tempDir, "corpus.jsonl");
+    writeFileSync(
+      path,
+      scenarios(n)
+        .map((s) => JSON.stringify(s))
+        .join("\n"),
+    );
+    return path;
+  }
+
+  const model = (id: string) => ({ id, model: {} as never, maxOutputTokens: null });
+
+  const failed = (error: string, error_class: CellResult["error_class"]): Partial<CellResult> => ({
+    error,
+    error_class,
+    programmatic_verdict: "fail",
+    finish_reason: "error",
+  });
+  const transient = failed("Overloaded", "transient");
+  const access = failed("model not available for this account", "access");
+  const request = failed("tools: too many tools", "request");
+  const timeout = failed("run timed out after 1000ms", "timeout");
+  const outcome = failed("prompt is too long", "outcome");
+
+  /** A fatal provider error as runMeteredLoop rethrows it: after metering `dollars`. */
+  function fatal(dollars: number): FatalProviderError {
+    const err = new FatalProviderError(new Error("model B is not available for this account"));
+    err.dollarCost = dollars;
+    return err;
+  }
+
+  /** A runCell whose n-th call yields `script(args, n)`: a row override, or an error to throw. */
+  function scripted(
+    script: (args: Parameters<RunCellFn>[0], call: number) => Partial<CellResult> | Error,
+    called: string[] = [],
+  ): RunCellFn {
+    let call = 0;
+    return async (args) => {
+      called.push(`${args.scenario.id}::${args.model.id}`);
+      const out = script(args, call++);
+      if (out instanceof Error) throw out;
+      return { ...(await makeFakeRunCell(0.001, [])(args)), ...out };
+    };
+  }
+
+  const noRounds = { ...DEFAULT_RERUN_SETTINGS, rounds: 0 };
+
+  it.each([
+    1, 4,
+  ])("FatalProviderError aborts model B without writing its rows; A completes; summary.aborted.B; stopped 'fatal' (concurrency %i)", async (concurrency) => {
+    const output = join(tempDir, "out.jsonl");
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(4), output),
+      arms: ["ratel-full"],
+      models: [model("A"), model("B")],
+      concurrency,
+      runCell: scripted((args) => (args.model.id === "B" ? fatal(0.002) : {}), called),
+    });
+
+    expect(readRows(output).map((r) => r.model)).toEqual(["A", "A", "A", "A"]);
+    expect(summary.cells_run).toBe(4);
+    expect(summary.aborted.B).toEqual({
+      reason: "fatal",
+      detail: "model B is not available for this account",
+    });
+    expect(summary.aborted.A).toBeUndefined();
+    expect(summary.stopped_reason).toBe("fatal");
+    // pickTask skips B once aborted; only cells already in flight still ran.
+    const bCalls = called.filter((c) => c.endsWith("::B")).length;
+    expect(bCalls).toBeGreaterThanOrEqual(1);
+    expect(bCalls).toBeLessThanOrEqual(concurrency === 1 ? 1 : 2);
+    // The dropped cells' spend still counts against the cap.
+    expect(summary.total_dollars).toBeCloseTo(4 * 0.001 + bCalls * 0.002, 10);
+  });
+
+  it("drops an in-flight row after its model gets a fatal error, but counts its spend", async () => {
+    const output = join(tempDir, "out.jsonl");
+    writeFileSync(output, "");
+    let signalSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      signalSecond = resolve;
+    });
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(3), output),
+      arms: ["ratel-full"],
+      models: [model("B")],
+      concurrency: 2,
+      rerun: noRounds,
+      runCell: async (args) => {
+        called.push(args.scenario.id);
+        if (args.scenario.id === "s-0") {
+          await secondStarted;
+          throw fatal(0.002);
+        }
+        signalSecond();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return makeFakeRunCell(0.001, [])(args);
+      },
+    });
+
+    expect(called).toEqual(["s-0", "s-1"]);
+    expect(readRows(output)).toEqual([]);
+    expect(summary).toMatchObject({ cells_run: 0, stopped_reason: "fatal" });
+    expect(summary.total_dollars).toBeCloseTo(0.003, 10);
+  });
+
+  it("consecutive transport errors trip error_circuit; timeout/request/outcome don't count; success resets", async () => {
+    const script = [
+      transient,
+      transient,
+      {},
+      transient,
+      timeout,
+      request,
+      outcome,
+      access,
+      transient,
+      {},
+      {},
+    ];
+    const output = join(tempDir, "out.jsonl");
+    const called: string[] = [];
+    const sleeps: number[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(script.length), output),
+      arms: ["ratel-full"],
+      models: [model("B")],
+      abortAfterConsecutiveErrors: 3,
+      rerun: {
+        ...DEFAULT_RERUN_SETTINGS,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+      runCell: scripted((_args, call) => script[call], called),
+    });
+
+    // T T ok(reset) T timeout request outcome access T → the 3rd consecutive transport error.
+    expect(called).toHaveLength(9);
+    // Unlike fatal cells, circuit-tripping rows are honest rows: all written.
+    expect(readRows(output)).toHaveLength(9);
+    expect(summary.aborted.B?.reason).toBe("error_circuit");
+    expect(summary.aborted.B?.detail).toMatch(/3 consecutive transient\/access errors/);
+    expect(summary.stopped_reason).toBe("error_circuit");
+    expect(summary.errors).toBe(8);
+    // Only the aborted model's cells were rerunnable: no round, no wait.
+    expect(sleeps).toEqual([]);
+    expect(summary.requeued).toBe(0);
+  });
+
+  it("an abort outranks a cap hit in stopped_reason; cap_hit still reports the cap", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(6), output),
+      arms: ["ratel-full"],
+      models: [model("A"), model("B")],
+      dollarGlobalCap: 0.0025,
+      rerun: noRounds,
+      runCell: scripted((args) => (args.model.id === "B" ? fatal(0) : {}), called),
+    });
+    expect(called).toEqual(["s-0::A", "s-0::B", "s-1::A", "s-2::A"]);
+    expect(summary).toMatchObject({ stopped_reason: "fatal", cap_hit: true, cells_run: 3 });
+    expect(summary.aborted.B?.reason).toBe("fatal");
+  });
+
+  it("sums the rows' retries and throttled retries into the summary", async () => {
+    const summary = await run({
+      ...baseConfig(corpusOf(2), join(tempDir, "out.jsonl")),
+      arms: ["ratel-full"],
+      rerun: noRounds,
+      runCell: scripted(() => ({ retries: 3, throttled_retries: 2 })),
+    });
+    expect(summary).toMatchObject({ retries: 6, throttled_retries: 4, cap_hit: false });
+  });
+
+  it("the consecutive-error breaker is off at 0", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const summary = await run({
+      ...baseConfig(corpusOf(5), output),
+      arms: ["ratel-full"],
+      abortAfterConsecutiveErrors: 0,
+      rerun: noRounds,
+      runCell: scripted(() => transient),
+    });
+    expect(summary.cells_run).toBe(5);
+    expect(summary.aborted).toEqual({});
+    expect(summary.stopped_reason).toBe("completed");
+  });
+
+  /** A prior row of `id` in the output: ratel-full at this run's version, a live pass. */
+  async function priorRow(id: string, over: Partial<CellResult> = {}): Promise<CellResult> {
+    const cell = await makeFakeRunCell(
+      0.001,
+      [],
+    )({
+      scenario: { ...scenario, id },
+      arm: "ratel-full",
+      model: model("fake-model"),
+      runIndex: 0,
+      pool: [],
+      poolSize: 1,
+      config: {} as never,
+    });
+    return { ...cell, ratel_version: "test", cache_source: "live", ...over };
+  }
+
+  /** Run ratel-full over `n` scenarios on `output`, capturing the `resume:` line. */
+  async function resumeRun(output: string, n: number, over: Partial<RunnerConfig> = {}) {
+    const called: string[] = [];
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const summary = await run({
+        ...baseConfig(corpusOf(n), output),
+        arms: ["ratel-full"],
+        logLevel: "normal",
+        runCell: scripted(() => ({}), called),
+        ...over,
+      });
+      const resume = logs.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("resume:"));
+      return { summary, called, resume };
+    } finally {
+      logs.mockRestore();
+    }
+  }
+
+  it("resume re-queues transient/access/request rows, keeps timeout/outcome; attempt = prior live attempts + 1", async () => {
+    // ratel-full is never cached, so only resume decides what re-runs.
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [
+      await priorRow("s-0", transient),
+      await priorRow("s-0", transient),
+      await priorRow("s-1", access),
+      await priorRow("s-2", request),
+      await priorRow("s-3", timeout),
+      await priorRow("s-4", outcome),
+    ]);
+
+    const { summary, called, resume } = await resumeRun(output, 5, { rerun: noRounds });
+
+    expect(called.sort()).toEqual(["s-0::fake-model", "s-1::fake-model", "s-2::fake-model"]);
+    expect(summary.cells_skipped).toBe(2);
+    expect(summary.requeued).toBe(3);
+    expect(resume).toEqual(["resume: 3 re-queued (transient 1, access 1, request 1); 0 exhausted"]);
+    const fresh = readRows(output).slice(6);
+    expect(fresh.map((r) => [r.scenario_id, r.attempt]).sort()).toEqual([
+      ["s-0", 3],
+      ["s-1", 2],
+      ["s-2", 2],
+    ]);
+    // Nothing left to re-queue: a second resume skips all five.
+    const again = await resumeRun(output, 5, { rerun: noRounds });
+    expect(again.called).toEqual([]);
+    expect(again.summary.cells_skipped).toBe(5);
+    expect(again.resume).toEqual([]);
+  });
+
+  it("--retry-errors none keeps rerunnable rows; all also re-queues timeout/outcome", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const rows = [await priorRow("s-0", transient), await priorRow("s-1", timeout)];
+
+    writeRows(output, rows);
+    const none = await resumeRun(output, 2, { rerun: { ...noRounds, policy: "none" } });
+    expect(none.called).toEqual([]);
+
+    writeRows(output, rows);
+    const all = await resumeRun(output, 2, { rerun: { ...noRounds, policy: "all" } });
+    expect(all.called.sort()).toEqual(["s-0::fake-model", "s-1::fake-model"]);
+    expect(all.resume).toEqual(["resume: 2 re-queued (transient 1, timeout 1); 0 exhausted"]);
+  });
+
+  it("max-attempts stops re-queue; reused rows don't count as attempts", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const rows = [
+      // s-0: three live attempts → out of attempts at --max-attempts 3.
+      await priorRow("s-0", transient),
+      await priorRow("s-0", transient),
+      await priorRow("s-0", transient),
+      // s-1: two reused (pre-U2 served) error rows + one live → one attempt.
+      await priorRow("s-1", { ...transient, cache_source: "reused" }),
+      await priorRow("s-1", { ...transient, cache_source: "reused" }),
+      await priorRow("s-1", transient),
+      // s-2: a legacy row without cache_source counts as a live attempt.
+      await priorRow("s-2", { ...transient, cache_source: undefined }),
+    ];
+    writeRows(output, rows);
+
+    const capped = await resumeRun(output, 3, { rerun: noRounds });
+
+    expect(capped.called.sort()).toEqual(["s-1::fake-model", "s-2::fake-model"]);
+    expect(capped.summary.cells_skipped).toBe(1);
+    expect(capped.summary.exhausted).toBe(1);
+    expect(capped.resume).toEqual(["resume: 2 re-queued (transient 2); 1 exhausted"]);
+    expect(
+      readRows(output)
+        .slice(rows.length)
+        .map((r) => [r.scenario_id, r.attempt])
+        .sort(),
+    ).toEqual([
+      ["s-1", 2],
+      ["s-2", 2],
+    ]);
+
+    // --max-attempts 0 = unlimited: s-0 goes again, as its 4th attempt.
+    writeRows(output, rows);
+    const unlimited = await resumeRun(output, 3, { rerun: { ...noRounds, maxAttempts: 0 } });
+    expect(unlimited.called).toContain("s-0::fake-model");
+    expect(readRows(output).find((r) => r.scenario_id === "s-0" && r.attempt)?.attempt).toBe(4);
+  });
+
+  /** A runCell failing each scenario's first `failures` tries with a transient error. */
+  function failingFirst(failures: number, called: string[]): RunCellFn {
+    const tries = new Map<string, number>();
+    return scripted((args) => {
+      const n = (tries.get(args.scenario.id) ?? 0) + 1;
+      tries.set(args.scenario.id, n);
+      return n <= failures ? transient : {};
+    }, called);
+  }
+
+  it("retry-rounds re-run rerunnable cells in-process with a shared dollar cap; later rounds never truncate", async () => {
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [await priorRow("stale")]); // --force truncates this once, up front
+    const called: string[] = [];
+    const sleeps: number[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(3), output),
+      arms: ["ratel-full"],
+      force: true,
+      rerun: {
+        ...DEFAULT_RERUN_SETTINGS,
+        rounds: 2,
+        delayMs: 5,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+      runCell: failingFirst(1, called),
+    });
+
+    expect(called).toHaveLength(6);
+    expect(sleeps).toEqual([5]); // round 2 had nothing left to re-run
+    const rows = readRows(output);
+    expect(rows.map((r) => [r.scenario_id, r.error === null, r.attempt])).toEqual([
+      ["s-0", false, 1],
+      ["s-1", false, 1],
+      ["s-2", false, 1],
+      ["s-0", true, 2],
+      ["s-1", true, 2],
+      ["s-2", true, 2],
+    ]);
+    expect(summary).toMatchObject({
+      cells_run: 6,
+      errors: 3,
+      requeued: 3,
+      exhausted: 0,
+      stopped_reason: "completed",
+    });
+    expect(summary.total_dollars).toBeCloseTo(0.006, 10);
+  });
+
+  it("retry rounds share the dollar cap: a cap hit mid-round stops it; a cap hit before skips them", async () => {
+    const rounds = (sleeps: number[]) => ({
+      ...DEFAULT_RERUN_SETTINGS,
+      rounds: 3,
+      delayMs: 1,
+      sleep: async (ms: number) => {
+        sleeps.push(ms);
+      },
+    });
+
+    // $0.001 a cell: the main pass spends $0.003, round 1 one more cell, then the cap.
+    const midCalled: string[] = [];
+    const midSleeps: number[] = [];
+    const mid = await run({
+      ...baseConfig(corpusOf(3), join(tempDir, "mid.jsonl")),
+      arms: ["ratel-full"],
+      dollarGlobalCap: 0.0035,
+      rerun: rounds(midSleeps),
+      runCell: failingFirst(Infinity, midCalled),
+    });
+    expect(midCalled).toHaveLength(4);
+    expect(midSleeps).toEqual([1]);
+    expect(mid.stopped_reason).toBe("global_cap");
+
+    // The main pass alone reaches the cap: no round, no wait.
+    const beforeCalled: string[] = [];
+    const beforeSleeps: number[] = [];
+    const before = await run({
+      ...baseConfig(corpusOf(3), join(tempDir, "before.jsonl")),
+      arms: ["ratel-full"],
+      dollarGlobalCap: 0.0025,
+      rerun: rounds(beforeSleeps),
+      runCell: failingFirst(Infinity, beforeCalled),
+    });
+    expect(beforeCalled).toHaveLength(3);
+    expect(beforeSleeps).toEqual([]);
+    expect(before.stopped_reason).toBe("global_cap");
+  });
+
+  it("retry rounds stop at --max-attempts: an always-failing cell ends exhausted", async () => {
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(2), join(tempDir, "out.jsonl")),
+      arms: ["ratel-full"],
+      abortAfterConsecutiveErrors: 0,
+      rerun: { ...DEFAULT_RERUN_SETTINGS, rounds: 5, maxAttempts: 2, sleep: async () => {} },
+      runCell: failingFirst(Infinity, called),
+    });
+    expect(called).toHaveLength(4);
+    expect(summary).toMatchObject({ requeued: 2, exhausted: 2, errors: 4 });
+  });
+
+  it("retry rounds under --max-attempts 0 (unlimited) go past the default 3 attempts", async () => {
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(1), join(tempDir, "out.jsonl")),
+      arms: ["ratel-full"],
+      abortAfterConsecutiveErrors: 0,
+      rerun: { ...DEFAULT_RERUN_SETTINGS, rounds: 4, maxAttempts: 0, sleep: async () => {} },
+      runCell: failingFirst(4, called),
+    });
+    expect(called).toHaveLength(5);
+    expect(summary).toMatchObject({ requeued: 4, exhausted: 0, errors: 4 });
+  });
+
+  it("retry rounds skip a model the breaker aborted mid-pass", async () => {
+    const called: string[] = [];
+    const sleeps: number[] = [];
+    const summary = await run({
+      ...baseConfig(corpusOf(2), join(tempDir, "out.jsonl")),
+      arms: ["ratel-full"],
+      models: [model("A"), model("B")],
+      abortAfterConsecutiveErrors: 2,
+      rerun: {
+        ...DEFAULT_RERUN_SETTINGS,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+      // B's two transient rows trip its breaker; A's one transient row is retried.
+      runCell: scripted(
+        (args, call) => (args.model.id === "B" || call === 0 ? transient : {}),
+        called,
+      ),
+    });
+    expect(sleeps).toEqual([60_000]);
+    expect(called).toEqual(["s-0::A", "s-0::B", "s-1::A", "s-1::B", "s-0::A"]);
+    // Only A's cell was re-queued: canRetry dropped aborted B's two.
+    expect(summary.requeued).toBe(1);
   });
 });

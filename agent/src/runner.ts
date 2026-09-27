@@ -3,7 +3,12 @@
 // per cell.
 //
 // Resumable: skips cells already present in the output JSONL unless `force` is
-// set. A global dollar cap (`dollarGlobalCap`) bounds total spend using
+// set, except rerunnable errors (`--retry-errors`, default transient|access|
+// request), which are re-queued until the cell has spent `--max-attempts` live
+// attempts; after the main pass, `--retry-rounds` re-run this run's own
+// rerunnable cells in-process (see `rerun.ts`). A per-model breaker
+// (`createBreaker`) aborts a gated or failing model: a fatal provider error
+// writes no row. A global dollar cap (`dollarGlobalCap`) bounds total spend using
 // per-model rates from models.json (via `config.pricing`); a model left unpriced
 // reports `dollar_cost=0` and simply isn't bounded by the cap — scenario count
 // still bounds it.
@@ -30,13 +35,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { LanguageModel } from "ai";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { descriptor as controlOracle } from "./agents/control-oracle.js";
-import { errorClassOf, isRerunnable } from "./cell-errors.js";
+import { errorClassOf, FatalProviderError, isRerunnable, type RerunPolicy } from "./cell-errors.js";
 import { cellKeyOf, cellKeyString, controlKeyOf, controlKeyString } from "./cell-key.js";
 import { loadScenarios } from "./corpus.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
-import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
+import { createBreaker, DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
 import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
 import {
   cacheTier,
@@ -46,6 +51,26 @@ import {
   preferCacheRow,
 } from "./output-limits.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
+import {
+  capGuardRows,
+  countResume,
+  DEFAULT_RERUN_SETTINGS,
+  type DoneSummary,
+  emptyResumeCounts,
+  emptyResumePlan,
+  newRunTally,
+  nextAttempt,
+  planResume,
+  type RerunSettings,
+  type ResumeCounts,
+  type ResumePlan,
+  requeuedTotal,
+  rerunLabel,
+  rerunOutcome,
+  resumeLine,
+  runRounds,
+  tallyRow,
+} from "./rerun.js";
 import type {
   AgentDescriptor,
   Arm,
@@ -97,6 +122,18 @@ export interface RunnerConfig {
   retry?: RetrySettings;
   dollarGlobalCap: number;
   force: boolean;
+  /**
+   * Which errored rows resume and the in-process retry rounds re-run, how many
+   * live attempts a cell gets, and the rounds (`--retry-errors`, `--max-attempts`,
+   * `--retry-rounds`, `--retry-delay-s`). Unset = `DEFAULT_RERUN_SETTINGS`.
+   */
+  rerun?: RerunSettings;
+  /**
+   * The per-model breaker's streak: abort a model after this many consecutive
+   * `transient|access` error rows (`RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`; 0 =
+   * off). A fatal provider error aborts it regardless. Unset = 10.
+   */
+  abortAfterConsecutiveErrors?: number;
   judgeModel?: LanguageModel;
   /** `--judge-max-output-tokens`: cap on each LLM-judge call. Unset = no cap sent. */
   judgeMaxOutputTokens?: number;
@@ -171,14 +208,9 @@ export type RunCellFn = (args: {
   config: RunnerConfig;
 }) => Promise<CellResult>;
 
-export interface RunnerSummary {
-  cells_run: number;
-  cells_skipped: number;
-  /** Control cells served from the cache sources (re-stamped) instead of running live. */
-  cells_cached: number;
+/** The run's counts (see `DoneSummary`: `cells_cached` = control cells served from the cache). */
+export interface RunnerSummary extends DoneSummary {
   scenarios: number;
-  total_dollars: number;
-  stopped_reason: "completed" | "global_cap";
 }
 
 /** The output's resumable rows (those carrying a `ratel_version`). */
@@ -203,20 +235,30 @@ function readOutputRows(path: string): CellResult[] {
 }
 
 /**
- * Resume keys of the output's rows. Throws first when a row at this version was
- * produced under a different recorded output cap than this run's, or (under an
- * explicit cap) is a reused legacy row (see `checkResumeCaps`); live rows with no
- * recorded cap only warn.
+ * Resume cap guard: throws when a row the label keeps at this version was produced
+ * under a different recorded output cap than this run's, or (under an explicit
+ * cap) is a reused legacy row (see `checkResumeCaps`); live rows with no recorded
+ * cap only warn. Rows whose cell this run re-queues are exempt (`capGuardRows`):
+ * re-running them at this run's cap is how a rejected cap gets fixed.
  */
-function readCompletedKeys(config: RunnerConfig, ratelVersion: string): Set<string> {
-  const rows = readOutputRows(config.outputPath);
+function guardOutputCaps(
+  config: RunnerConfig,
+  rows: CellResult[],
+  tasks: readonly PendingTask[],
+  plan: ResumePlan,
+  ratelVersion: string,
+): void {
+  const requeued = new Set(tasks.filter((t) => plan.requeue.has(t.key)).map((t) => t.key));
   guardResumeCaps(
-    rows.filter((r) => r.ratel_version === ratelVersion),
+    capGuardRows(
+      rows.filter((r) => r.ratel_version === ratelVersion),
+      cellKeyOf,
+      requeued,
+    ),
     config.models,
     ratelVersion,
     config.allowLegacyCache,
   );
-  return new Set(rows.map(cellKeyOf));
 }
 
 /**
@@ -229,7 +271,9 @@ function readCompletedKeys(config: RunnerConfig, ratelVersion: string): Set<stri
  * Rerunnable errors (transient|access|request) are never eligible: they say
  * nothing about the model, so serving them would re-count an outage as a fail
  * forever. A key whose only rows are such errors is absent and runs live.
- * Timeout/outcome errors are final, scored results and stay reusable.
+ * Timeout/outcome errors are final, scored results and stay reusable, unless
+ * `policy` (`--retry-errors all`) re-runs them: then resume re-queues them, and
+ * serving one back would undo that.
  *
  * Rows must also match the model's current harness (`harness`: provider +
  * requested output cap, see `cacheTier`): exact-tier rows win over legacy rows
@@ -240,6 +284,7 @@ function readControlCacheIndex(
   paths: readonly string[],
   harness: ReadonlyMap<string, Harness>,
   allowLegacy: boolean,
+  policy: RerunPolicy,
 ): Map<string, CellResult> {
   const out = new Map<string, CellResult>();
   for (const path of paths) {
@@ -251,7 +296,7 @@ function readControlCacheIndex(
         const cell = JSON.parse(line) as CellResult;
         if (typeof cell.ratel_version !== "string") continue;
         if (!CACHEABLE_ARMS.has(cell.arm)) continue;
-        if (isRerunnable(cell)) continue;
+        if (isRerunnable(cell) || isRerunnable(cell, policy)) continue;
         const key = controlKeyOf(cell);
         const best = preferCacheRow(out.get(key), cell, harness.get(cell.model), allowLegacy);
         if (best) out.set(key, best);
@@ -455,9 +500,15 @@ export function makeRegistryRunCell(
   };
 }
 
-/** The retry settings a cell runs under: one log line per retry, unless `quiet`. */
+/**
+ * The retry settings a cell runs under: tagged with the run's rerun policy (for
+ * `retry_policy`), and one log line per retry unless `quiet`.
+ */
 function cellRetrySettings(config: RunnerConfig): RetrySettings {
-  const retry = config.retry ?? DEFAULT_RETRY_SETTINGS;
+  const retry = {
+    ...(config.retry ?? DEFAULT_RETRY_SETTINGS),
+    rerunLabel: rerunLabel(config.rerun ?? DEFAULT_RERUN_SETTINGS),
+  };
   if ((config.logLevel ?? "normal") === "quiet" || retry.log) return retry;
   return { ...retry, log: console.log };
 }
@@ -502,13 +553,16 @@ interface PendingTask {
   poolSize: number | null;
   /** Pre-computed cell key (used for cache lookup before dispatching the live worker). */
   key: string;
+  /** Live attempt this run makes at the cell (prior live attempts + 1); stamped as `attempt`. */
+  attempt: number;
 }
 
 /**
  * Materializes the full task list ahead of time so the worker pool has a flat
  * queue to consume. Pool expansion is shared across the multiple visits to
  * the same (scenario, pool_size) pair (one per run × arm × model) via a
- * memoized cache. Already-completed cells are filtered out here.
+ * memoized cache. Already-completed cells are filtered out here; re-queued ones
+ * (resume) are counted into `resume` and numbered by their next live attempt.
  *
  * Skipping logic: when a registry is available and the descriptor declares
  * `skipForModel(model.id)`, those cells are filtered out at queue-build time
@@ -531,9 +585,9 @@ function buildTaskQueue(
   universe: ReturnType<typeof buildToolUniverse>,
   config: RunnerConfig,
   ratelVersion: string,
-  completed: Set<string>,
+  plan: ResumePlan,
   registry: Map<string, AgentDescriptor> | undefined,
-): { tasks: PendingTask[]; cellsSkipped: number } {
+): { tasks: PendingTask[]; cellsSkipped: number; resume: ResumeCounts } {
   const poolCache = new Map<string, ToolSpec[]>();
   const expand = (scenario: Scenario, poolSize: number): ToolSpec[] => {
     const key = `${scenario.id}::${poolSize}`;
@@ -551,6 +605,7 @@ function buildTaskQueue(
 
   const tasks: PendingTask[] = [];
   let cellsSkipped = 0;
+  const resume = emptyResumeCounts();
   const tryEnqueue = (
     scenario: Scenario,
     arm: Arm,
@@ -569,11 +624,21 @@ function buildTaskQueue(
       runIndex,
       poolSize,
     });
-    if (completed.has(key)) {
+    countResume(plan, key, resume);
+    if (plan.completed.has(key)) {
       cellsSkipped++;
       return;
     }
-    tasks.push({ scenario, arm, model, runIndex, expandedPool, poolSize, key });
+    tasks.push({
+      scenario,
+      arm,
+      model,
+      runIndex,
+      expandedPool,
+      poolSize,
+      key,
+      attempt: nextAttempt(plan, key),
+    });
   };
 
   for (let runIndex = 0; runIndex < config.runsPerCell; runIndex++) {
@@ -594,7 +659,7 @@ function buildTaskQueue(
       }
     }
   }
-  return { tasks, cellsSkipped };
+  return { tasks, cellsSkipped, resume };
 }
 
 export async function run(config: RunnerConfig): Promise<RunnerSummary> {
@@ -631,7 +696,11 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   }
 
   const ratelVersion = config.ratelVersion ?? SDK_VERSION;
-  const completed = config.force ? new Set<string>() : readCompletedKeys(config, ratelVersion);
+  const rerun = config.rerun ?? DEFAULT_RERUN_SETTINGS;
+  const logLevel = config.logLevel ?? "normal";
+  // Resume: completed cells are skipped; rerunnable rows with attempts left re-run.
+  const priorRows = config.force ? [] : readOutputRows(config.outputPath);
+  const plan = config.force ? emptyResumePlan() : planResume(priorRows, cellKeyOf, rerun);
   // Control-arm reuse (default-on): control cells are version-independent, so reuse
   // prior cells (from any version) re-stamped to this run instead of re-running them.
   // Sources default to this run's own output (its prior-version controls); --ephemeral
@@ -641,16 +710,18 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   const allowLegacy = config.allowLegacyCache;
   const cacheIndex = config.force
     ? new Map<string, CellResult>()
-    : readControlCacheIndex(controlSources(config), harness, allowLegacy);
+    : readControlCacheIndex(controlSources(config), harness, allowLegacy, rerun.policy);
 
-  const { tasks, cellsSkipped: initialSkipped } = buildTaskQueue(
-    scenarios,
-    universe,
-    config,
-    ratelVersion,
-    completed,
-    registry,
-  );
+  const {
+    tasks,
+    cellsSkipped: initialSkipped,
+    resume,
+  } = buildTaskQueue(scenarios, universe, config, ratelVersion, plan, registry);
+  // Before anything is written (the cache drain appends).
+  if (!config.force) guardOutputCaps(config, priorRows, tasks, plan, ratelVersion);
+  // Printed even under `quiet`, like the final `done:` line: the AWS runner greps it.
+  const resumed = resumeLine(resume);
+  if (resumed) console.log(resumed);
 
   // Drain cache hits up front so the worker pool only deals with live cells.
   // Hits are appended in task-iteration order so JSONL ordering matches a fresh
@@ -687,7 +758,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     }
   }
 
-  if ((config.logLevel ?? "normal") !== "quiet" && cellsCached > 0) {
+  if (logLevel !== "quiet" && cellsCached > 0) {
     const legacyNote = legacyCached > 0 ? ` (${legacyCached} legacy-tier: no recorded cap)` : "";
     console.error(
       `cache: ${cellsCached} control cells reused${legacyNote} (re-stamped to ${ratelVersion}), ` +
@@ -697,7 +768,6 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
 
   const concurrency = Math.max(1, Math.floor(config.concurrency ?? 1));
   const runCellFn = config.runCell ?? makeRegistryRunCell(registry ?? new Map(), config.judgeModel);
-  const logLevel = config.logLevel ?? "normal";
 
   // Serial prewarm pass: let each arm pre-build expensive per-cell state before
   // the concurrent metered loop. Semantic/hybrid embedding is a synchronous
@@ -738,62 +808,113 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     }
   }
 
+  const breaker = createBreaker(config.abortAfterConsecutiveErrors);
+  const tally = newRunTally();
+  tally.requeued = requeuedTotal(resume);
+  tally.exhausted = resume.exhausted;
   let cellsRun = 0;
   let totalDollars = 0;
-  let stopped: RunnerSummary["stopped_reason"] = "completed";
-  let nextTaskIdx = 0;
+  let capHit = false;
+  let totalToRun = liveTasks.length;
 
-  // Pick the next runnable task, or `null` if the queue is drained / the
-  // global dollar cap has fired. Synchronous; safe to call from any worker
-  // because the JS event loop guarantees no preemption between the read and
-  // the increment.
-  const pickTask = (): PendingTask | null => {
-    if (stopped !== "completed") return null;
-    if (totalDollars >= config.dollarGlobalCap) {
-      stopped = "global_cap";
-      return null;
-    }
-    if (nextTaskIdx >= liveTasks.length) return null;
-    return liveTasks[nextTaskIdx++];
+  // Every dollar a cell spent counts toward the cap, including a fatal cell's.
+  const spend = (dollars: number): void => {
+    totalDollars += dollars;
+    if (totalDollars >= config.dollarGlobalCap) capHit = true;
   };
 
-  const totalToRun = liveTasks.length;
-  const worker = async (): Promise<void> => {
-    while (true) {
-      const task = pickTask();
-      if (!task) return;
-      const cell = await runCellFn({
-        scenario: task.scenario,
-        arm: task.arm,
-        model: task.model,
-        runIndex: task.runIndex,
-        pool: task.expandedPool,
-        poolSize: task.poolSize,
-        config,
-      });
-      // Tag with this run's identity before persisting (single write path, so
-      // every fresh row is stamped; cached/older rows keep their own tags). The
-      // version is the one this run measures (and resumes by), not whatever the
-      // arm stamped — `--ratel-version` re-stamps control runs this way.
-      cell.run_type = "task_completion";
-      cell.run_id = runId;
-      cell.generated_at = runTimestamp;
-      cell.ratel_version = ratelVersion;
-      cell.cache_source = "live";
-      // Synchronous tail: append + counters happen without yielding, so two
-      // workers cannot interleave their writes or accumulator updates.
-      appendRow(config.outputPath, cell);
-      cellsRun++;
-      totalDollars += cell.dollar_cost;
-      logCell(cell, logLevel, cellsRun, totalToRun);
-      if (totalDollars >= config.dollarGlobalCap) {
-        stopped = "global_cap";
+  // One worker-pool pass over `queue`. Returns the tasks whose rows came back
+  // rerunnable with attempts left (the next retry round's input).
+  const runPass = async (queue: PendingTask[]): Promise<PendingTask[]> => {
+    const retryable: PendingTask[] = [];
+    let nextTaskIdx = 0;
+
+    // Pick the next runnable task, or `null` if the queue is drained / the
+    // global dollar cap has fired. Tasks of an aborted model are skipped.
+    // Synchronous; safe to call from any worker because the JS event loop
+    // guarantees no preemption between the read and the increment.
+    const pickTask = (): PendingTask | null => {
+      if (capHit || totalDollars >= config.dollarGlobalCap) {
+        capHit = true;
+        return null;
       }
-    }
+      while (nextTaskIdx < queue.length) {
+        const task = queue[nextTaskIdx++];
+        if (!breaker.isAborted(task.model.id)) return task;
+      }
+      return null;
+    };
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const task = pickTask();
+        if (!task) return;
+        let cell: CellResult;
+        try {
+          cell = await runCellFn({
+            scenario: task.scenario,
+            arm: task.arm,
+            model: task.model,
+            runIndex: task.runIndex,
+            pool: task.expandedPool,
+            poolSize: task.poolSize,
+            config,
+          });
+        } catch (err) {
+          // A gated / daily-capped model: the cell writes no row (nor do other
+          // in-flight cells that meet it), and the model is aborted.
+          if (!(err instanceof FatalProviderError)) throw err;
+          breaker.fatal(task.model.id, err);
+          spend(err.dollarCost);
+          continue;
+        }
+        // Another in-flight cell may have aborted this model while this one ran.
+        // Its spend still counts, but an aborted model writes no further rows.
+        if (breaker.isAborted(task.model.id)) {
+          spend(cell.dollar_cost);
+          continue;
+        }
+        // Tag with this run's identity before persisting (single write path, so
+        // every fresh row is stamped; cached/older rows keep their own tags). The
+        // version is the one this run measures (and resumes by), not whatever the
+        // arm stamped — `--ratel-version` re-stamps control runs this way.
+        cell.run_type = "task_completion";
+        cell.run_id = runId;
+        cell.generated_at = runTimestamp;
+        cell.ratel_version = ratelVersion;
+        cell.cache_source = "live";
+        cell.attempt = task.attempt;
+        // Synchronous tail: append + counters happen without yielding, so two
+        // workers cannot interleave their writes or accumulator updates.
+        appendRow(config.outputPath, cell);
+        cellsRun++;
+        spend(cell.dollar_cost);
+        tallyRow(tally, cell);
+        breaker.record(task.model.id, cell);
+        logCell(cell, logLevel, cellsRun, totalToRun);
+        const outcome = rerunOutcome(cell, task.attempt, rerun);
+        if (outcome === "retry") retryable.push(task);
+        else if (outcome === "exhausted") tally.exhausted++;
+      }
+    };
+
+    const workerCount = Math.min(concurrency, Math.max(1, queue.length));
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return retryable;
   };
 
-  const workerCount = Math.min(concurrency, Math.max(1, liveTasks.length));
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  // Main pass, then up to `rerun.rounds` in-process passes over this run's
+  // rerunnable cells: same output (never re-truncated), same dollar cap; an
+  // aborted model's cells and a hit cap end them.
+  tally.requeued += await runRounds(
+    await runPass(liveTasks),
+    rerun,
+    (queue) => {
+      totalToRun += queue.length;
+      return runPass(queue);
+    },
+    (task) => !capHit && !breaker.isAborted(task.model.id),
+  );
 
   return {
     cells_run: cellsRun,
@@ -801,6 +922,9 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     cells_cached: cellsCached,
     scenarios: scenarios.length,
     total_dollars: totalDollars,
-    stopped_reason: stopped,
+    stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
+    cap_hit: capHit,
+    ...tally,
+    aborted: breaker.aborted(),
   };
 }

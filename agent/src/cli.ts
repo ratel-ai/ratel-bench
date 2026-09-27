@@ -24,12 +24,18 @@ import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
-import { retrySettingsFromEnv, retrySettingsLine } from "./llm-retry.js";
+import {
+  breakerLine,
+  breakerThresholdFromEnv,
+  retrySettingsFromEnv,
+  retrySettingsLine,
+} from "./llm-retry.js";
 import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
+import { doneLines, rerunSettingsLine, runExitCode } from "./rerun.js";
 import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
 import type { ResolvedModel } from "./types.js";
 
@@ -204,6 +210,10 @@ async function runMain(): Promise<void> {
   // Retry knobs (RATEL_LLM_RETRY_*, RATEL_CELL_TIMEOUT_GRACE_MS), validated and echoed once.
   const retry = retrySettingsFromEnv(process.env);
   console.log(retrySettingsLine(retry, parsed.timeoutMs));
+  // Breaker (RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS) and rerun flags, echoed once.
+  const abortAfterConsecutiveErrors = breakerThresholdFromEnv(process.env);
+  console.log(breakerLine(abortAfterConsecutiveErrors));
+  console.log(rerunSettingsLine(parsed.rerun));
   // Warm any user-hosted endpoints once so early cells don't burn their timeout on
   // a cold start (no-op for cloud/ollama model ids).
   await warmUpModels(parsed.models, parsed.modelApiKey);
@@ -229,6 +239,8 @@ async function runMain(): Promise<void> {
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,
     retry,
+    rerun: parsed.rerun,
+    abortAfterConsecutiveErrors,
     dollarGlobalCap: parsed.dollarGlobal,
     // Per-model rates from models.json (backend-aware). Empty when unpriced →
     // $0 rows, and the dollar cap simply doesn't bound the run.
@@ -255,11 +267,10 @@ async function runMain(): Promise<void> {
     console.log(`caps: judge=${parsed.judgeMaxOutputTokens}`);
   }
   const summary = await run(cfg);
-  console.log(
-    `done: ${summary.cells_run} cells run, ${summary.cells_cached} cached, ` +
-      `${summary.cells_skipped} skipped, $${summary.total_dollars.toFixed(4)} spent, ` +
-      `stopped=${summary.stopped_reason}`,
-  );
+  for (const line of doneLines(summary)) console.log(line);
+  // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
+  const exitCode = runExitCode(summary);
+  if (exitCode !== 0) process.exitCode = exitCode;
 }
 
 async function main(): Promise<void> {

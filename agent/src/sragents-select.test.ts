@@ -4,18 +4,25 @@ import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FatalProviderError } from "./cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
+import { formatDoneLine } from "./rerun.js";
 import {
   armCandidates,
   buildCandidateSets,
+  type CampaignOptions,
+  campaignDoneSummary,
   controlKey,
   drainControlCache,
+  planCells,
   readControlIndex,
+  runCampaign,
   type SelectArgs,
   selectForCell,
   sragentsCachePaths,
   sragentsCapOptions,
+  sragentsRerunOptions,
   sragentsTimeoutMs,
   stratifiedSample,
   type Task,
@@ -196,29 +203,10 @@ describe("control-arm reuse", () => {
       }),
       cell({ arm: "ratel-full", selected_skill_ids: ["ignored"] }), // not cacheable
     ]);
-    const { reuse } = readControlIndex([path]);
+    const reuse = readControlIndex([path]);
     const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
     expect(reuse.size).toBe(1); // ratel-full excluded
     expect(reuse.get(key)?.selected_skill_ids).toEqual(["early"]); // earliest wins
-  });
-
-  it("tracks keys already present at the current version (skip on resume)", () => {
-    const path = join(dir, "agent.jsonl");
-    write(path, [
-      cell({ arm: "control-baseline", ratel_ai_core_version: "0.0.0-not-current" }),
-      cell({
-        arm: "control-oracle",
-        pool_size: null,
-        ratel_ai_core_version: RATEL_AI_CORE_VERSION,
-      }),
-    ]);
-    const { current } = readControlIndex([path]);
-    expect(
-      current.has(controlKey("sragents-toolqa_0", "control-oracle", "gpt-5.4-mini", null, 0)),
-    ).toBe(true);
-    expect(
-      current.has(controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0)),
-    ).toBe(false);
   });
 
   it("skips transient/access/request-errored rows in reuse", () => {
@@ -231,10 +219,10 @@ describe("control-arm reuse", () => {
       // key 1: only rerunnable errors → no reuse, runs live.
       cell({ run_index: 1, error: "Forbidden", error_class: "access" }),
       cell({ run_index: 1, error: "tools: too many", error_class: "request" }),
-      // key 2: a current-version transient error is current (resume skips it) but not reusable.
+      // key 2: a current-version transient error is not reusable either (resume re-queues it).
       cell({ run_index: 2, ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
     ]);
-    const { reuse } = readControlIndex([path]);
+    const reuse = readControlIndex([path]);
     const key = (run: number) =>
       controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
     expect(reuse.get(key(0))?.selected_skill_ids).toEqual(["good"]);
@@ -248,7 +236,7 @@ describe("control-arm reuse", () => {
       cell({ error: "run timed out after 300000ms" }),
       cell({ run_index: 1, error: "No object generated: bad json", error_class: "outcome" }),
     ]);
-    const { reuse } = readControlIndex([path]);
+    const reuse = readControlIndex([path]);
     const key = (run: number) =>
       controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
     expect(reuse.get(key(0))?.error).toBe("run timed out after 300000ms");
@@ -270,16 +258,16 @@ describe("control-arm reuse", () => {
       [a, missing, b],
       [b, missing, a],
     ]) {
-      expect(readControlIndex(paths).reuse.get(key)?.selected_skill_ids).toEqual(["b-early"]);
+      expect(readControlIndex(paths).get(key)?.selected_skill_ids).toEqual(["b-early"]);
     }
   });
 
-  it("[guard] a current-version rerunnable error still counts as current (resume unchanged)", () => {
+  it("under --retry-errors all, timeout/outcome rows are not reusable either", () => {
     const path = join(dir, "agent.jsonl");
-    write(path, [cell({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" })]);
-    const { current } = readControlIndex([path]);
+    write(path, [cell({ error: "run timed out after 300000ms" })]);
     const key = controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, 0);
-    expect(current.has(key)).toBe(true);
+    expect(readControlIndex([path], new Map(), true, "all").has(key)).toBe(false);
+    expect(readControlIndex([path], new Map(), true, "none").has(key)).toBe(true);
   });
 
   it("applies harness tiers: exact (provider|cap) beats an earlier legacy row; others never", () => {
@@ -303,7 +291,7 @@ describe("control-arm reuse", () => {
       cell({ run_index: 3, provider: "amazon-bedrock", selected_skill_ids: ["pre-cap"] }),
     ]);
     const harness = new Map([["gpt-5.4-mini", bedrock4096]]);
-    const { reuse } = readControlIndex([path], harness);
+    const reuse = readControlIndex([path], harness);
     const key = (run: number) =>
       controlKey("sragents-toolqa_0", "control-baseline", "gpt-5.4-mini", 100, run);
     expect(reuse.get(key(0))?.selected_skill_ids).toEqual(["exact"]);
@@ -335,9 +323,7 @@ describe("control-arm reuse", () => {
       [exactFile, legacyFile],
       [legacyFile, exactFile],
     ]) {
-      expect(readControlIndex(paths, harness).reuse.get(key)?.selected_skill_ids).toEqual([
-        "exact",
-      ]);
+      expect(readControlIndex(paths, harness).get(key)?.selected_skill_ids).toEqual(["exact"]);
     }
   });
 });
@@ -476,25 +462,56 @@ describe("drainControlCache", () => {
     expect(readCells(output)).toHaveLength(1);
   });
 
-  // U5 flips this when resume starts re-queueing rerunnable errors.
-  it("[guard] resume still skips a current-version rerunnable-errored control", () => {
+  // The Phase 9 re-drain: a label's errored control is re-queued and served from the cache.
+  it("resume re-queues a current-version rerunnable-errored control; the cache serves it", () => {
     const output = join(dir, "out.jsonl");
     const canonical = join(dir, "agent.jsonl");
     writeCells(output, [
       cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
     ]);
-    writeCells(canonical, [cached({})]); // a good cached row must not be served either
+    writeCells(canonical, [cached({ selected_skill_ids: ["good"] })]);
 
-    const { liveTasks, reused } = drainControlCache([task("control-baseline")], {
+    const { liveTasks, reused, skipped, resume } = drainControlCache([task("control-baseline")], {
       outputPath: output,
       cachePaths: [canonical],
       force: false,
       allowLegacyCache: true,
     });
 
-    expect(reused).toBe(0);
+    expect(reused).toBe(1);
+    expect(skipped).toBe(0);
+    expect(resume).toEqual({ requeued: { transient: 1 }, exhausted: 0 });
     expect(liveTasks).toEqual([]);
-    expect(readCells(output)).toHaveLength(1);
+    const rows = readCells(output);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({
+      error: null,
+      selected_skill_ids: ["good"],
+      cache_source: "reused",
+    });
+  });
+
+  it("resume re-runs a current-version rerunnable-errored ratel-full cell live (it had no resume)", () => {
+    const output = join(dir, "out.jsonl");
+    writeCells(output, [
+      cached({ arm: "ratel-full", ratel_ai_core_version: RATEL_AI_CORE_VERSION }),
+      cached({
+        arm: "ratel-full",
+        run_index: 1,
+        ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+        error: "Overloaded",
+      }),
+    ]);
+
+    const { liveTasks, skipped } = drainControlCache([task("ratel-full"), task("ratel-full", 1)], {
+      outputPath: output,
+      cachePaths: [],
+      force: false,
+      allowLegacyCache: true,
+    });
+
+    expect(skipped).toBe(1);
+    expect(liveTasks.map((t) => [t.runIndex, t.attempt])).toEqual([[1, 2]]);
   });
 
   it("the output's own prior-version control beats an earlier cache row; cache fills its rerunnable gaps", () => {
@@ -528,6 +545,47 @@ describe("drainControlCache", () => {
       [0, ["own"], "reused"],
       [1, ["cache1"], "reused"],
     ]);
+  });
+
+  it("under --retry-errors all, a re-queued timeout control is not served a timeout again", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    const timedOut = { error: "run timed out after 300000ms" };
+    writeCells(output, [cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, ...timedOut })]);
+    writeCells(canonical, [cached(timedOut)]);
+
+    const { liveTasks, reused, resume } = drainControlCache([task("control-baseline")], {
+      outputPath: output,
+      cachePaths: [canonical],
+      force: false,
+      allowLegacyCache: true,
+      rerun: { policy: "all", maxAttempts: 3 },
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks.map((t) => t.attempt)).toEqual([2]);
+    expect(resume).toEqual({ requeued: { timeout: 1 }, exhausted: 0 });
+    expect(readCells(output)).toHaveLength(1);
+  });
+
+  it("under --retry-errors all, the cache sources never serve a timeout control either", () => {
+    const output = join(dir, "out.jsonl");
+    const canonical = join(dir, "agent.jsonl");
+    writeCells(output, [
+      cached({ ratel_ai_core_version: RATEL_AI_CORE_VERSION, error: "Overloaded" }),
+    ]);
+    writeCells(canonical, [cached({ error: "run timed out after 300000ms" })]);
+
+    const { liveTasks, reused } = drainControlCache([task("control-baseline")], {
+      outputPath: output,
+      cachePaths: [canonical],
+      force: false,
+      allowLegacyCache: true,
+      rerun: { policy: "all", maxAttempts: 3 },
+    });
+
+    expect(reused).toBe(0);
+    expect(liveTasks).toHaveLength(1);
   });
 
   describe("under output caps", () => {
@@ -764,6 +822,73 @@ describe("drainControlCache", () => {
       expect(reused).toBe(0);
       expect(liveTasks).toHaveLength(1);
       expect(readCells(output)).toEqual([]);
+    });
+
+    describe("rows this run re-queues are exempt (a rejected cap is fixed by re-running)", () => {
+      // A cap the provider rejects turns every cell into a `request` row at that cap.
+      const rejected = (over: Partial<SragentsSelectCell> = {}) =>
+        cached({
+          ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          error: "max_tokens: 200000 > 64000",
+          error_class: "request",
+          provider: "amazon-bedrock",
+          max_output_tokens: 200000,
+          ...over,
+        });
+      const drain = (
+        output: string,
+        rerun?: { policy: "infra" | "all" | "none"; maxAttempts: number },
+      ) =>
+        drainControlCache([capped(4096)], {
+          outputPath: output,
+          cachePaths: [],
+          force: false,
+          allowLegacyCache: true,
+          rerun,
+        });
+
+      it("re-queues a request row at a different cap instead of throwing", () => {
+        const output = join(dir, "out.jsonl");
+        writeCells(output, [rejected()]);
+        const { liveTasks, resume } = drain(output);
+        expect(liveTasks.map((t) => t.attempt)).toEqual([2]);
+        expect(resume).toEqual({ requeued: { request: 1 }, exhausted: 0 });
+      });
+
+      it("a later resume over [request at the old cap, success at the new] does not throw", () => {
+        const output = join(dir, "out.jsonl");
+        writeCells(output, [
+          rejected(),
+          cached({
+            ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+            provider: "amazon-bedrock",
+            max_output_tokens: 4096,
+          }),
+        ]);
+        for (const policy of ["infra", "none"] as const) {
+          expect(drain(output, { policy, maxAttempts: 3 }).skipped).toBe(1);
+        }
+      });
+
+      it("still throws on an exhausted request row, under `none`, and for a cell not in this run", () => {
+        const output = join(dir, "out.jsonl");
+        writeCells(output, [rejected(), rejected(), rejected()]);
+        expect(() => drain(output)).toThrow(/output has 200000/);
+        writeCells(output, [rejected()]);
+        expect(() => drain(output, { policy: "none", maxAttempts: 3 })).toThrow(
+          /output has 200000/,
+        );
+        writeCells(output, [rejected({ arm: "control-oracle", pool_size: null })]);
+        expect(() => drain(output)).toThrow(/output has 200000/);
+      });
+
+      it("still throws on a timeout row `all` re-queues (a final row summaries keep)", () => {
+        const output = join(dir, "out.jsonl");
+        writeCells(output, [
+          rejected({ error: "run timed out after 300000ms", error_class: "timeout" }),
+        ]);
+        expect(() => drain(output, { policy: "all", maxAttempts: 3 })).toThrow(/output has 200000/);
+      });
     });
 
     it("resume warns on legacy live current-version rows and skips them", () => {
@@ -1258,5 +1383,522 @@ describe("sragentsCapOptions", () => {
 
   it("rejects --judge-max-output-tokens: sragents-select has no judge", () => {
     expect(() => sragentsCapOptions(["--judge-max-output-tokens", "8"])).toThrow(/no LLM judge/);
+  });
+});
+
+describe("planCells", () => {
+  const sc = {
+    scenarioId: "sragents-toolqa_0",
+    category: "sragents-toolqa",
+    goldSkillIds: ["g1"],
+    fullPool: ["a", "g1"],
+    ratelTopK: ["g1"],
+    poolSize: 100,
+  };
+  const model = { id: "gpt-5.4-mini", model: {} as never, maxOutputTokens: null };
+  const task = (arm: SragentsArm, runIndex = 0): Task => ({ arm, sc, query: "q", model, runIndex });
+  const rerun = { policy: "infra" as const, maxAttempts: 3 };
+
+  function prior(arm: SragentsArm, over: Partial<SragentsSelectCell> = {}): SragentsSelectCell {
+    return {
+      run_type: "skill_selection",
+      generated_at: "2026-09-01T00:00:00.000Z",
+      ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+      scenario_id: sc.scenarioId,
+      category: sc.category,
+      arm,
+      model: model.id,
+      run_index: 0,
+      pool_size: arm === "control-oracle" ? null : sc.poolSize,
+      candidate_count: 2,
+      gold_skill_ids: ["g1"],
+      selected_skill_ids: ["g1"],
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      dollar_cost: 0,
+      wall_ms: 0,
+      error: null,
+      cache_source: "live",
+      ...over,
+    };
+  }
+  const overloaded = { error: "Overloaded" };
+
+  it("planCells resumes all arms incl. ratel-full", () => {
+    const tasks = [
+      task("control-baseline"),
+      task("ratel-full"),
+      task("control-oracle"),
+      task("ratel-full", 1),
+      task("ratel-full", 2),
+    ];
+    const rows = [
+      prior("control-baseline", overloaded), // re-queued (attempt 2)
+      prior("ratel-full"), // final → skipped
+      prior("control-oracle", { error: "run timed out after 300000ms" }), // final → skipped
+      prior("ratel-full", { run_index: 1, error: "Forbidden", error_class: "access" }),
+      prior("ratel-full", { run_index: 1, error: "Forbidden", error_class: "access" }),
+      // an older version's final row doesn't complete this version's cell
+      prior("ratel-full", { run_index: 2, ratel_ai_core_version: "0.0.0-old" }),
+    ];
+
+    const plan = planCells(tasks, rows, rerun);
+
+    expect(plan.pending.map((t) => [t.arm, t.runIndex, t.attempt])).toEqual([
+      ["control-baseline", 0, 2],
+      ["ratel-full", 1, 3],
+      ["ratel-full", 2, 1],
+    ]);
+    expect(plan.skipped).toBe(2);
+    expect(plan.resume).toEqual({ requeued: { transient: 1, access: 1 }, exhausted: 0 });
+  });
+
+  it("stops re-queueing at --max-attempts; reused rows don't count as attempts", () => {
+    const rows = [
+      prior("ratel-full", overloaded),
+      prior("ratel-full", overloaded),
+      prior("ratel-full", overloaded),
+      prior("control-baseline", { ...overloaded, cache_source: "reused" }),
+      prior("control-baseline", { ...overloaded, cache_source: "reused" }),
+      prior("control-baseline", { ...overloaded, cache_source: "reused" }),
+    ];
+    const plan = planCells([task("ratel-full"), task("control-baseline")], rows, rerun);
+    expect(plan.pending.map((t) => [t.arm, t.attempt])).toEqual([["control-baseline", 1]]);
+    expect(plan.skipped).toBe(1);
+    expect(plan.resume.exhausted).toBe(1);
+  });
+
+  it("honours non-default settings: `none` keeps the row, --max-attempts 1 exhausts it", () => {
+    const rows = [prior("ratel-full", overloaded)];
+    const none = planCells([task("ratel-full")], rows, { policy: "none", maxAttempts: 3 });
+    expect(none).toMatchObject({ pending: [], skipped: 1 });
+    expect(none.resume).toEqual({ requeued: {}, exhausted: 0 });
+    const once = planCells([task("ratel-full")], rows, { policy: "infra", maxAttempts: 1 });
+    expect(once).toMatchObject({ pending: [], skipped: 1 });
+    expect(once.resume).toEqual({ requeued: {}, exhausted: 1 });
+  });
+});
+
+describe("runCampaign", () => {
+  const sc = (i: number) => ({
+    scenarioId: `sragents-toolqa_${i}`,
+    category: "sragents-toolqa",
+    goldSkillIds: ["g1"],
+    fullPool: ["a", "g1"],
+    ratelTopK: ["g1"],
+    poolSize: 50,
+  });
+  const answer = {
+    content: [{ type: "text" as const, text: JSON.stringify({ selected_skill_ids: ["g1"] }) }],
+    finishReason: { unified: "stop" as const, raw: "end_turn" },
+    usage: {
+      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 5, text: 5, reasoning: 0 },
+    },
+    warnings: [],
+  };
+  const apiError = (statusCode: number, message: string) =>
+    new APICallError({ message, url: "https://api.test/v1", requestBodyValues: {}, statusCode });
+  const opts = (onCell: (c: SragentsSelectCell) => void) => ({
+    concurrency: 1,
+    dollarCap: 100,
+    seed: 42,
+    quiet: true,
+    catalog: new Map(),
+    timeoutMs: 300_000,
+    retry: {
+      policy: { maxAttempts: 4, baseMs: 1000, maxDelayMs: 8000, maxTotalWaitMs: 60_000 },
+      graceMs: 30_000,
+      sleep: async () => {},
+    },
+    rerun: {
+      policy: "infra" as const,
+      maxAttempts: 3,
+      rounds: 1,
+      delayMs: 0,
+      sleep: async () => {},
+    },
+    abortAfterConsecutiveErrors: 10,
+    onCell,
+  });
+
+  /** Route every generateObject call to the real SDK (the models are fakes) for one test. */
+  async function withRealGenerateObject<T>(fn: () => Promise<T>): Promise<T> {
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockImplementation(actual.generateObject);
+    try {
+      return await fn();
+    } finally {
+      mock.mockReset();
+    }
+  }
+
+  it("runCampaign drops fatal cells and aborts the model", async () => {
+    const a = new MockLanguageModelV3({ doGenerate: async () => answer });
+    const b = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw apiError(403, "model b is not available for this account");
+      },
+    });
+    const tasks: Task[] = [0, 1, 2].flatMap((i) => [
+      {
+        arm: "control-oracle",
+        sc: sc(i),
+        query: "q",
+        model: { id: "A", model: a, maxOutputTokens: null },
+        runIndex: 0,
+      },
+      {
+        arm: "control-oracle",
+        sc: sc(i),
+        query: "q",
+        model: { id: "B", model: b, maxOutputTokens: null },
+        runIndex: 0,
+      },
+    ]);
+    const rows: SragentsSelectCell[] = [];
+
+    const result = await withRealGenerateObject(() =>
+      runCampaign(
+        tasks,
+        opts((c) => rows.push(c)),
+      ),
+    );
+
+    expect(rows.map((r) => r.model)).toEqual(["A", "A", "A"]);
+    expect(b.doGenerateCalls).toHaveLength(1);
+    expect(result.aborted).toEqual({
+      B: { reason: "fatal", detail: "model b is not available for this account" },
+    });
+    expect(result.stopped_reason).toBe("fatal");
+    expect(result.cells_run).toBe(3);
+  });
+
+  it("stamps attempt, and re-runs a rerunnable cell in a retry round", async () => {
+    let call = 0;
+    const flaky = new MockLanguageModelV3({
+      doGenerate: async () => {
+        if (call++ === 0) throw apiError(400, "tools: too many tools"); // request: rerunnable
+        return answer;
+      },
+    });
+    const tasks: Task[] = [
+      {
+        arm: "ratel-full",
+        sc: sc(0),
+        query: "q",
+        model: { id: "C", model: flaky, maxOutputTokens: null },
+        runIndex: 0,
+        attempt: 2,
+      },
+    ];
+    const rows: SragentsSelectCell[] = [];
+
+    const result = await withRealGenerateObject(() =>
+      runCampaign(
+        tasks,
+        opts((c) => rows.push(c)),
+      ),
+    );
+
+    expect(rows.map((r) => [r.error_class ?? null, r.attempt])).toEqual([
+      ["request", 2],
+      [null, 3],
+    ]);
+    expect(rows[0].retry_policy).toBe(
+      "a4/b1000/c8000/w60000;timeout=active:300000+g30000;rerun=infra/3",
+    );
+    expect(result).toMatchObject({ cells_run: 2, errors: 1, requeued: 1, exhausted: 0 });
+  });
+});
+
+describe("runCampaign: breaker, rounds and cap", () => {
+  const sc = (i: number) => ({
+    scenarioId: `sragents-toolqa_${i}`,
+    category: "sragents-toolqa",
+    goldSkillIds: ["g1"],
+    fullPool: ["a", "g1"],
+    ratelTopK: ["g1"],
+    poolSize: 50,
+  });
+  const answer = {
+    content: [{ type: "text" as const, text: JSON.stringify({ selected_skill_ids: ["g1"] }) }],
+    finishReason: { unified: "stop" as const, raw: "end_turn" },
+    usage: {
+      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 5, text: 5, reasoning: 0 },
+    },
+    warnings: [],
+  };
+  const apiError = (statusCode: number, message: string) =>
+    new APICallError({
+      message,
+      url: "https://api.test/v1",
+      requestBodyValues: {},
+      statusCode,
+      isRetryable: statusCode === 529,
+    });
+  /** A model whose n-th call (0-based) throws `fail(n)`'s error, or answers when it returns null. */
+  const scriptedModel = (fail: (call: number) => APICallError | null) => {
+    let call = 0;
+    return new MockLanguageModelV3({
+      doGenerate: async () => {
+        const err = fail(call++);
+        if (err) throw err;
+        return answer;
+      },
+    });
+  };
+  const taskOf = (id: string, model: MockLanguageModelV3, i: number): Task => ({
+    arm: "ratel-full",
+    sc: sc(i),
+    query: "q",
+    model: { id, model, maxOutputTokens: null },
+    runIndex: 0,
+  });
+
+  /** Run `tasks` with the real generateObject; `over` patches the options, round sleeps recorded. */
+  async function campaign(
+    tasks: Task[],
+    over: { rerun?: Partial<CampaignOptions["rerun"]> } & Partial<Omit<CampaignOptions, "rerun">>,
+  ) {
+    const rows: SragentsSelectCell[] = [];
+    const sleeps: number[] = [];
+    const { rerun, ...rest } = over;
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockImplementation(actual.generateObject);
+    try {
+      const result = await runCampaign(tasks, {
+        concurrency: 1,
+        dollarCap: 100,
+        seed: 42,
+        quiet: true,
+        catalog: new Map(),
+        timeoutMs: 300_000,
+        retry: {
+          policy: { maxAttempts: 2, baseMs: 1000, maxDelayMs: 8000, maxTotalWaitMs: 60_000 },
+          graceMs: 30_000,
+          sleep: async () => {},
+        },
+        rerun: {
+          policy: "infra",
+          maxAttempts: 3,
+          rounds: 1,
+          delayMs: 7,
+          sleep: async (ms) => {
+            sleeps.push(ms);
+          },
+          ...rerun,
+        },
+        abortAfterConsecutiveErrors: 10,
+        onCell: (c) => rows.push(c),
+        ...rest,
+      });
+      return { result, rows, sleeps };
+    } finally {
+      mock.mockReset();
+    }
+  }
+
+  it("K consecutive transport errors abort the model; its cells get no retry round", async () => {
+    const down = scriptedModel(() => apiError(529, "Overloaded"));
+    const { result, rows, sleeps } = await campaign(
+      [0, 1, 2].map((i) => taskOf("D", down, i)),
+      { abortAfterConsecutiveErrors: 2 },
+    );
+    expect(rows).toHaveLength(2);
+    expect(sleeps).toEqual([]);
+    expect(Object.keys(result.aborted)).toEqual(["D"]);
+    expect(result).toMatchObject({
+      stopped_reason: "error_circuit",
+      requeued: 0,
+      retries: 2,
+      throttled_retries: 2,
+      errors: 2,
+    });
+  });
+
+  it("drops an in-flight row after its model gets a fatal error, but counts its spend", async () => {
+    let signalSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      signalSecond = resolve;
+    });
+    let call = 0;
+    const same = new MockLanguageModelV3({
+      doGenerate: async () => {
+        if (call++ === 0) {
+          await secondStarted;
+          throw apiError(403, "not available for this account");
+        }
+        signalSecond();
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        return answer;
+      },
+    });
+    const { result, rows } = await campaign(
+      [0, 1, 2].map((i) => taskOf("claude-haiku-4-5", same, i)),
+      { concurrency: 2, rerun: { rounds: 0 } },
+    );
+
+    expect(same.doGenerateCalls).toHaveLength(2);
+    expect(rows).toEqual([]);
+    expect(result).toMatchObject({ cells_run: 0, stopped_reason: "fatal" });
+    expect(result.total_dollars).toBeCloseTo(0.000125, 10);
+  });
+
+  it("the rounds follow opts.rerun: --max-attempts 0 is unlimited, --retry-rounds bounds them", async () => {
+    const flaky = scriptedModel((n) => (n < 2 ? apiError(400, "tools: too many tools") : null));
+    const { result, rows, sleeps } = await campaign([taskOf("C", flaky, 0)], {
+      rerun: { maxAttempts: 0, rounds: 3 },
+    });
+    expect(rows.map((r) => r.attempt)).toEqual([1, 2, 3]);
+    expect(sleeps).toEqual([7, 7]);
+    expect(result).toMatchObject({ requeued: 2, exhausted: 0, errors: 2 });
+  });
+
+  it("a cell out of opts.rerun's --max-attempts ends exhausted", async () => {
+    const broken = scriptedModel(() => apiError(400, "tools: too many tools"));
+    const { result, rows } = await campaign([taskOf("C", broken, 0)], {
+      rerun: { maxAttempts: 2, rounds: 5 },
+    });
+    expect(rows.map((r) => r.attempt)).toEqual([1, 2]);
+    expect(result).toMatchObject({ cells_run: 2, requeued: 1, exhausted: 1 });
+  });
+
+  it("a hit cap skips the rounds", async () => {
+    const broken = scriptedModel(() => apiError(400, "tools: too many tools")); // unpriced: $0
+    const priced = scriptedModel(() => null); // claude-haiku-4-5: $0.000125 a call
+    const { result, rows, sleeps } = await campaign(
+      [taskOf("C", broken, 0), taskOf("claude-haiku-4-5", priced, 1)],
+      { dollarCap: 0.0001 },
+    );
+    expect(rows).toHaveLength(2);
+    expect(sleeps).toEqual([]);
+    expect(result).toMatchObject({ stopped_reason: "global_cap", cap_hit: true, requeued: 0 });
+  });
+
+  it("a fatal abort outranks a cap hit in stopped_reason; cap_hit still reports it", async () => {
+    const ok = scriptedModel(() => null);
+    const gated = scriptedModel(() => apiError(403, "not available for this account"));
+    const { result, rows } = await campaign(
+      [
+        taskOf("claude-haiku-4-5", ok, 0),
+        taskOf("B", gated, 0),
+        ...[1, 2, 3].map((i) => taskOf("claude-haiku-4-5", ok, i)),
+      ],
+      { dollarCap: 0.0002 },
+    );
+    expect(rows.map((r) => r.model)).toEqual(["claude-haiku-4-5", "claude-haiku-4-5"]);
+    expect(result).toMatchObject({ stopped_reason: "fatal", cap_hit: true });
+    expect(formatDoneLine({ ...result, cells_cached: 0, cells_skipped: 0 })).toMatch(
+      /stopped=fatal\+global_cap/,
+    );
+  });
+});
+
+describe("campaignDoneSummary", () => {
+  it("adds the cache drain and resume counts to the campaign's", () => {
+    const summary = campaignDoneSummary(
+      {
+        cells_run: 5,
+        total_dollars: 0.5,
+        stopped_reason: "error_circuit",
+        cap_hit: false,
+        retries: 4,
+        throttled_retries: 3,
+        errors: 2,
+        requeued: 1,
+        exhausted: 1,
+        aborted: { m: { reason: "error_circuit", detail: "10 consecutive" } },
+      },
+      { reused: 7, skipped: 6, resume: { requeued: { transient: 1, access: 1 }, exhausted: 1 } },
+    );
+    expect(summary).toMatchObject({
+      cells_run: 5,
+      cells_cached: 7,
+      cells_skipped: 6,
+      requeued: 3,
+      exhausted: 2,
+      stopped_reason: "error_circuit",
+      aborted: { m: { reason: "error_circuit", detail: "10 consecutive" } },
+    });
+    const line = formatDoneLine(summary);
+    expect(line).toMatch(/^done: \d+ cells run/);
+    expect(line.match(/, \$([0-9.]+) spent/)?.[1]).toBe("0.5000");
+  });
+});
+
+describe("selectForCell fatal errors", () => {
+  it("rethrows a fatal provider error after metering: no row", async () => {
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    vi.mocked(ai.generateObject).mockImplementationOnce(actual.generateObject);
+    const gated = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "Forbidden",
+          url: "https://api.test/v1",
+          requestBodyValues: {},
+          statusCode: 403,
+        });
+      },
+    });
+    const err = await selectForCell({
+      arm: "control-oracle",
+      sc: {
+        scenarioId: "sragents-toolqa_0",
+        category: "sragents-toolqa",
+        goldSkillIds: ["g1"],
+        fullPool: ["g1"],
+        ratelTopK: ["g1"],
+        poolSize: 50,
+      },
+      query: "q",
+      model: { id: "claude-haiku-4-5", model: gated, maxOutputTokens: null },
+      runIndex: 0,
+      seed: 42,
+      catalog: new Map(),
+      timeoutMs: 300_000,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FatalProviderError);
+    expect((err as FatalProviderError).dollarCost).toBe(0);
+    expect(gated.doGenerateCalls).toHaveLength(1);
+  });
+});
+
+describe("sragentsRerunOptions", () => {
+  it("defaults, and reads the four rerun flags", () => {
+    expect(sragentsRerunOptions(["--models", "m"])).toEqual({
+      policy: "infra",
+      maxAttempts: 3,
+      rounds: 1,
+      delayMs: 60_000,
+    });
+    expect(
+      sragentsRerunOptions([
+        "--retry-errors",
+        "none",
+        "--max-attempts",
+        "5",
+        "--retry-rounds",
+        "2",
+        "--retry-delay-s",
+        "0",
+      ]),
+    ).toEqual({ policy: "none", maxAttempts: 5, rounds: 2, delayMs: 0 });
+  });
+
+  it("rejects bad or missing values (arg() would silently ignore them)", () => {
+    expect(() => sragentsRerunOptions(["--retry-errors", "some"])).toThrow(/infra, all or none/);
+    expect(() => sragentsRerunOptions(["--retry-errors"])).toThrow(/infra, all or none/);
+    for (const flag of ["--max-attempts", "--retry-rounds", "--retry-delay-s"]) {
+      expect(() => sragentsRerunOptions([flag, "-1"])).toThrow(/non-negative integer/);
+      expect(() => sragentsRerunOptions([flag])).toThrow(/non-negative integer/);
+    }
   });
 });

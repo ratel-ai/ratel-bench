@@ -18,6 +18,15 @@ export function parsePositiveInt(label: string, raw: string): number {
   return n;
 }
 
+/** Like `parsePositiveInt`, but 0 is allowed (a knob's "off" or "unlimited"). */
+export function parseNonNegativeInt(label: string, raw: string): number {
+  const n = Number(raw);
+  if (!/^\s*\d+\s*$/.test(raw) || !Number.isSafeInteger(n)) {
+    throw new Error(`${label} must be a non-negative integer (got "${raw}")`);
+  }
+  return n;
+}
+
 /** A positive integer that becomes a timer delay, so also ≤ `MAX_TIMER_MS`. */
 export function parseTimerMs(label: string, raw: string): number {
   const n = parsePositiveInt(label, raw);

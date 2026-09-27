@@ -8,7 +8,10 @@ import {
   RetriesExhaustedError,
 } from "./cell-errors.js";
 import {
+  breakerLine,
+  breakerThresholdFromEnv,
   cellRetry,
+  createBreaker,
   DEFAULT_RETRY_SETTINGS,
   newRetryStats,
   PausableDeadline,
@@ -707,5 +710,103 @@ describe("retry settings", () => {
       "retry: attempts=8 base=2000ms max-delay=60000ms max-wait=180000ms; " +
         "timeout=180000ms active + 30000ms grace",
     );
+  });
+});
+
+describe("createBreaker", () => {
+  const transient = { error: "Overloaded", error_class: "transient" as const };
+  const ok = { error: null };
+
+  it("counts streaks per model; the first abort wins; stopped() prefers fatal", () => {
+    const breaker = createBreaker(2);
+    breaker.record("A", transient);
+    breaker.record("B", transient);
+    breaker.record("A", ok); // resets A only
+    breaker.record("B", { error: "model b not found" }); // legacy row: access by message
+    expect(breaker.isAborted("A")).toBe(false);
+    expect(breaker.aborted()).toEqual({
+      B: {
+        reason: "error_circuit",
+        detail: "2 consecutive transient/access errors (last: model b not found)",
+      },
+    });
+    expect(breaker.stopped()).toBe("error_circuit");
+
+    breaker.fatal("B", new Error("later")); // B keeps its first reason
+    breaker.fatal("A", new Error("model A not available for this account"));
+    expect(breaker.aborted().B.reason).toBe("error_circuit");
+    expect(breaker.aborted().A).toEqual({
+      reason: "fatal",
+      detail: "model A not available for this account",
+    });
+    expect(breaker.stopped()).toBe("fatal");
+  });
+
+  it("request rows neither count toward the streak nor reset it", () => {
+    const request = { error: "tools: too many tools", error_class: "request" as const };
+    const breaker = createBreaker(2);
+    breaker.record("A", request);
+    breaker.record("A", request);
+    expect(breaker.isAborted("A")).toBe(false);
+    expect(breaker.stopped()).toBeUndefined();
+    breaker.record("A", transient);
+    breaker.record("A", request);
+    breaker.record("A", transient);
+    expect(breaker.aborted().A?.reason).toBe("error_circuit");
+  });
+
+  it("an outage row with no stamped class still counts (legacy message rules)", () => {
+    const breaker = createBreaker(1);
+    breaker.record("A", { error: "Failed after 3 attempts. Last error: Overloaded" });
+    expect(breaker.isAborted("A")).toBe(true);
+  });
+
+  it("threshold 0 never trips on a streak; fatal still aborts", () => {
+    const breaker = createBreaker(0);
+    for (let i = 0; i < 50; i++) breaker.record("A", transient);
+    expect(breaker.stopped()).toBeUndefined();
+    breaker.fatal("A", "gated");
+    expect(breaker.aborted().A).toEqual({ reason: "fatal", detail: "gated" });
+  });
+});
+
+describe("breaker knob", () => {
+  it("RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS: default 10, 0 = off, else a non-negative int", () => {
+    expect(breakerThresholdFromEnv({})).toBe(10);
+    expect(breakerThresholdFromEnv({ RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS: "0" })).toBe(0);
+    expect(breakerThresholdFromEnv({ RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS: "3" })).toBe(3);
+    for (const bad of ["-1", "1.5", "x", ""]) {
+      expect(() => breakerThresholdFromEnv({ RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS: bad })).toThrow(
+        /RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS must be a non-negative integer/,
+      );
+    }
+  });
+
+  it("echoes the knob at startup", () => {
+    expect(breakerLine(10)).toBe(
+      "breaker: abort a model on a fatal provider error, or after 10 consecutive transient/access errors",
+    );
+    expect(breakerLine(0)).toMatch(/streak check off \(RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS=0\)/);
+  });
+});
+
+describe("retry_policy rerun suffix", () => {
+  it("appends ';rerun=<label>' when the settings carry the run's rerun policy", async () => {
+    const plain = cellRetry(new MockLanguageModelV3(), 1000, DEFAULT_RETRY_SETTINGS);
+    const tagged = cellRetry(new MockLanguageModelV3(), 1000, {
+      ...DEFAULT_RETRY_SETTINGS,
+      rerunLabel: "infra/3",
+    });
+    try {
+      expect(plain.rowFields().retry_policy).toBe(
+        "a8/b2000/c60000/w180000;timeout=active:1000+g30000",
+      );
+      expect(tagged.rowFields().retry_policy).toBe(
+        "a8/b2000/c60000/w180000;timeout=active:1000+g30000;rerun=infra/3",
+      );
+    } finally {
+      await plain.run(async () => {});
+      await tagged.run(async () => {});
+    }
   });
 });

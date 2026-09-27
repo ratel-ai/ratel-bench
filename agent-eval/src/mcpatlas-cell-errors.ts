@@ -1,5 +1,6 @@
 // Error classes for an McpAtlasCell, so the native cache never re-serves an
-// infra failure and summaries can count them.
+// infra failure, summaries can count them, and runCampaign's error circuit can
+// stop a dead model.
 //
 // A LOCAL COPY of the benchmark taxonomy in agent/src/cell-errors.ts, which
 // agent-eval must not import. Keep the two in step. The classes mean the same:
@@ -96,6 +97,12 @@ const HARNESS_TIMED_OUT = /\(timedOut=true\b/;
 /** Killed outside the deadline (runClaude/runCodex only kill on timeout): OOM or a container stop. */
 const HARNESS_KILLED = /\(timedOut=false, exitCode=null, signal=SIGKILL\)/;
 const JUDGE_FAILED = "judge failed:";
+const JUDGE_ACCESS =
+  /AccessDenied(?:Exception)?|not authorized to invoke|UnrecognizedClientException|ResourceNotFoundException/i;
+const JUDGE_ON_DEMAND_GATE = /ValidationException/i;
+const ON_DEMAND_THROUGHPUT = /on-demand throughput/i;
+const JUDGE_TRANSIENT =
+  /Throttling(?:Exception)?|ServiceUnavailableException|InternalServerException|ModelTimeoutException|ExpiredTokenException|ModelNotReadyException|Too many requests|rate limit exceeded/i;
 
 /** A cell's error class; null when the agent run did not error. */
 export function cellErrorClass(cell: CellErrorRow): CellErrorClass | null {
@@ -116,9 +123,36 @@ export function cellErrorClass(cell: CellErrorRow): CellErrorClass | null {
   return classifyMessage(cell.error) ?? (cell.finish_reason === "error" ? "transient" : "outcome");
 }
 
+/**
+ * The breaker's view of a cell. A judge failure can leave the agent's `error`
+ * null and the verdict n/a, but a judge-side access or transport outage must
+ * still extend the circuit streak. Other judge failures do not reset it.
+ * Scoring and cache decisions continue to use `cellErrorClass` and
+ * `isReusableCell` respectively.
+ */
+export function breakerErrorClass(cell: CellErrorRow): CellErrorClass | null {
+  const agentClass = cellErrorClass(cell);
+  if (agentClass !== null) return agentClass;
+  const judgeError = cell.claim_rubric.judge_error;
+  if (!judgeError?.startsWith(JUDGE_FAILED)) return null;
+  const message = judgeError.slice(JUDGE_FAILED.length).trim();
+  if (
+    JUDGE_ACCESS.test(message) ||
+    (JUDGE_ON_DEMAND_GATE.test(message) && ON_DEMAND_THROUGHPUT.test(message))
+  ) {
+    return "access";
+  }
+  return classifyMessage(message) ?? (JUDGE_TRANSIENT.test(message) ? "transient" : "outcome");
+}
+
 /** Infra errors (transient|access) say nothing about the model. */
 export function isInfraErrorCell(cell: CellErrorRow): boolean {
-  const cls = cellErrorClass(cell);
+  return isInfraErrorClass(cellErrorClass(cell));
+}
+
+/** The class-level test behind `isInfraErrorCell`, for callers that already
+ *  hold the class. */
+export function isInfraErrorClass(cls: CellErrorClass | null): boolean {
   return cls === "transient" || cls === "access";
 }
 

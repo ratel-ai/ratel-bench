@@ -264,6 +264,11 @@ export interface CellResult {
    * the control cache (re-stamped). Legacy rows lack it.
    */
   cache_source?: "live" | "reused";
+  /**
+   * Live attempt at this cell: its key's earlier live rows (resume, retry rounds)
+   * + 1. Reused rows keep their source's. Legacy rows lack it.
+   */
+  attempt?: number;
   /** Retries the cell's calls spent (`llm-retry.ts`). Legacy rows lack it (SDK retries, uncounted). */
   retries?: number;
   /** Of `retries`, those after a throttle/overload status (429/503/529). */
