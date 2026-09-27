@@ -5,7 +5,8 @@
 // agent-eval must not import. Keep the two in step. The classes mean the same:
 //
 //   transient : provider/network/sandbox hiccup (5xx, 429, overload, reset). Re-run it.
-//   access    : the model is gated / missing / unauthenticated. Re-run once fixed.
+//   access    : the model is gated / missing / unauthenticated / daily-capped.
+//               Re-run once fixed.
 //   request   : the provider rejected the request (other 4xx). Re-runnable.
 //   timeout   : the cell hit its deadline. A final, scored outcome.
 //   outcome   : the model's own failure (max-turns, context overflow, anything
@@ -35,6 +36,12 @@
 //   - The harness `finish_reason` (`error_max_turns`, `error_timeout`).
 //
 // Unrecognised text on a harness envelope row is the model's outcome.
+//
+// Not copied: rules for agent/'s `withRetry` wrapper's RetriesExhaustedError /
+// FatalProviderError (agent/src/cell-errors.ts), incl. the former's
+// `Failed after N attempts (reason).` form in LEGACY_RETRY_LAST. No mcpatlas
+// cell runs an `ai` SDK agent, so none can reach one; the judge call is not
+// behind `withRetry` and only writes `judge_error`.
 
 import type { McpAtlasCell } from "./mcpatlas-types.js";
 
@@ -45,11 +52,15 @@ export type CellErrorRow = Pick<McpAtlasCell, "error" | "finish_reason"> & {
   claim_rubric: Pick<McpAtlasCell["claim_rubric"], "judge_error">;
 };
 
-// Shared with agent/src/cell-errors.ts.
+// Shared with agent/src/cell-errors.ts, except LEGACY_RETRY_LAST lacks agent's
+// RetriesExhaustedError `(reason)` form (not copied, see header).
 const CONTEXT_TOO_LONG =
   /prompt is too long|Input is too long|context_length_exceeded|maximum context length/i;
 const CONTENT_FILTER = /content[ _-]?filter/i;
-const ACCESS = /not available for this account|AWS credential provider failed|model .* not found/i;
+// "Too many tokens per day": Bedrock's daily token cap, a retryable 429 that no
+// in-cell backoff can outwait; the model is out for the day, as if gated.
+const ACCESS =
+  /not available for this account|AWS credential provider failed|model .* not found|Too many tokens per day/i;
 const NETWORK = /fetch failed|ECONNRESET|UND_ERR_|other side closed/;
 const LEGACY_TRANSIENT =
   /Overloaded|Internal server error|Service Unavailable|Invalid JSON response|Cannot connect to API/i;

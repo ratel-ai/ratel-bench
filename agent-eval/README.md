@@ -98,6 +98,18 @@ keys stay byte-identical to an uncapped run. Truncation *detection* (`truncated_
   `judge failed: …` re-runs. (Before this, an uncapped truncation read `judge failed: No object
   generated…` and re-ran.)
 
+### Judge retries
+
+The judge call passes `maxRetries: 6` (`JUDGE_MAX_RETRIES` in `mcpatlas-judge.ts`; the SDK
+default is 2), so throttling and 5xx get the SDK's backoff (2s doubling, ~2 min in all; a
+`Retry-After` under 60s replaces a step) before the task is scored `judge failed: …` (still
+re-run, as above). A truncation after a retried attempt still reads `judge truncated …` (a
+no-output truncation arrives inside the SDK's `RetryError`, whose `lastError` is classified; a
+partial-JSON one arrives bare) and meters that attempt's tokens. No retry stats are recorded (the
+judge call is not behind agent/'s `withRetry`). The count is a fixed constant, not a flag, and is
+**not** recorded in the frozen config: it changes whether a judge call eventually succeeds, never
+how it scores, so `config_hash` and native cache keys stay unchanged.
+
 ### Errored cells
 
 `mcpatlas-cell-errors.ts` classifies a cell's `error` as `transient | access | request | timeout |
@@ -114,7 +126,8 @@ with the shapes a cell carries. First match wins:
    signal=null): spawn … EAGAIN|ENOENT`), `ENOSPC`, a CLI exit without an envelope — is
    `transient` too (see 8).
 4. The shared message rules: context-too-long / content-filter → `outcome`; model-access wording
-   and codex's `Quota exceeded …` / `hit your usage limit` → `access`.
+   (incl. Bedrock's daily cap `Too many tokens per day`) and codex's `Quota exceeded …` /
+   `hit your usage limit` → `access`.
 5. By HTTP status, read from Claude Code's `API Error: <status> …` and
    `API Error: Request rejected (<status>) · …` (the 429 shape of the pinned 2.1.246) and codex's
    `unexpected status <status> …` / `exceeded retry limit, last status: <status> …`:
@@ -132,6 +145,11 @@ with the shapes a cell carries. First match wins:
 7. codex's raw `"type": "invalid_request_error"` body → `request`.
 8. Anything else → `transient` on a runCell throw (`finish_reason` `error`), `outcome` on a
    harness envelope row (the model's own failure).
+
+Not copied: rules for agent/'s `withRetry` wrapper's `RetriesExhaustedError` /
+`FatalProviderError`. The agent under test is Claude Code or codex (their own retries), never an
+`ai` SDK model, so neither can reach a cell; the judge only writes `judge_error` (see Judge
+retries).
 
 Claude Code's error subtypes (`error_during_execution`, `error_max_turns`, …) carry no `result`:
 their `errors[]` lines (one per line) are the cell's `error`.
