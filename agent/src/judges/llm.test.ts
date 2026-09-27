@@ -1,6 +1,6 @@
 import { NoObjectGeneratedError, RetryError } from "ai";
 import { describe, expect, it, vi } from "vitest";
-import { judgeLLM } from "./llm.js";
+import { JUDGE_MAX_RETRIES, judgeLLM } from "./llm.js";
 
 vi.mock("ai", async () => {
   const actual = await vi.importActual<typeof import("ai")>("ai");
@@ -217,6 +217,19 @@ describe("judgeLLM", () => {
     // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
     await judgeLLM({ prompt: "p", finalText: "x", model: {} as any });
     expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBeUndefined();
+  });
+
+  it("passes maxRetries: JUDGE_MAX_RETRIES (6) — the judge is not wrapped by the agent's retry policy", async () => {
+    const ai = await import("ai");
+    const mock = vi.mocked(ai.generateObject);
+    // biome-ignore lint/suspicious/noExplicitAny: only `object` matters for this test path
+    mock.mockResolvedValueOnce({ object: { verdict: "pass", explanation: "ok" } } as any);
+
+    // biome-ignore lint/suspicious/noExplicitAny: model call is mocked
+    await judgeLLM({ prompt: "p", finalText: "x", model: {} as any });
+
+    expect(JUDGE_MAX_RETRIES).toBe(6);
+    expect(mock.mock.calls.at(-1)?.[0].maxRetries).toBe(6);
   });
 
   const noObject = (

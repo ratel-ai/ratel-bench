@@ -4,6 +4,7 @@
 import { dirname, join } from "node:path";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import type { OutputCapOverride } from "./output-limits.js";
+import { parsePositiveInt, parseTimerMs } from "./positive-int.js";
 import { CACHEABLE_ARMS, type RunnerConfig } from "./runner.js";
 import type { Arm, RetrievalMethod } from "./types.js";
 
@@ -53,6 +54,7 @@ export interface ParsedArgs {
   retriever: RetrievalMethod;
   poolSizes: number[];
   maxSteps: number;
+  /** Per-cell active-time deadline (retry sleeps don't count). */
   timeoutMs: number;
   dollarGlobal: number;
   force: boolean;
@@ -183,7 +185,7 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.maxSteps = Number(next());
         break;
       case "--timeout-ms":
-        args.timeoutMs = Number(next());
+        args.timeoutMs = parseTimerMs(flag, next());
         break;
       case "--dollar-global":
         args.dollarGlobal = Number(next());
@@ -347,18 +349,6 @@ export function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
     );
   }
   return args;
-}
-
-/**
- * Parse a flag value that must be a positive integer (digits only, ≥ 1). Shared
- * by every integer-valued flag that must not silently become `NaN`/`0`.
- */
-export function parsePositiveInt(flag: string, raw: string): number {
-  const n = Number(raw);
-  if (!/^\s*\d+\s*$/.test(raw) || !Number.isSafeInteger(n) || n < 1) {
-    throw new Error(`${flag} must be a positive integer (got "${raw}")`);
-  }
-  return n;
 }
 
 /** `--max-output-tokens N|none`: a positive integer, or `none` to send no cap. */

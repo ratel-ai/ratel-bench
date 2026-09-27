@@ -27,6 +27,12 @@ import { z } from "zod";
 import { classifyError, isRerunnable } from "./cell-errors.js";
 import { parseOutputCapFlag } from "./cli-args.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
+import {
+  cellRetry,
+  type RetrySettings,
+  retrySettingsFromEnv,
+  retrySettingsLine,
+} from "./llm-retry.js";
 import { dollarCost, providerOf } from "./metering.js";
 import {
   buildRunnerModels,
@@ -47,6 +53,7 @@ const PRICING = loadModelPricing();
 
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
 import { resolveRepoPath } from "./paths.js";
+import { parseTimerMs } from "./positive-int.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -56,6 +63,8 @@ loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
 const OLLAMA_PREFIX = "ollama:";
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
+/** `--timeout-ms` default: active time per selection call (retry sleeps don't count). */
+const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** Control arms don't use Ratel retrieval, so their cells are version-independent
  *  and reusable across ratel versions (re-stamped to the current version). */
@@ -280,8 +289,18 @@ export interface SelectArgs {
   runIndex: number;
   seed: number;
   catalog: Map<string, { name: string; description: string }>;
+  /** `--timeout-ms`: the call's active-time deadline (abortable; retry sleeps don't count). */
+  timeoutMs: number;
+  /** Retry policy + backstop grace; defaults to `DEFAULT_RETRY_SETTINGS`. */
+  retry?: RetrySettings;
 }
 
+/**
+ * Prompt the model with the arm's candidates and meter the call into a row. The
+ * model is wrapped by the retry policy (the SDK's own retries are off) and the
+ * call is aborted after `timeoutMs` of active time; the retry counters and the
+ * policy are stamped on the row, errored or not.
+ */
 export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
   const { ids, poolSize } = armCandidates(args.arm, args.sc, args.seed);
   const candidates = ids
@@ -313,17 +332,28 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     max_output_tokens: args.model.maxOutputTokens,
   };
 
+  const retry = cellRetry(
+    args.model.model,
+    args.timeoutMs,
+    args.retry,
+    `${args.sc.scenarioId} · ${args.arm} · ${args.model.id} · #${args.runIndex}`,
+  );
   const startedAt = Date.now();
   try {
-    const { object, usage, finishReason } = await generateObject({
-      model: args.model.model,
-      schema: SelectionSchema,
-      system: SYSTEM,
-      prompt: buildPrompt(args.query, candidates),
-      maxOutputTokens: args.model.maxOutputTokens ?? undefined,
-    });
+    const { object, usage, finishReason } = await retry.run(() =>
+      generateObject({
+        model: retry.model,
+        schema: SelectionSchema,
+        system: SYSTEM,
+        prompt: buildPrompt(args.query, candidates),
+        maxOutputTokens: args.model.maxOutputTokens ?? undefined,
+        maxRetries: 0, // retries are `withRetry`'s job
+        abortSignal: retry.signal,
+      }),
+    );
     return {
       ...base,
+      ...retry.rowFields(),
       // Drop hallucinated ids the model wasn't shown.
       selected_skill_ids: object.selected_skill_ids.filter((id) => candidateIdSet.has(id)),
       ...usageFields(args.model.id, usage),
@@ -333,17 +363,23 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
   } catch (err) {
     // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
     // carries its usage and finish reason (`length` = truncated at the output cap:
-    // an `outcome` error, final — never re-run or excluded). After a retried
-    // attempt the SDK wraps it in a RetryError; only that last call is billed.
+    // an `outcome` error, final — never re-run or excluded). generateObject raises
+    // it itself after doGenerate returns, so it never passes through `withRetry`.
+    // With `maxRetries: 0` the SDK never wraps errors in a RetryError; the unwrap
+    // is a guard in case SDK retries are re-enabled (only that last call is billed).
     const cause = RetryError.isInstance(err) ? err.lastError : err;
     const noObject = NoObjectGeneratedError.isInstance(cause) ? cause : undefined;
     return {
       ...base,
+      ...retry.rowFields(),
       ...(noObject ? usageFields(args.model.id, noObject.usage) : {}),
       finish_reason: noObject?.finishReason ?? "error",
       wall_ms: Date.now() - startedAt,
       error: (err as Error).message ?? String(err),
-      error_class: classifyError(err),
+      // Plan-pinned U1/U4 rule: a timeout in a cell that saw any retry is `transient`.
+      // Retry sleeps are off the clock; only failed attempts' own time is the
+      // provider's, yet even an instant 429 flips the class.
+      error_class: classifyError(err, { retries: retry.stats.retries }),
     };
   }
 }
@@ -384,6 +420,8 @@ async function runCampaign(
     quiet: boolean;
     onCell: (c: SragentsSelectCell) => void;
     catalog: Map<string, { name: string; description: string }>;
+    timeoutMs: number;
+    retry: RetrySettings;
   },
 ): Promise<{ cells: number; dollars: number; stopped: boolean }> {
   let i = 0;
@@ -401,7 +439,13 @@ async function runCampaign(
       const idx = i++;
       if (idx >= tasks.length) return;
       const t = tasks[idx];
-      const cell = await selectForCell({ ...t, seed: opts.seed, catalog: opts.catalog });
+      const cell = await selectForCell({
+        ...t,
+        seed: opts.seed,
+        catalog: opts.catalog,
+        timeoutMs: opts.timeoutMs,
+        retry: opts.retry,
+      });
       dollars += cell.dollar_cost;
       opts.onCell(cell);
       done++;
@@ -586,6 +630,17 @@ export function sragentsCapOptions(argv: readonly string[]): {
 }
 
 /**
+ * `--timeout-ms N` (default 300000): each selection call's active-time deadline.
+ * Validated here because `arg()` ignores malformed values. Unlike the old
+ * per-attempt undici limit it bounds the whole call and aborts it; a cell that
+ * hits it is a `timeout` row (`transient` after a retry), recorded in `retry_policy`.
+ */
+export function sragentsTimeoutMs(argv: readonly string[]): number {
+  const idx = argv.indexOf("--timeout-ms");
+  return idx < 0 ? DEFAULT_TIMEOUT_MS : parseTimerMs("--timeout-ms", argv[idx + 1] ?? "");
+}
+
+/**
  * Control-cache sources for `--cache-source a,b,…` (`raw`; `undefined` when the
  * flag is absent → the canonical `agent.jsonl` beside the output). An empty
  * list throws instead of silently disabling reuse (every control would run live).
@@ -627,6 +682,9 @@ async function main(): Promise<void> {
   // Bearer token for user-hosted `<url>#<model>` endpoints (optional).
   const modelApiKey = arg("--model-api-key", process.env.AWS_BEDROCK_BEARER ?? "");
   const caps = sragentsCapOptions(process.argv);
+  const timeoutMs = sragentsTimeoutMs(process.argv);
+  // Retry knobs (RATEL_LLM_RETRY_*, RATEL_CELL_TIMEOUT_GRACE_MS), validated and echoed once.
+  const retry = retrySettingsFromEnv(process.env);
 
   const rows = readJsonl<SragentsRetrievalRow>(candidatesPath);
   if (rows.length === 0) {
@@ -650,6 +708,7 @@ async function main(): Promise<void> {
     override: caps.override,
   });
   console.log(capsLine(resolved, caps.override));
+  console.log(retrySettingsLine(retry, timeoutMs));
   // Warm any user-hosted endpoints once before the campaign (no-op for cloud/ollama ids).
   await warmUpModels(models, modelApiKey);
   const catalog = await loadCatalogMeta(catalogPath);
@@ -707,6 +766,9 @@ async function main(): Promise<void> {
     seed,
     quiet,
     catalog,
+    timeoutMs,
+    // One line per retry, unless --quiet.
+    retry: quiet ? retry : { ...retry, log: console.log },
     onCell: (c) => appendJsonl(outputPath, c),
   });
 

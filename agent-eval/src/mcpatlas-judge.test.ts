@@ -1,10 +1,12 @@
-import { NoObjectGeneratedError } from "ai";
+import { APICallError, NoObjectGeneratedError } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { isReusableCell } from "./mcpatlas-cell-errors.js";
 import { screenClaim } from "./mcpatlas-claim-match.js";
 import {
   buildJudgePrompt,
   calibration,
+  JUDGE_MAX_RETRIES,
   judgeClaims,
   SYSTEM,
   screenScore,
@@ -185,26 +187,115 @@ describe("judgeClaims — screen first, model for the residual", () => {
     expect(r.judge_error).toContain("no model was supplied");
   });
 
-  describe("output cap (--judge-max-output-tokens)", () => {
-    const ambiguous = {
-      taskId: "t9",
-      prompt: task,
-      claims: ["The tone is friendly."],
-      finalText: "hello",
-      model: MODEL,
-    };
+  /** One claim the screen cannot decide, so the model is always called. */
+  const ambiguous = {
+    taskId: "t9",
+    prompt: task,
+    claims: ["The tone is friendly."],
+    finalText: "hello",
+    model: MODEL,
+  };
 
-    /** fakeJudge that also records every call's options. */
-    function recordingGenerate() {
-      const calls: Array<{ prompt: string; maxOutputTokens?: number }> = [];
-      const inner: (o: { prompt: string }) => Promise<unknown> = fakeJudge(() => 1);
-      const generate = (async (o: { prompt: string; maxOutputTokens?: number }) => {
-        calls.push(o);
-        return inner(o);
-      }) as never;
-      return { calls, generate };
+  /** fakeJudge that also records every call's options. */
+  function recordingGenerate() {
+    const calls: Array<{ prompt: string; maxOutputTokens?: number; maxRetries?: number }> = [];
+    const inner: (o: { prompt: string }) => Promise<unknown> = fakeJudge(() => 1);
+    const generate = (async (o: (typeof calls)[number]) => {
+      calls.push(o);
+      return inner(o);
+    }) as never;
+    return { calls, generate };
+  }
+
+  describe("judge retries (JUDGE_MAX_RETRIES)", () => {
+    // generate replaces generateObject, so the SDK's backoff never runs here;
+    // this only pins the option passed.
+    it("passes maxRetries: JUDGE_MAX_RETRIES (6) to the model call", async () => {
+      const { calls, generate } = recordingGenerate();
+      await judgeClaims({ ...ambiguous, generate });
+      expect(JUDGE_MAX_RETRIES).toBe(6);
+      expect(calls[0].maxRetries).toBe(JUDGE_MAX_RETRIES);
+    });
+
+    /**
+     * A real model (no generate override, so the real generateObject and its
+     * retry run) that throws a 429 on its first `throttles` calls, then stops
+     * on 'length' with `content`. retry-after-ms: 0 skips the SDK's backoff.
+     */
+    function throttlingModel(throttles: number, content: Array<{ type: "text"; text: string }>) {
+      let calls = 0;
+      const model = new MockLanguageModelV3({
+        doGenerate: async () => {
+          if (calls++ < throttles)
+            throw new APICallError({
+              message: "Too many requests",
+              url: "x",
+              requestBodyValues: {},
+              statusCode: 429,
+              isRetryable: true,
+              responseHeaders: { "retry-after-ms": "0" },
+            });
+          return {
+            content,
+            finishReason: { unified: "length", raw: "max_tokens" },
+            usage: {
+              inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 64, text: 64, reasoning: 0 },
+            },
+            warnings: [],
+          };
+        },
+      });
+      return { model, calls: () => calls };
     }
 
+    // Only a length stop with no text (the cap spent before any output) throws
+    // inside the SDK's retry, so after a 429 it arrives wrapped in a RetryError
+    // (errorNotRetryable, or maxRetriesExceeded on the 7th attempt). A
+    // partial-JSON truncation is parsed after the retry and always arrives
+    // bare. Either way it is truncation, billed for the truncated attempt only.
+    it.each([
+      { output: "no text (RetryError errorNotRetryable)", throttles: 1, content: [] },
+      {
+        output: "no text (RetryError maxRetriesExceeded)",
+        throttles: JUDGE_MAX_RETRIES,
+        content: [],
+      },
+      {
+        output: "partial JSON (bare)",
+        throttles: 1,
+        content: [{ type: "text" as const, text: '{"scores":[{"claim_index":0,"sco' }],
+      },
+    ])("429 x$throttles then length stop with $output → judge truncated, billed", async ({
+      throttles,
+      content,
+    }) => {
+      const { model, calls } = throttlingModel(throttles, content);
+      const r = await judgeClaims({ ...ambiguous, model, maxOutputTokens: 64 });
+      expect(calls()).toBe(throttles + 1);
+      expect(r.judge_error).toBe("judge truncated at 64 output tokens");
+      expect(r.verdict).toBe("n/a");
+      expect(r.judge_input_tokens).toBe(100);
+      expect(r.judge_output_tokens).toBe(64);
+      // Tied to U2's reuse predicate: a judge-truncated cell is final.
+      expect(isReusableCell({ error: null, finish_reason: "success", claim_rubric: r })).toBe(true);
+    });
+
+    it("retries exhausted on 429s stays `judge failed:` (re-run)", async () => {
+      const { model, calls } = throttlingModel(JUDGE_MAX_RETRIES + 1, []);
+      const r = await judgeClaims({ ...ambiguous, model });
+      expect(calls()).toBe(JUDGE_MAX_RETRIES + 1);
+      expect(r.judge_error).toBe(
+        "judge failed: Failed after 7 attempts. Last error: Too many requests",
+      );
+      expect(r.verdict).toBe("n/a");
+      expect(isReusableCell({ error: null, finish_reason: "success", claim_rubric: r })).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("output cap (--judge-max-output-tokens)", () => {
     it("forwards maxOutputTokens to the model call", async () => {
       const { calls, generate } = recordingGenerate();
       await judgeClaims({ ...ambiguous, maxOutputTokens: 512, generate });

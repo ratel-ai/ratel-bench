@@ -15,6 +15,13 @@ import { generateObject, type LanguageModel, NoObjectGeneratedError, RetryError 
 import { z } from "zod";
 import type { JudgeVerdict } from "../types.js";
 
+/**
+ * SDK retries for a judge call (ai@6's default is 2). Judges are not wrapped by
+ * the agent's retry policy (`llm-retry.ts`) and never feed its row counters: a
+ * judge outage is an `n/a` verdict, not an agent error.
+ */
+export const JUDGE_MAX_RETRIES = 6;
+
 const VerdictSchema = z.object({
   verdict: z.enum(["pass", "fail", "partial"]),
   explanation: z.string(),
@@ -122,6 +129,7 @@ export async function judgeLLM(args: LLMJudgeArgs): Promise<LLMJudgeResult> {
       system,
       prompt: userPrompt,
       maxOutputTokens: args.maxOutputTokens,
+      maxRetries: JUDGE_MAX_RETRIES,
     });
     return { verdict: object.verdict, explanation: object.explanation };
   } catch (err) {

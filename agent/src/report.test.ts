@@ -10,6 +10,7 @@ import {
   savingsByModel,
   statsByArmModel,
   subsetOf,
+  sumCounts,
   versionSplitCells,
 } from "./report.js";
 import type { Arm, CellResult } from "./types.js";
@@ -91,6 +92,13 @@ describe("statistics helpers", () => {
   it("mean returns 0 for empty", () => {
     expect(mean([])).toBe(0);
     expect(median([])).toBe(0);
+  });
+
+  it("sumCounts sums the recorded counts; null when none recorded one (legacy)", () => {
+    expect(sumCounts([2, null, 3, undefined])).toBe(5);
+    expect(sumCounts([0, null])).toBe(0);
+    expect(sumCounts([null, undefined])).toBeNull();
+    expect(sumCounts([])).toBeNull();
   });
 });
 
@@ -284,6 +292,16 @@ describe("statsByArmModel", () => {
     });
   });
 
+  it("mean_wall_net_ms nets out retry waits; [guard] mean_wall_ms stays wall-clock", () => {
+    const cells = [
+      cell({ scenario_id: "s1", wall_ms: 5000, retry_wait_ms: 4000, retries: 2 }), // net 1000
+      cell({ scenario_id: "s2", wall_ms: 3000 }), // legacy: net = wall
+    ];
+    const [s] = statsByArmModel(cells);
+    expect(s.mean_wall_ms).toBe(4000);
+    expect(s.mean_wall_net_ms).toBe(2000);
+  });
+
   it("a group whose rows all errored has null token/cost/latency means", () => {
     const [s] = statsByArmModel([
       cell({ programmatic_verdict: "fail", error: "400 Bad Request", error_class: "request" }),
@@ -296,6 +314,7 @@ describe("statsByArmModel", () => {
       mean_turns: null,
       mean_dollar_cost: null,
       mean_wall_ms: null,
+      mean_wall_net_ms: null,
     });
   });
 });
@@ -337,6 +356,18 @@ describe("savingsByModel", () => {
     expect(s.dollar_savings_pct).toBeCloseTo(70, 5);
     expect(s.oracle_mean_input).toBe(100);
     // Wall savings: 4000 → 1000 = 75% saved.
+    expect(s.control_mean_wall_ms).toBe(4000);
+    expect(s.ratel_mean_wall_ms).toBe(1000);
+    expect(s.wall_savings_pct).toBeCloseTo(75, 5);
+  });
+
+  it("[guard] wall_savings_pct and the wall means stay wall-clock (retry waits included)", () => {
+    const cells = [
+      cell({ arm: "control-baseline", wall_ms: 4000, retry_wait_ms: 3000, retries: 1 }),
+      cell({ arm: "ratel-full", wall_ms: 1000, retry_wait_ms: 500, retries: 1 }),
+    ];
+    const [s] = savingsByModel(cells);
+    // Net of waits these would be 1000 / 500 / 50%.
     expect(s.control_mean_wall_ms).toBe(4000);
     expect(s.ratel_mean_wall_ms).toBe(1000);
     expect(s.wall_savings_pct).toBeCloseTo(75, 5);
@@ -799,6 +830,13 @@ describe("renderReport", () => {
     expect(md).toContain("mean wall");
   });
 
+  it("the Headline shows mean wall (net) beside the wall-clock mean wall", () => {
+    const cells = [cell({ wall_ms: 5000, retry_wait_ms: 4000, retries: 2 })];
+    const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
+    expect(md).toContain("| mean $ | mean wall | mean wall (net) |");
+    expect(md).toMatch(/\| control-baseline \|[^\n]*\| 5\.0s \| 1\.0s \|\n/);
+  });
+
   it("renders pool-size-agnostic oracle rows with `pool: —` and a real Catalog count", () => {
     const cells = [
       // Two scenarios w/ different gold counts → oracle catalog mean = 1.5.
@@ -920,7 +958,7 @@ describe("renderReport", () => {
     const cells = [cell({ ...timedOut }), cell({ arm: "ratel-full" as Arm, input_tokens: 500 })];
     const md = renderReport({ cells, retrieval: [], generatedAt: new Date("2026-05-01") });
     expect(md).toMatch(
-      /\| control-baseline \| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| [^|]+ \| 1 \| 1 \| 0\.0% \| — \| — \| — \| — \| — \| — \|/,
+      /\| control-baseline \| gpt-5\.4-mini \| \(uncategorized\) \| 30 \| [^|]+ \| 1 \| 1 \| 0\.0% \| — \| — \| — \| — \| — \| — \| — \|\n/,
     );
     expect(md).toContain("| gpt-5.4-mini | (uncategorized) | 30 | — → 500.0 | **—** |");
     // Row end: oracle input (no oracle arm) and turns Δ (no clean control row).

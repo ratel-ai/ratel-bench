@@ -4,6 +4,7 @@
 
 import type { LanguageModel } from "ai";
 import type { ErrorClass } from "./cell-errors.js";
+import type { RetrySettings } from "./llm-retry.js";
 
 export interface ToolSpec {
   id: string;
@@ -111,7 +112,14 @@ export interface AgentRunInput {
   /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
   retriever: RetrievalMethod;
   maxSteps: number;
+  /** Active-time budget of the cell: retry sleeps don't count (see `llm-retry.ts`). */
   perRunTimeoutMs: number;
+  /**
+   * Retry policy + deadline grace (`RATEL_LLM_RETRY_*`, `RATEL_CELL_TIMEOUT_GRACE_MS`).
+   * Defaults to `DEFAULT_RETRY_SETTINGS`. An arm that calls the model itself must
+   * wrap it with `cellRetry` and stamp its row fields, as `runMeteredLoop` does.
+   */
+  retry?: RetrySettings;
   seed: number;
   /** Optional pricing override (defaults applied inside metering). */
   pricing?: unknown;
@@ -256,6 +264,14 @@ export interface CellResult {
    * the control cache (re-stamped). Legacy rows lack it.
    */
   cache_source?: "live" | "reused";
+  /** Retries the cell's calls spent (`llm-retry.ts`). Legacy rows lack it (SDK retries, uncounted). */
+  retries?: number;
+  /** Of `retries`, those after a throttle/overload status (429/503/529). */
+  throttled_retries?: number;
+  /** Backoff slept by the retries, in ms: part of `wall_ms`, not of the active-time deadline. */
+  retry_wait_ms?: number;
+  /** Retry policy + deadline the cell ran under, e.g. `a8/b2000/c60000/w180000;timeout=active:180000+g30000`. */
+  retry_policy?: string;
   // Performance
   wall_ms: number;
   dollar_cost: number;

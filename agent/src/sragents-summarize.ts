@@ -19,13 +19,15 @@ import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import {
-  capProvenance,
   corpusOf,
   isTruncated,
   mean,
   meanOrNull,
   median,
   medianOrNull,
+  netWallMs,
+  provenance,
+  sumCounts,
 } from "./report.js";
 import type {
   SragentsRetrievalRow,
@@ -212,6 +214,10 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
       excluded: isInfraError(c),
       truncated: isTruncated(c),
       max_output_tokens: c.max_output_tokens ?? null,
+      retries: c.retries ?? null,
+      throttled_retries: c.throttled_retries ?? null,
+      retry_wait_ms: c.retry_wait_ms ?? null,
+      retry_policy: c.retry_policy ?? null,
     });
   }
   return out;
@@ -248,10 +254,14 @@ function summarizeTask(
       precision: meanOrNull(kept.map((r) => r.precision)),
       mean_total_tokens: meanOrNull(clean.map((r) => r.total_tokens)),
       latency_p50_ms: medianOrNull(clean.map((r) => r.wall_ms)),
+      latency_p50_net_ms: medianOrNull(clean.map(netWallMs)),
       excluded_cells: arr.length - kept.length,
       errored_cells: kept.length - clean.length,
       truncated_cells: kept.filter((r) => r.truncated).length,
-      max_output_tokens: capProvenance(kept.map((r) => r.max_output_tokens)),
+      max_output_tokens: provenance(kept.map((r) => r.max_output_tokens)),
+      retries: sumCounts(arr.map((r) => r.retries)),
+      throttled_retries: sumCounts(arr.map((r) => r.throttled_retries)),
+      retry_policy: provenance(kept.map((r) => r.retry_policy)),
     });
   }
   const rank = (d: string) => (d === ALL_DATASET ? 1 : 0);

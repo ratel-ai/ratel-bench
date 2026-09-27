@@ -1,8 +1,8 @@
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
-import { describe, expect, it } from "vitest";
-import { CellTimeoutError } from "../cell-errors.js";
+import { describe, expect, it, vi } from "vitest";
+import { type RetrySettings, sleep as realSleep } from "../llm-retry.js";
 import type { AgentRunInput, ToolSpec } from "../types.js";
 import {
   buildToolBundle,
@@ -11,8 +11,27 @@ import {
   registerGateway,
   runMeteredLoop,
   sanitizeToolName,
-  withTimeout,
 } from "./_shared.js";
+
+// Passthrough `ai`, except ToolLoopAgent records the settings it is built with.
+const { agentSettings } = vi.hoisted(() => ({
+  agentSettings: [] as Array<{ maxRetries?: number }>,
+}));
+vi.mock("ai", async () => {
+  const actual = await vi.importActual<typeof import("ai")>("ai");
+  class ToolLoopAgent<
+    // biome-ignore lint/suspicious/noExplicitAny: ToolLoopAgent's own generic defaults
+    C = any,
+    // biome-ignore lint/suspicious/noExplicitAny: ToolLoopAgent's own generic defaults
+    T extends Record<string, any> = Record<string, any>,
+  > extends actual.ToolLoopAgent<C, T> {
+    constructor(settings: ConstructorParameters<typeof actual.ToolLoopAgent<C, T>>[0]) {
+      agentSettings.push(settings);
+      super(settings);
+    }
+  }
+  return { ...actual, ToolLoopAgent };
+});
 
 describe("sanitizeToolName", () => {
   it("leaves ids that already match the provider pattern unchanged", () => {
@@ -147,15 +166,6 @@ describe("registerGateway", () => {
   });
 });
 
-describe("withTimeout", () => {
-  it("rejects with CellTimeoutError, message unchanged", async () => {
-    const never = new Promise<never>(() => {});
-    const err = await withTimeout(never, 5).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(CellTimeoutError);
-    expect((err as Error).message).toBe("run timed out after 5ms");
-  });
-});
-
 describe("runMeteredLoop", () => {
   const spec: ToolSpec = {
     id: "fs.read_file",
@@ -169,7 +179,11 @@ describe("runMeteredLoop", () => {
     outputTokens: { total: output, text: output, reasoning: 0 },
   });
 
-  function input(model: MockLanguageModelV3, maxOutputTokens: number | null = null): AgentRunInput {
+  function input(
+    model: MockLanguageModelV3,
+    maxOutputTokens: number | null = null,
+    over: Partial<AgentRunInput> = {},
+  ): AgentRunInput {
     return {
       scenario: {
         id: "s-1",
@@ -194,6 +208,43 @@ describe("runMeteredLoop", () => {
           cacheCreationPer1M: 0,
         },
       },
+      ...over,
+    };
+  }
+
+  /** Retry settings with an injected sleep: no real backoff ever runs. */
+  function retry(sleep: RetrySettings["sleep"], graceMs = 30_000): RetrySettings {
+    return {
+      policy: { maxAttempts: 4, baseMs: 1000, maxDelayMs: 8000, maxTotalWaitMs: 60_000 },
+      graceMs,
+      sleep,
+      random: () => 0,
+    };
+  }
+
+  const throttled = () =>
+    new APICallError({
+      message: "Too Many Requests",
+      url: "https://api.test/v1",
+      requestBodyValues: {},
+      statusCode: 429,
+      isRetryable: true,
+    });
+
+  const done = {
+    content: [{ type: "text" as const, text: "done" }],
+    finishReason: { unified: "stop" as const, raw: "end_turn" },
+    usage: usage(10, 5),
+    warnings: [],
+  };
+
+  /** A doGenerate that settles only when its abort signal fires (with the abort reason). */
+  function hangUntilAborted(signals: AbortSignal[]) {
+    return ({ abortSignal }: { abortSignal?: AbortSignal }) => {
+      if (abortSignal) signals.push(abortSignal);
+      return new Promise<never>((_resolve, reject) => {
+        abortSignal?.addEventListener("abort", () => reject(abortSignal.reason), { once: true });
+      });
     };
   }
 
@@ -334,5 +385,165 @@ describe("runMeteredLoop", () => {
 
     expect(cell.error_class).toBe("request");
     expect(cell.max_output_tokens).toBe(64);
+  });
+
+  it("records retries; retry waits are not charged to the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let call = 0;
+      const model = new MockLanguageModelV3({
+        doGenerate: async () => {
+          if (call++ === 0) throw throttled();
+          return done;
+        },
+      });
+      // An abort-aware backoff of 5s (fake time), past the 1s active-time deadline:
+      // were the deadline not paused, it would fire mid-sleep and abort the cell.
+      const sleep: RetrySettings["sleep"] = (_ms, signal) => realSleep(5000, signal);
+
+      const pending = runMeteredLoop(
+        "control-baseline",
+        input(model, null, { perRunTimeoutMs: 1000, retry: retry(sleep) }),
+        buildToolBundle([spec]),
+      );
+      await vi.advanceTimersByTimeAsync(6000);
+      const cell = await pending;
+
+      expect(cell.error).toBeNull();
+      expect(model.doGenerateCalls).toHaveLength(2);
+      expect(model.doGenerateCalls.every((c) => c.abortSignal !== undefined)).toBe(true);
+      expect(cell.retries).toBe(1);
+      expect(cell.throttled_retries).toBe(1);
+      expect(cell.retry_wait_ms).toBe(500); // rng=0 → d/2 with base 1000
+      expect(cell.retry_policy).toBe("a4/b1000/c8000/w60000;timeout=active:1000+g30000");
+      expect(cell.wall_ms).toBeGreaterThanOrEqual(5000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts a model that honours the signal: doGenerate's abortSignal fires at the timeout", async () => {
+    const signals: AbortSignal[] = [];
+    const model = new MockLanguageModelV3({ doGenerate: hangUntilAborted(signals) });
+
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, null, { perRunTimeoutMs: 30, retry: retry(async () => {}) }),
+      buildToolBundle([spec]),
+    );
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(true);
+    expect(cell.error).toBe("run timed out after 30ms");
+    expect(cell.error_class).toBe("timeout");
+    expect(cell.retries).toBe(0);
+  });
+
+  it("a model that ignores the abort still yields a timeout cell at deadline + grace", async () => {
+    const model = new MockLanguageModelV3({ doGenerate: () => new Promise<never>(() => {}) });
+
+    const startedAt = Date.now();
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, null, { perRunTimeoutMs: 20, retry: retry(async () => {}, 30) }),
+      buildToolBundle([spec]),
+    );
+
+    expect(cell.error).toBe("run timed out after 20ms");
+    expect(cell.error_class).toBe("timeout");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(45);
+    expect(cell.retry_policy).toBe("a4/b1000/c8000/w60000;timeout=active:20+g30");
+  });
+
+  it("a timeout after retries>0 is error_class 'transient'", async () => {
+    const signals: AbortSignal[] = [];
+    const hang = hangUntilAborted(signals);
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        if (call++ === 0) throw throttled();
+        return hang(options);
+      },
+    });
+
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, null, { perRunTimeoutMs: 30, retry: retry(async () => {}) }),
+      buildToolBundle([spec]),
+    );
+
+    expect(cell.error).toBe("run timed out after 30ms");
+    expect(cell.retries).toBe(1);
+    expect(cell.error_class).toBe("transient");
+  });
+
+  it("builds the agent loop with the SDK's retries off (maxRetries: 0)", async () => {
+    const model = new MockLanguageModelV3({ doGenerate: async () => done });
+
+    await runMeteredLoop("control-baseline", input(model), buildToolBundle([spec]));
+
+    expect(agentSettings.at(-1)?.maxRetries).toBe(0);
+  });
+
+  it("an error withRetry passes through is not retried by the SDK either", async () => {
+    // Retryable to the SDK but an `outcome` to withRetry, which rethrows it as-is.
+    // (Were the SDK's retries on, its real 2s+4s backoff would time this test out.)
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "prompt is too long",
+          url: "https://api.test/v1",
+          requestBodyValues: {},
+          statusCode: 500,
+          isRetryable: true,
+        });
+      },
+    });
+
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(model, null, { retry: retry(async () => {}) }),
+      buildToolBundle([spec]),
+    );
+
+    expect(model.doGenerateCalls).toHaveLength(1);
+    expect(cell.error_class).toBe("outcome");
+    expect(cell.retries).toBe(0);
+  });
+
+  it("an exhausted retry budget is a transient cell; a fatal error an access cell", async () => {
+    const exhausted = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw throttled();
+      },
+    });
+    const cell = await runMeteredLoop(
+      "control-baseline",
+      input(exhausted, null, { retry: retry(async () => {}) }),
+      buildToolBundle([spec]),
+    );
+    expect(exhausted.doGenerateCalls).toHaveLength(4);
+    expect(cell.error).toBe("Failed after 4 attempts. Last error: Too Many Requests");
+    expect(cell.error_class).toBe("transient");
+    expect(cell.retries).toBe(3);
+
+    const gated = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "Forbidden",
+          url: "https://api.test/v1",
+          requestBodyValues: {},
+          statusCode: 403,
+        });
+      },
+    });
+    const fatal = await runMeteredLoop(
+      "control-baseline",
+      input(gated, null, { retry: retry(async () => {}) }),
+      buildToolBundle([spec]),
+    );
+    expect(gated.doGenerateCalls).toHaveLength(1);
+    expect(fatal.error).toBe("Forbidden");
+    expect(fatal.error_class).toBe("access");
   });
 });

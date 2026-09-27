@@ -415,6 +415,86 @@ describe("summarizeSragents — max_output_tokens provenance", () => {
   });
 });
 
+describe("summarizeSragents — retries", () => {
+  const TRANSIENT = "Failed after 8 attempts. Last error: Overloaded";
+  const POLICY = "a8/b2000/c60000/w180000;timeout=active:300000+g30000";
+  const retried = (over: Partial<SragentsSelectCell>) =>
+    cell({ retries: 2, throttled_retries: 1, retry_wait_ms: 3000, retry_policy: POLICY, ...over });
+  const toolqa = (cells: SragentsSelectCell[]) =>
+    summarizeSragents({ retrievalRows: [], cells }).taskSummary.find((r) => r.dataset === "toolqa");
+
+  it("carries the retry fields on each task row (null for legacy rows)", () => {
+    const cells = [retried({}), cell({ scenario_id: "sragents-toolqa_1" })];
+    const { taskRows } = summarizeSragents({ retrievalRows: [], cells });
+    expect(
+      taskRows.map((r) => [r.retries, r.throttled_retries, r.retry_wait_ms, r.retry_policy]),
+    ).toEqual([
+      [2, 1, 3000, POLICY],
+      [null, null, null, null],
+    ]);
+  });
+
+  it("latency_p50_net_ms = median(wall_ms − retry_wait_ms); [guard] latency_p50_ms stays wall-clock", () => {
+    const s = toolqa([
+      retried({ wall_ms: 5000 }), // net 2000
+      retried({ scenario_id: "sragents-toolqa_1", wall_ms: 4000, retry_wait_ms: 0 }), // net 4000
+      cell({ scenario_id: "sragents-toolqa_2", wall_ms: 1000 }), // legacy: net = wall
+      // Kept (a scored timeout) but not clean: no latency metric reads it.
+      cell({
+        scenario_id: "sragents-toolqa_3",
+        wall_ms: 400_000,
+        error: "run timed out after 300000ms",
+      }),
+    ]);
+    expect(s?.errored_cells).toBe(1);
+    expect(s?.latency_p50_ms).toBe(4000);
+    expect(s?.latency_p50_net_ms).toBe(2000);
+  });
+
+  it("sums retries over every superseding row (excluded too); retry_policy over kept rows, 'mixed' beside legacy", () => {
+    const s = toolqa([
+      retried({}),
+      retried({
+        scenario_id: "sragents-toolqa_1",
+        error: TRANSIENT,
+        retries: 7,
+        throttled_retries: 7,
+        retry_policy: undefined, // excluded: retry_policy must not read it (else "mixed")
+      }),
+    ]);
+    expect(s).toMatchObject({
+      excluded_cells: 1,
+      retries: 9,
+      throttled_retries: 8,
+      retry_policy: POLICY,
+    });
+    expect(toolqa([retried({}), cell({ scenario_id: "sragents-toolqa_1" })])?.retry_policy).toBe(
+      "mixed",
+    );
+    expect(toolqa([cell({})])).toMatchObject({
+      retries: null,
+      throttled_retries: null,
+      retry_policy: null,
+    });
+  });
+
+  it("retries: a lower bound beside legacy rows, which retry_policy (kept rows only) may not flag", () => {
+    expect(toolqa([retried({}), cell({ scenario_id: "sragents-toolqa_1" })])).toMatchObject({
+      retries: 2,
+      throttled_retries: 1,
+      retry_policy: "mixed",
+    });
+    expect(
+      toolqa([retried({}), cell({ scenario_id: "sragents-toolqa_1", error: TRANSIENT })]),
+    ).toMatchObject({ excluded_cells: 1, retries: 2, throttled_retries: 1, retry_policy: POLICY });
+    expect(toolqa([retried({ error: TRANSIENT })])).toMatchObject({
+      excluded_cells: 1,
+      retries: 2,
+      retry_policy: null,
+    });
+  });
+});
+
 describe("summarizeSragents — label filter", () => {
   it("emits only the given label's task and retrieval groups", () => {
     const cells = [

@@ -13,13 +13,16 @@
 //   - the judge never sees the trajectory, the gold tools, or the ARM label
 //   - the verdict is computed in code from the scores, never asserted by the model
 
-import { generateObject, type LanguageModel, NoObjectGeneratedError } from "ai";
+import { generateObject, type LanguageModel, NoObjectGeneratedError, RetryError } from "ai";
 import { z } from "zod";
 import { type ClaimScreen, screenClaims } from "./mcpatlas-claim-match.js";
 import type { ClaimRubricResult, ClaimScore, JudgeVerdict } from "./mcpatlas-types.js";
 
 export const DEFAULT_PASS_THRESHOLD = 0.75;
 export const DEFAULT_PARTIAL_THRESHOLD = 0.4;
+/** SDK retries for the judge call (ai's default is 2). Not behind agent/'s
+ *  `withRetry`; mcpatlas records no retry stats. */
+export const JUDGE_MAX_RETRIES = 6;
 
 const ClaimScoresSchema = z.object({
   scores: z.array(
@@ -172,6 +175,7 @@ export async function judgeClaims(args: JudgeClaimsArgs): Promise<McpAtlasRubric
         ),
         // Undefined sends no cap: the provider default, as before.
         maxOutputTokens,
+        maxRetries: JUDGE_MAX_RETRIES,
       });
       inputTokens = res.usage?.inputTokens ?? 0;
       outputTokens = res.usage?.outputTokens ?? 0;
@@ -195,11 +199,15 @@ export async function judgeClaims(args: JudgeClaimsArgs): Promise<McpAtlasRubric
       }
     } catch (err) {
       // Never silently a fail: an unscorable task is n/a and counted separately.
-      if (NoObjectGeneratedError.isInstance(err) && err.finishReason === "length") {
+      // After a retried attempt (e.g. a 429) the SDK wraps the final error in
+      // a RetryError: classify its lastError.
+      const cause = RetryError.isInstance(err) ? err.lastError : err;
+      if (NoObjectGeneratedError.isInstance(cause) && cause.finishReason === "length") {
         // Truncation is terminal, not an infra failure: its own message, so
-        // the cell is not re-run as `judge failed:` would be. Still billed.
-        inputTokens = err.usage?.inputTokens ?? 0;
-        outputTokens = err.usage?.outputTokens ?? 0;
+        // the cell is not re-run as `judge failed:` would be. Still billed
+        // (the truncated attempt only; throttled ones carry no usage).
+        inputTokens = cause.usage?.inputTokens ?? 0;
+        outputTokens = cause.usage?.outputTokens ?? 0;
         judgeError = truncationMessage(maxOutputTokens);
       } else {
         judgeError = `judge failed: ${(err as Error).message}`;

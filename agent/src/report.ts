@@ -120,14 +120,33 @@ export function isTruncated(r: { truncated_steps?: number; finish_reason?: strin
 }
 
 /**
- * Output-cap provenance of a summary group's kept rows: the one cap they all
- * requested, `null` when none recorded one (legacy or uncapped), or `"mixed"`
- * when they differ — e.g. capped live rows alongside legacy uncapped controls.
+ * Provenance of a setting across a summary group's kept rows: the one value they
+ * all recorded, `null` when none recorded one (legacy rows), or `"mixed"` when
+ * they differ — e.g. capped live rows alongside legacy uncapped controls. Used
+ * for `max_output_tokens` and `retry_policy`.
  */
-export function capProvenance(caps: Array<number | null>): number | "mixed" | null {
-  const distinct = new Set(caps);
+export function provenance<T extends number | string>(values: Array<T | null>): T | "mixed" | null {
+  const distinct = new Set(values);
   if (distinct.size > 1) return "mixed";
   return distinct.values().next().value ?? null;
+}
+
+/**
+ * A row's wall-clock time net of its retry backoff (`wall_ms − retry_wait_ms`):
+ * only the backoff slept is removed; failed attempts' own call time (throttled,
+ * 5xx, network) stays in. Legacy rows (no `retry_wait_ms`) count as no wait.
+ */
+export function netWallMs(r: { wall_ms: number; retry_wait_ms?: number | null }): number {
+  return r.wall_ms - (r.retry_wait_ms ?? 0);
+}
+
+/**
+ * Sum of a count that legacy rows lack: over the rows that recorded it (a lower
+ * bound beside legacy rows), or `null` when none did — never a measured-looking 0.
+ */
+export function sumCounts(xs: Array<number | null | undefined>): number | null {
+  const recorded = xs.filter((x): x is number => x != null);
+  return recorded.length === 0 ? null : recorded.reduce((acc, x) => acc + x, 0);
 }
 
 /** Normalize a (possibly absent) cell category into a stable grouping key. */
@@ -189,7 +208,10 @@ export interface ArmModelStats {
   mean_total_tokens: number | null;
   mean_turns: number | null;
   mean_dollar_cost: number | null;
+  /** Wall-clock, retry backoff included (what the savings compare). */
   mean_wall_ms: number | null;
+  /** Same, net of retry backoff (`wall_ms − retry_wait_ms`; legacy rows: no wait). */
+  mean_wall_net_ms: number | null;
 }
 
 interface ScenarioStats {
@@ -209,6 +231,7 @@ interface ScenarioStats {
   mean_turns: number | null;
   mean_dollar: number | null;
   mean_wall: number | null;
+  mean_wall_net: number | null;
   /** Number of runs aggregated for this scenario. */
   runs: number;
 }
@@ -273,6 +296,7 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       mean_turns: meanOrNull(clean.map((c) => c.turns)),
       mean_dollar: meanOrNull(clean.map((c) => c.dollar_cost)),
       mean_wall: meanOrNull(clean.map((c) => c.wall_ms)),
+      mean_wall_net: meanOrNull(clean.map(netWallMs)),
       runs: arr.length,
     });
   }
@@ -306,6 +330,7 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       mean_turns: meanOfPresent(ps.map((p) => p.mean_turns)),
       mean_dollar_cost: meanOfPresent(ps.map((p) => p.mean_dollar)),
       mean_wall_ms: meanOfPresent(ps.map((p) => p.mean_wall)),
+      mean_wall_net_ms: meanOfPresent(ps.map((p) => p.mean_wall_net)),
     });
   }
   return out.sort(
@@ -715,13 +740,13 @@ export function renderReport(args: {
   lines.push("## Headline");
   lines.push("");
   lines.push(
-    "| arm | model | category | pool | catalog | scenarios | n | selection | task-completion | mean input | mean total | mean turns | mean $ | mean wall |",
+    "| arm | model | category | pool | catalog | scenarios | n | selection | task-completion | mean input | mean total | mean turns | mean $ | mean wall | mean wall (net) |",
   );
-  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const s of stats) {
     const task = s.task_completion_rate === null ? "—" : fmtPct(s.task_completion_rate * 100);
     lines.push(
-      `| ${s.arm} | ${s.model} | ${s.category} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${task} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} |`,
+      `| ${s.arm} | ${s.model} | ${s.category} | ${fmtPoolSize(s.pool_size)} | ${fmtNum(s.mean_catalog_size)} | ${s.scenarios} | ${s.n} | ${fmtPct(s.success_rate * 100)} | ${task} | ${fmtNum(s.mean_input_tokens)} | ${fmtNum(s.mean_total_tokens)} | ${fmtNum(s.mean_turns)} | ${fmtDollars(s.mean_dollar_cost)} | ${fmtSeconds(s.mean_wall_ms)} | ${fmtSeconds(s.mean_wall_net_ms)} |`,
     );
   }
   lines.push("");

@@ -368,6 +368,33 @@ describe("cellErrorClass", () => {
       "outcome",
     ],
     ["unknown, CC envelope", { error: "boom", finish_reason: "success" }, "outcome"],
+    // Bedrock's daily token cap: out for the day, as if gated (mirrors agent's ACCESS);
+    // the per-minute "Too many tokens, please wait" rows above stay transient.
+    [
+      "CC daily cap, request rejected",
+      {
+        error:
+          "API Error: Request rejected (429) · Too many tokens per day, please wait before trying again.",
+        finish_reason: "success",
+      },
+      "access",
+    ],
+    [
+      "CC daily cap, legacy 429",
+      {
+        error: "API Error: 429 Too many tokens per day, please wait before trying again.",
+        finish_reason: "success",
+      },
+      "access",
+    ],
+    [
+      "bare daily cap",
+      {
+        error: "Too many tokens per day, please wait before trying again.",
+        finish_reason: "success",
+      },
+      "access",
+    ],
   ];
 
   it.each(cases)("%s", (_name, r, expected) => {
@@ -402,6 +429,14 @@ describe("isReusableCell", () => {
       isReusableCell(row({ error: "API Error: 529 Overloaded", finish_reason: "error_max_turns" })),
     ).toBe(true);
     expect(isReusableCell(row({ error: "", finish_reason: "error_timeout" }))).toBe(true);
+    expect(
+      isReusableCell(
+        row({
+          error: "Too many tokens per day, please wait before trying again.",
+          finish_reason: "success",
+        }),
+      ),
+    ).toBe(false);
     expect(
       isReusableCell(
         row({ error: null, finish_reason: "success", judge_error: "judge failed: Overloaded" }),

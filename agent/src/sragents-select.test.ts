@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
 import {
   armCandidates,
@@ -15,6 +16,7 @@ import {
   selectForCell,
   sragentsCachePaths,
   sragentsCapOptions,
+  sragentsTimeoutMs,
   stratifiedSample,
   type Task,
 } from "./sragents-select.js";
@@ -837,6 +839,7 @@ describe("selectForCell", () => {
     runIndex: 0,
     seed: 42,
     catalog: new Map(),
+    timeoutMs: 300_000,
   });
 
   it("records usage, finish_reason 'length', error_class 'outcome' from NoObjectGeneratedError", async () => {
@@ -865,7 +868,8 @@ describe("selectForCell", () => {
   });
 
   it("records the usage of a NoObjectGeneratedError wrapped in a RetryError", async () => {
-    // A throttled first attempt makes the SDK wrap the next attempt's error.
+    // Pins the defensive unwrap: with SDK retries off (`maxRetries: 0`) the SDK
+    // never wraps errors in a RetryError, but would if they were re-enabled.
     const ai = await import("ai");
     vi.mocked(ai.generateObject).mockRejectedValueOnce(
       new RetryError({
@@ -974,6 +978,255 @@ describe("selectForCell", () => {
     const cell = await selectForCell(args());
     expect(mock.mock.calls.at(-1)?.[0].maxOutputTokens).toBeUndefined();
     expect(cell.max_output_tokens).toBeNull();
+  });
+});
+
+describe("selectForCell retries and deadline", () => {
+  const retry: RetrySettings = {
+    policy: { maxAttempts: 4, baseMs: 1000, maxDelayMs: 8000, maxTotalWaitMs: 60_000 },
+    graceMs: 30_000,
+    sleep: async () => {},
+    random: () => 0,
+  };
+
+  const throttled = () =>
+    new APICallError({
+      message: "Overloaded",
+      url: "https://api.test/v1",
+      requestBodyValues: {},
+      statusCode: 529,
+      isRetryable: true,
+    });
+
+  function args(model: MockLanguageModelV3, timeoutMs = 300_000): SelectArgs {
+    return {
+      arm: "control-oracle",
+      sc: {
+        scenarioId: "sragents-toolqa_0",
+        category: "sragents-toolqa",
+        goldSkillIds: ["g1"],
+        fullPool: ["a", "g1"],
+        ratelTopK: ["g1"],
+        poolSize: 50,
+      },
+      query: "q",
+      model: { id: "claude-haiku-4-5", model, maxOutputTokens: null },
+      runIndex: 0,
+      seed: 42,
+      catalog: new Map(),
+      timeoutMs,
+      retry,
+    };
+  }
+
+  /** Route the next generateObject call to the real SDK (the model is the fake). */
+  async function useRealGenerateObject(): Promise<ReturnType<typeof vi.fn>> {
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockImplementationOnce(actual.generateObject);
+    return mock;
+  }
+
+  it("selectForCell uses withRetry with maxRetries 0 and records the retries", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        if (call++ < 2) throw throttled();
+        return {
+          content: [{ type: "text", text: JSON.stringify({ selected_skill_ids: ["g1"] }) }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 5, text: 5, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const mock = await useRealGenerateObject();
+
+    const cell = await selectForCell(args(model));
+
+    expect(mock.mock.calls.at(-1)?.[0].maxRetries).toBe(0);
+    expect(model.doGenerateCalls).toHaveLength(3);
+    expect(cell.error).toBeNull();
+    expect(cell.selected_skill_ids).toEqual(["g1"]);
+    expect(cell.retries).toBe(2);
+    expect(cell.throttled_retries).toBe(2);
+    expect(cell.retry_wait_ms).toBe(1500); // 500 + 1000 (rng=0)
+    expect(cell.retry_policy).toBe("a4/b1000/c8000/w60000;timeout=active:300000+g30000");
+  });
+
+  it("aborts the call at --timeout-ms: a timeout row, the call's abortSignal fired", async () => {
+    const signals: AbortSignal[] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: ({ abortSignal }) => {
+        if (abortSignal) signals.push(abortSignal);
+        return new Promise<never>((_resolve, reject) => {
+          abortSignal?.addEventListener("abort", () => reject(abortSignal.reason), {
+            once: true,
+          });
+        });
+      },
+    });
+    await useRealGenerateObject();
+
+    const cell = await selectForCell(args(model, 30));
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(true);
+    expect(cell.error).toBe("run timed out after 30ms");
+    expect(cell.error_class).toBe("timeout");
+    expect(cell.retries).toBe(0);
+    expect(cell.retry_policy).toBe("a4/b1000/c8000/w60000;timeout=active:30+g30000");
+  });
+
+  it("a model that ignores the abort still yields a timeout row at deadline + grace", async () => {
+    const model = new MockLanguageModelV3({ doGenerate: () => new Promise<never>(() => {}) });
+    await useRealGenerateObject();
+
+    const startedAt = Date.now();
+    const cell = await selectForCell({ ...args(model, 20), retry: { ...retry, graceMs: 30 } });
+
+    expect(cell.error).toBe("run timed out after 20ms");
+    expect(cell.error_class).toBe("timeout");
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(45);
+    expect(cell.retry_policy).toBe("a4/b1000/c8000/w60000;timeout=active:20+g30");
+  }, 2000);
+
+  it("releases the deadline's timers once the call settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const model = new MockLanguageModelV3({
+        doGenerate: async () => ({
+          content: [{ type: "text", text: JSON.stringify({ selected_skill_ids: ["g1"] }) }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 5, text: 5, reasoning: 0 },
+          },
+          warnings: [],
+        }),
+      });
+      await useRealGenerateObject();
+
+      const cell = await selectForCell(args(model));
+
+      expect(cell.error).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retry waits are not charged to the call's deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let call = 0;
+      const model = new MockLanguageModelV3({
+        doGenerate: async () => {
+          if (call++ === 0) throw throttled();
+          return {
+            content: [{ type: "text", text: JSON.stringify({ selected_skill_ids: ["g1"] }) }],
+            finishReason: { unified: "stop", raw: "end_turn" },
+            usage: {
+              inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+              outputTokens: { total: 5, text: 5, reasoning: 0 },
+            },
+            warnings: [],
+          };
+        },
+      });
+      await useRealGenerateObject();
+      // An abort-aware 5s backoff (fake time) past the 1s deadline, which must be paused.
+      const sleep: RetrySettings["sleep"] = (_ms, signal) => realSleep(5000, signal);
+
+      const pending = selectForCell({ ...args(model, 1000), retry: { ...retry, sleep } });
+      await vi.advanceTimersByTimeAsync(6000);
+      const cell = await pending;
+
+      expect(cell.error).toBeNull();
+      expect(cell.selected_skill_ids).toEqual(["g1"]);
+      expect(cell.retries).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a timeout after a retry is a transient row", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: ({ abortSignal }) => {
+        if (call++ === 0) return Promise.reject(throttled());
+        return new Promise<never>((_resolve, reject) => {
+          abortSignal?.addEventListener("abort", () => reject(abortSignal.reason), {
+            once: true,
+          });
+        });
+      },
+    });
+    await useRealGenerateObject();
+
+    const cell = await selectForCell(args(model, 30));
+
+    expect(cell.error).toBe("run timed out after 30ms");
+    expect(cell.retries).toBe(1);
+    expect(cell.throttled_retries).toBe(1);
+    expect(cell.error_class).toBe("transient");
+  });
+
+  it("an exhausted retry budget is a transient row", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw throttled();
+      },
+    });
+    await useRealGenerateObject();
+
+    const cell = await selectForCell(args(model));
+
+    expect(model.doGenerateCalls).toHaveLength(4);
+    expect(cell.error).toBe("Failed after 4 attempts. Last error: Overloaded");
+    expect(cell.error_class).toBe("transient");
+    expect(cell.finish_reason).toBe("error");
+  });
+
+  it("tags each retry log line with the cell", async () => {
+    const lines: string[] = [];
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw throttled();
+      },
+    });
+    await useRealGenerateObject();
+
+    await selectForCell({ ...args(model), retry: { ...retry, log: (l) => lines.push(l) } });
+
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(
+      /^\[sragents-toolqa_0 · control-oracle · claude-haiku-4-5 · #0\] retry: .* attempt 1\/4 failed \(529\)/,
+    );
+  });
+});
+
+describe("sragentsTimeoutMs", () => {
+  it("defaults to 300000 and reads --timeout-ms", () => {
+    expect(sragentsTimeoutMs(["--models", "m"])).toBe(300_000);
+    expect(sragentsTimeoutMs(["--timeout-ms", "120000"])).toBe(120_000);
+  });
+
+  it("rejects a non-positive-int or missing value (arg() would silently ignore it)", () => {
+    for (const bad of ["0", "-5", "1.5", "abc", ""]) {
+      expect(() => sragentsTimeoutMs(["--timeout-ms", bad])).toThrow(
+        /--timeout-ms must be a positive integer/,
+      );
+    }
+    expect(() => sragentsTimeoutMs(["--timeout-ms"])).toThrow(/positive integer/);
+    expect(sragentsTimeoutMs(["--timeout-ms", "2147483647"])).toBe(2_147_483_647);
+    expect(() => sragentsTimeoutMs(["--timeout-ms", "2147483648"])).toThrow(
+      /--timeout-ms must be ≤ 2147483647/,
+    );
   });
 });
 

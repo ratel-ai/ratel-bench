@@ -40,10 +40,14 @@ function task(over: Partial<TaskSummaryRow>): TaskSummaryRow {
     recall: 0.85,
     mean_total_tokens: 1100,
     latency_p50_ms: 900,
+    latency_p50_net_ms: 900,
     excluded_cells: 0,
     errored_cells: 0,
     truncated_cells: 0,
     max_output_tokens: null,
+    retries: 0,
+    throttled_retries: 0,
+    retry_policy: null,
     ...over,
   };
 }
@@ -72,6 +76,28 @@ describe("buildReport", () => {
     expect(tc["claude-haiku-4-5"]["ratel-full"].simple.metrics).toMatchObject({
       max_output_tokens: "mixed",
     });
+  });
+
+  it("[guard] carries the retry summary fields into report.json metrics", () => {
+    const retry = {
+      retries: 3,
+      throttled_retries: 2,
+      retry_policy: "mixed" as const,
+      latency_p50_net_ms: 700,
+    };
+    const report = buildReport([], [task(retry)], NOW);
+    const tc = report.ratel_versions["0.2.0"].task_completion;
+    expect(tc["claude-haiku-4-5"]["ratel-full"].simple.metrics).toMatchObject({
+      ...retry,
+      latency_p50_ms: 900,
+    });
+    // An all-legacy group keeps its `null` counts (not recorded), not a 0.
+    const legacy = { retries: null, throttled_retries: null, retry_policy: null };
+    const legacyReport = buildReport([], [task(legacy)], NOW);
+    expect(
+      legacyReport.ratel_versions["0.2.0"].task_completion["claude-haiku-4-5"]["ratel-full"].simple
+        .metrics,
+    ).toMatchObject(legacy);
   });
 
   it("breaks task completion down per arm under each LLM", () => {

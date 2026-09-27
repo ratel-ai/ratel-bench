@@ -204,14 +204,18 @@ describe("summarizeBfcl — task completion", () => {
     const s = taskSummary[0];
     expect(s.recall).toBe(0.5);
     expect(s.latency_p50_ms).toBe(700);
-    // exactly the five metrics (+ identity/dims + n + error counters + cap provenance), nothing extra
+    // exactly the five metrics (+ identity/dims + n + error counters + cap/retry provenance), nothing extra
     expect(Object.keys(s).sort()).toEqual(
       [
         "arm",
         "errored_cells",
         "excluded_cells",
         "latency_p50_ms",
+        "latency_p50_net_ms",
         "max_output_tokens",
+        "retries",
+        "retry_policy",
+        "throttled_retries",
         "mean_total_tokens",
         "model",
         "ratel_ai_core_version",
@@ -453,6 +457,91 @@ describe("summarizeBfcl — max_output_tokens provenance", () => {
       cell({ ...other, error: TRANSIENT, max_output_tokens: 16 }), // final, excluded
     ];
     expect(summary(cells).max_output_tokens).toBe(4096);
+  });
+});
+
+describe("summarizeBfcl — retries", () => {
+  const TRANSIENT = "Failed after 8 attempts. Last error: Overloaded";
+  const POLICY = "a8/b2000/c60000/w180000;timeout=active:180000+g30000";
+  const retried = (over: Partial<CellResult>) =>
+    cell({ retries: 2, throttled_retries: 1, retry_wait_ms: 3000, retry_policy: POLICY, ...over });
+
+  it("carries the retry fields on each task row (null for legacy rows)", () => {
+    const cells = [retried({ wall_ms: 5000 }), cell({ scenario_id: "bfcl-simple-1" })];
+    const { taskRows } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(
+      taskRows.map((r) => [r.retries, r.throttled_retries, r.retry_wait_ms, r.retry_policy]),
+    ).toEqual([
+      [2, 1, 3000, POLICY],
+      [null, null, null, null],
+    ]);
+  });
+
+  it("latency_p50_net_ms = median(wall_ms − retry_wait_ms); [guard] latency_p50_ms stays wall-clock", () => {
+    const cells = [
+      retried({ scenario_id: "bfcl-simple-0", wall_ms: 5000 }), // net 2000
+      retried({ scenario_id: "bfcl-simple-1", wall_ms: 4000, retry_wait_ms: 0 }), // net 4000
+      cell({ scenario_id: "bfcl-simple-2", wall_ms: 1000 }), // legacy: net = wall
+      // Kept (a scored timeout) but not clean: no latency metric reads it.
+      cell({
+        scenario_id: "bfcl-simple-3",
+        wall_ms: 200_000,
+        error: "run timed out after 180000ms",
+      }),
+    ];
+    const [s] = summarizeBfcl({ retrievalRows: [], cells, scenarios }).taskSummary;
+    expect(s.errored_cells).toBe(1);
+    expect(s.latency_p50_ms).toBe(4000);
+    expect(s.latency_p50_net_ms).toBe(2000);
+  });
+
+  it("sums retries/throttled over every superseding row (excluded ones too); retry_policy over kept rows", () => {
+    const cells = [
+      retried({ scenario_id: "bfcl-simple-0" }),
+      // Excluded, with no policy: retry_policy must not read it (else "mixed").
+      retried({
+        scenario_id: "bfcl-simple-1",
+        error: TRANSIENT,
+        retries: 7,
+        throttled_retries: 7,
+        retry_policy: undefined,
+      }),
+    ];
+    const [s] = summarizeBfcl({ retrievalRows: [], cells, scenarios }).taskSummary;
+    expect(s).toMatchObject({ excluded_cells: 1, retries: 9, throttled_retries: 8 });
+    expect(s.retry_policy).toBe(POLICY);
+  });
+
+  it("retry_policy is 'mixed' beside legacy rows, null when none recorded one", () => {
+    const summary = (cells: CellResult[]) =>
+      summarizeBfcl({ retrievalRows: [], cells, scenarios }).taskSummary[0];
+    expect(summary([retried({}), cell({ scenario_id: "bfcl-simple-1" })]).retry_policy).toBe(
+      "mixed",
+    );
+    const legacy = summary([cell({}), cell({ scenario_id: "bfcl-simple-1" })]);
+    expect(legacy).toMatchObject({ retry_policy: null, retries: null, throttled_retries: null });
+    expect(legacy.latency_p50_net_ms).toBe(legacy.latency_p50_ms);
+  });
+
+  it("retries: a lower bound beside legacy rows, which retry_policy (kept rows only) may not flag", () => {
+    const summary = (cells: CellResult[]) =>
+      summarizeBfcl({ retrievalRows: [], cells, scenarios }).taskSummary[0];
+    // Kept legacy row beside a U4 row: only the recorded counts, retry_policy "mixed".
+    expect(summary([retried({}), cell({ scenario_id: "bfcl-simple-1" })])).toMatchObject({
+      retries: 2,
+      throttled_retries: 1,
+      retry_policy: "mixed",
+    });
+    // Excluded legacy row beside a kept U4 row: still partial, but a single policy.
+    expect(
+      summary([retried({}), cell({ scenario_id: "bfcl-simple-1", error: TRANSIENT })]),
+    ).toMatchObject({ excluded_cells: 1, retries: 2, throttled_retries: 1, retry_policy: POLICY });
+    // Every U4 row excluded: counts recorded, no kept row to carry a policy.
+    expect(summary([retried({ error: TRANSIENT })])).toMatchObject({
+      excluded_cells: 1,
+      retries: 2,
+      retry_policy: null,
+    });
   });
 });
 
