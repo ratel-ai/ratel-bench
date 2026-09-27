@@ -177,16 +177,18 @@ is not an error.
 ### Error circuit
 
 `mcpatlas-run` stops launching cells after `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS` consecutive
-infra-errored cells (`transient | access`, as classified above) — a gated, daily-capped or
-unreachable model, where every further cell only writes another errored row. Same knob name and
-default as the `agent/` breaker.
+agent or judge infra failures (`transient | access`) — a gated, daily-capped or unreachable model.
+Judge access gates (`AccessDeniedException`, `ResourceNotFoundException`, on-demand-throughput
+`ValidationException`) and transient failures (`ExpiredTokenException`, `ModelNotReadyException`,
+exhausted throttles) count even when the agent succeeded and its cell has `error: null`; the failed
+judge still leaves the verdict `n/a`. Same knob name and default as the `agent/` breaker.
 
 - Default `10`; `0` turns it off. Unset = default; any other value, empty included, must be a
   non-negative integer (surrounding spaces allowed, as in `agent/`), else it errors before anything
   is spent.
-- An error-free cell resets the count. `timeout`, max-turns, `request` and `outcome` errors neither
-  count nor reset: none is an infra failure (the provider answered, or the cell hit its deadline),
-  but none is a clean run either. `request` is still re-run (see [Errored cells](#errored-cells)).
+- A cell without an agent error or failed judge resets the count. `timeout`, max-turns, `request`,
+  `outcome` and non-infra judge failures neither count nor reset. `request` is still re-run (see
+  [Errored cells](#errored-cells)).
 - Counted in completion order across both passes: a trip in the native pass means the ratel pass
   launches nothing. Cells already in flight finish and are written.
 - The run ends with `aborted: <model> — N consecutive infra-errored cells (last: <class>: <error>)`,

@@ -42,8 +42,8 @@ import {
   parseUses,
 } from "./mcpatlas-build.js";
 import {
+  breakerErrorClass,
   type CellErrorRow,
-  cellErrorClass,
   isInfraErrorClass,
   isReusableCell,
 } from "./mcpatlas-cell-errors.js";
@@ -1489,7 +1489,7 @@ export interface CampaignSummary {
   abort_reason?: string;
 }
 
-/** Counts consecutive infra-errored cells (transient|access). */
+/** Counts consecutive agent or judge infra failures (transient|access). */
 export interface InfraErrorBreaker {
   record(cell: CellErrorRow): void;
   /** Why it tripped, or null while closed. */
@@ -1552,12 +1552,11 @@ export async function runCampaign<T>(
 }
 
 /**
- * Trips after `k` consecutive infra-errored cells (transient|access): a gated,
- * daily-capped or unreachable model, where every further cell only writes
- * another errored row. An error-free cell resets the count. Other errors
- * (timeout, max-turns, request, outcome) neither count nor reset: none is an
- * infra failure (the provider answered, or the cell hit its deadline), but none
- * is a clean run either. `k` 0 = never trips. Once tripped it stays tripped.
+ * Trips after `k` consecutive agent or judge infra failures (transient|access):
+ * a gated, daily-capped or unreachable model. A cell without an agent error or
+ * failed judge resets the count. Other errors (timeout, max-turns, request,
+ * outcome, non-infra judge failures) neither count nor reset. `k` 0 = never
+ * trips. Once tripped it stays tripped.
  */
 export function createInfraErrorBreaker(k: number): InfraErrorBreaker {
   let consecutive = 0;
@@ -1568,12 +1567,16 @@ export function createInfraErrorBreaker(k: number): InfraErrorBreaker {
     },
     record(cell) {
       if (k <= 0 || tripReason != null) return;
-      const cls = cellErrorClass(cell);
+      const cls = breakerErrorClass(cell);
       if (cls === null) consecutive = 0;
       else if (isInfraErrorClass(cls)) consecutive++;
       if (consecutive >= k) {
         // One log line: envelope errors embed multi-line stderr.
-        const last = (cell.error ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+        const last = (cell.error ?? cell.claim_rubric.judge_error ?? "")
+          .replace(/^judge failed:\s*/, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200);
         tripReason = `${k} consecutive infra-errored cells (last: ${cls}: ${last})`;
       }
     },

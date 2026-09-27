@@ -689,9 +689,21 @@ describe("collectNativeBaselineMs", () => {
 });
 
 describe("runCampaign", () => {
-  function fakeResult(dollarCost: number, error: string | null = null, finish_reason = "success") {
+  function fakeResult(
+    dollarCost: number,
+    error: string | null = null,
+    finish_reason = "success",
+    judgeError: string | null = null,
+  ) {
     return {
-      cell: { cell_key: "k", error, finish_reason, task_pass: !error } as unknown as McpAtlasCell,
+      cell: {
+        cell_key: "k",
+        error,
+        finish_reason,
+        task_pass: !error && !judgeError,
+        judge_verdict: judgeError ? "n/a" : "pass",
+        claim_rubric: { judge_error: judgeError, verdict: judgeError ? "n/a" : "pass" },
+      } as unknown as McpAtlasCell,
       toolCallRows: [],
       searchEventRows: [],
       retrievalRows: [],
@@ -798,9 +810,9 @@ describe("runCampaign", () => {
     const OUTCOME = { error: "the model gave up", finish_reason: "success" };
     const REQUEST = { error: "API Error: 400 bad request", finish_reason: "success" };
     const OK = { error: null, finish_reason: "success" };
-    type Shape = { error: string | null; finish_reason: string };
+    type Shape = { error: string | null; finish_reason: string; judgeError?: string | null };
 
-    const runShape = async (s: Shape) => fakeResult(0.1, s.error, s.finish_reason);
+    const runShape = async (s: Shape) => fakeResult(0.1, s.error, s.finish_reason, s.judgeError);
 
     function campaign(shapes: readonly Shape[], k: number, concurrency = 1) {
       const delivered: string[] = [];
@@ -826,6 +838,78 @@ describe("runCampaign", () => {
       expect(summary.abort_reason).toBe(
         "3 consecutive infra-errored cells (last: transient: API Error: 503 Service Unavailable)",
       );
+    });
+
+    it("stops after repeated judge access failures while their cells remain unscored", async () => {
+      const gated = {
+        ...OK,
+        judgeError: "judge failed: Bedrock AccessDeniedException: model access denied",
+      };
+      const delivered: McpAtlasCell[] = [];
+      const summary = await runCampaign([gated, gated, gated], {
+        concurrency: 1,
+        dollarCap: null,
+        quiet: true,
+        breaker: createInfraErrorBreaker(2),
+        runOne: runShape,
+        onCell: (r) => delivered.push(r.cell),
+      });
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 2,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining("access: Bedrock AccessDeniedException"),
+      });
+      expect(delivered.map((c) => [c.error, c.claim_rubric.judge_error, c.judge_verdict])).toEqual([
+        [null, gated.judgeError, "n/a"],
+        [null, gated.judgeError, "n/a"],
+      ]);
+    });
+
+    it("counts exhausted judge throttles; an unrelated judge failure leaves the streak intact", async () => {
+      const throttled = {
+        ...OK,
+        judgeError: "judge failed: Failed after 7 attempts. Last error: Too many requests",
+      };
+      const unparseable = { ...OK, judgeError: "judge failed: No object generated" };
+      const summary = await campaign([throttled, unparseable, throttled, OK], 2).done;
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 3,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining("transient: Failed after 7 attempts"),
+      });
+    });
+
+    it.each([
+      ["ResourceNotFoundException: requested model identifier could not be resolved", "access"],
+      [
+        "ValidationException: Invocation of model ID with on-demand throughput isn't supported",
+        "access",
+      ],
+      ["ExpiredTokenException: security token has expired", "transient"],
+      ["ModelNotReadyException: model is warming up", "transient"],
+    ] as const)("trips on repeated Bedrock judge failure: %s", async (message, cls) => {
+      const failed = { ...OK, judgeError: `judge failed: ${message}` };
+      const summary = await campaign([failed, failed, OK], 2).done;
+
+      expect(summary).toMatchObject({
+        stopped_reason: "error_circuit",
+        cells_run: 2,
+        cells_skipped: 1,
+        abort_reason: expect.stringContaining(`${cls}: ${message}`),
+      });
+    });
+
+    it("does not treat every judge ValidationException as an access gate", async () => {
+      const invalid = {
+        ...OK,
+        judgeError: "judge failed: ValidationException: request payload is malformed",
+      };
+      const summary = await campaign([invalid, invalid, OK], 2).done;
+      expect(summary).toMatchObject({ stopped_reason: "completed", cells_run: 3 });
     });
 
     it("a success resets the count", async () => {
