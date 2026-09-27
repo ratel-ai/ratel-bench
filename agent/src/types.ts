@@ -160,7 +160,11 @@ export interface CellResult {
   /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
   provider?: string;
   run_index: number;
-  /** `@ratel-ai/sdk` version this row was produced against. Cache key dimension. */
+  /**
+   * `@ratel-ai/sdk` version this row is filed under (resume-key dimension, not a
+   * control-cache key). Normally the installed SDK that produced it; reused and
+   * `--ratel-version`-re-drained control rows carry the run's label version instead.
+   */
   ratel_version: string;
   /**
    * `ratel-ai-core` version resolved from the repo-root `Cargo.lock` — the same
@@ -219,6 +223,11 @@ export interface CellResult {
   truncated_steps?: number;
   /** Largest single-step `outputTokens`; the headroom signal for output caps. */
   max_step_output_tokens?: number;
+  /**
+   * `live` = produced by this row's run; `reused` = a control cell served from
+   * the control cache (re-stamped). Legacy rows lack it.
+   */
+  cache_source?: "live" | "reused";
   // Performance
   wall_ms: number;
   dollar_cost: number;

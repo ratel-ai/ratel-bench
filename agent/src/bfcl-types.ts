@@ -4,6 +4,8 @@
 // experiment-summary file. `bfcl-report` rebuilds a per-ratel-version report
 // from the append-only summaries (latest timestamp per version×source×model×type).
 
+import type { ErrorClass } from "./cell-errors.js";
+
 /** `simple` / `multiple` — the BFCL subset, derived from the scenario-id prefix. */
 export type BfclType = "simple" | "multiple";
 
@@ -92,12 +94,26 @@ export interface TaskRow {
   dollar_cost: number;
   wall_ms: number;
   turns: number;
+  /**
+   * Taxonomy class of the cell's error (`cell-errors.ts`); null when it didn't
+   * error.
+   */
+  error_class: ErrorClass | null;
+  /** Final infra error (`transient|access`): left out of every summary metric. */
+  excluded: boolean;
+  /** A step stopped on the output-token limit. Kept (not excluded); scored on its verdict. */
+  truncated: boolean;
 }
 
 /**
  * Append-only task-completion summary row (one per type × LLM × arm). The five
  * leaderboard metrics: task-completion accuracy, selection accuracy, argument
  * recall, token cost, and p50 latency.
+ *
+ * Built from superseded rows (one per cell: the last final row, else the last
+ * row). Final infra errors (`transient|access`) are excluded from every metric
+ * and counted in `excluded_cells`; other errors stay scored fails. A group with
+ * no kept rows has null metrics.
  */
 export interface TaskSummaryRow {
   timestamp: string;
@@ -106,17 +122,23 @@ export interface TaskSummaryRow {
   model: string; // LLM name
   arm: string; // control-baseline | control-oracle | ratel-full | …
   type: BfclType;
-  scenarios: number; // n (denominator)
+  scenarios: number; // n (denominator): kept rows, excluded ones not counted
   /** 1 — right function AND arguments (BFCL AST). null when no AST ground truth. */
   task_completion_accuracy: number | null;
   /** 2 — right function (name only). */
-  selection_accuracy: number;
+  selection_accuracy: number | null;
   /** 3 — mean argument recall (partial credit on required args). null when no AST ground truth. */
   recall: number | null;
-  /** 4 — token cost: mean total (input+output) tokens per scenario. */
-  mean_total_tokens: number;
-  /** 5 — p50 (median) wall-clock latency in ms. */
-  latency_p50_ms: number;
+  /** 4 — token cost: mean total (input+output) tokens per non-errored scenario. */
+  mean_total_tokens: number | null;
+  /** 5 — p50 (median) wall-clock latency in ms over non-errored scenarios. */
+  latency_p50_ms: number | null;
+  /** Final `transient|access` rows left out of every metric (not in `scenarios`). */
+  excluded_cells: number;
+  /** Kept rows that errored (`request|timeout|outcome`): scored as fails. */
+  errored_cells: number;
+  /** Kept rows cut off by the output-token limit (scored on their verdict; not necessarily fails). */
+  truncated_cells: number;
 }
 
 export type SummaryRow = RetrievalSummaryRow | TaskSummaryRow;

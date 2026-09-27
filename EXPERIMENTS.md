@@ -8,7 +8,7 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
    Both `start` and `sragents-select` **default** to reusing version-independent baseline/oracle
    from the canonical `agent.jsonl` in the OUTPUT file's directory — **no flag needed**. A model
    with no cached 0.2.0 controls runs them fresh. `--cache-source <path>` overrides; `--force`
-   disables. So writing to `results/raw/bfcl/agent-0.4.0-sparse.jsonl` auto-reuses from
+   disables reuse and truncates the `--output` file (both commands) before re-running everything. So writing to `results/raw/bfcl/agent-0.4.0-sparse.jsonl` auto-reuses from
    `results/raw/bfcl/agent.jsonl` → only `ratel-full` runs live (control-baseline is the
    expensive arm ≈ 8k input tokens/cell, so this is the big saving).
    **SR-Agents caveat:** control-baseline is built from the candidates' `pool_ids` (the full
@@ -16,6 +16,33 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
    reuse key ignores pool CONTENTS, so a stale pre-`pool_ids` cache would be silently re-adopted —
    when first regenerating on the corrected pool, run baseline once with `--force` to purge it,
    then let every other run reuse the fresh cells.
+   **Errored rows are never reused, never double-counted** (taxonomy: `agent/src/cell-errors.ts`).
+   - *Cache:* rerunnable errors (`transient|access|request`) are skipped, so a key whose only
+     cached rows are errors runs live; `timeout|outcome` rows are final, scored results and stay
+     reusable. `--cache-source a,b,…` reads several files (earliest eligible row across them wins,
+     e.g. canonical + a controls backfill); `--ratel-version V` stamps re-drained control rows
+     with a label's original SDK version (control arms only). V must equal the `ratel_version` of
+     the rows being replaced, as `results-audit` prints it per label (e.g. `0.1.5` for label
+     `0.2.0`, `0.3.0-rc.1` for label `0.3.0-rc.1`). A different or omitted V (the installed SDK
+     version) doesn't supersede them: each version counts as its own cell, so the label is
+     double-counted (`bfcl-summarize` / `report` warn; `results-audit` lists the split cells).
+   - *Summaries / reports:* rows are superseded per cell (label + cell key; the last final row
+     wins, so a re-run replaces a transient error and a duplicated row counts once). Final
+     `transient|access` rows are left out of every metric and counted in `excluded_cells`;
+     `request|timeout|outcome` stay scored fails (`errored_cells`); output-limit cut-offs are kept
+     and scored on their verdict (`truncated_cells`; they can pass). Token/cost/latency means use
+     non-errored rows only (summaries: null when a group has none; REPORT.md: `—`). A re-summary
+     replaces a published group only when its timestamp is >= the published one (on a tie the last
+     appended row wins; retrieval: once per pool × k). A group's timestamp is its newest raw row,
+     so a group whose raw rows were rewritten after it was summarized stays stale until new
+     (re-stamped) rows are appended, e.g. by a re-drain: check that the report's timestamps for
+     the label match the new summary rows. `--label L` summarizes one label only.
+   - *Audit first:* `results-audit --bench bfcl|sragents --agent <file> --cache <a,b,…>` counts
+     errors per file/label/arm/model/class/ratel_version, lists the control keys the old cache
+     re-served as errors, flags mixed providers/caps and (BFCL) lists label cells under >1
+     `ratel_version` plus each label's infra-errored rows' `ratel_version`. Read-only unless
+     `--drop-infra-errors --out <path>`: drops only `transient|access` rows a later row of the same
+     cell supersedes, so no summary changes; final infra rows stay (still `excluded_cells`).
 2. **SR-Agents LLM eval is ALWAYS 600 scenarios = 100/dataset × 6** — a seeded subset of the
    full 5,400. ALWAYS pin it: `sragents-candidates --scenarios-from results/raw/sragents/candidates.jsonl`.
    Without it, all 5,400 run (9× cost + incomparable set).
@@ -90,7 +117,7 @@ RATEL_VERSION_LABEL=0.4.0-<m> pnpm -F @ratel-ai/benchmark bfcl-candidates \
   --retriever <method> --pool-sizes 30,100 --output results/raw/bfcl/retrieval-0.4.0-<m>.jsonl
 
 # --- summarize + report ---
-pnpm -F @ratel-ai/benchmark bfcl-summarize \
+pnpm -F @ratel-ai/benchmark bfcl-summarize --label 0.4.0-<m> \
   --retrieval-rows results/raw/bfcl/retrieval-0.4.0-<m>.jsonl --agent results/raw/bfcl/agent-0.4.0-<m>.jsonl
 pnpm -F @ratel-ai/benchmark bfcl-report
 ```
@@ -133,7 +160,7 @@ RATEL_VERSION_LABEL=0.4.0-<m> pnpm -F @ratel-ai/benchmark sragents-select \
   --pool-size 100 --top-k 5 --concurrency 8 --dollar-global 60   # first method: add --force
 
 # --- summarize (retrieval eval from --retrieval-rows + task completion from --agent) + report ---
-pnpm -F @ratel-ai/benchmark sragents-summarize \
+pnpm -F @ratel-ai/benchmark sragents-summarize --label 0.4.0-<m> \
   --retrieval-rows results/raw/sragents/candidates-0.4.0-<m>.jsonl \
   --agent results/raw/sragents/agent-0.4.0-<m>.jsonl
 pnpm -F @ratel-ai/benchmark sragents-report

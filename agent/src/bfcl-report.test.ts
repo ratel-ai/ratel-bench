@@ -40,6 +40,9 @@ function task(over: Partial<TaskSummaryRow>): TaskSummaryRow {
     recall: 0.85,
     mean_total_tokens: 1100,
     latency_p50_ms: 900,
+    excluded_cells: 0,
+    errored_cells: 0,
+    truncated_cells: 0,
     ...over,
   };
 }
@@ -146,6 +149,36 @@ describe("buildReport", () => {
       [30, 1],
       [30, 5],
       [100, 5],
+    ]);
+  });
+
+  it("on a timestamp tie the last appended summary row wins", () => {
+    const first = task({ selection_accuracy: 0.505, excluded_cells: 0 });
+    const resummary = task({ selection_accuracy: 0.99, excluded_cells: 98 });
+    const report = buildReport([], [first, resummary], NOW);
+    const entry =
+      report.ratel_versions["0.2.0"].task_completion["claude-haiku-4-5"]["ratel-full"].simple;
+    expect(entry.metrics).toMatchObject({ selection_accuracy: 0.99, excluded_cells: 98 });
+  });
+
+  it("tied retrieval re-summary rows appear once per (pool_size, k), last appended wins", () => {
+    const report = buildReport(
+      [
+        retr({ pool_size: 100, k: 5, mean_precision: 0.1 }),
+        retr({ pool_size: 30, k: 5 }),
+        retr({ pool_size: 100, k: 5, mean_precision: 0.2 }), // same timestamp: a re-summary
+      ],
+      [],
+      NOW,
+    );
+    const metrics = report.ratel_versions["0.2.0"].retriever_evaluation.simple.metrics as Array<{
+      pool_size: number;
+      k: number;
+      mean_precision: number;
+    }>;
+    expect(metrics.map((m) => [m.pool_size, m.k, m.mean_precision])).toEqual([
+      [30, 5, 1],
+      [100, 5, 0.2],
     ]);
   });
 });

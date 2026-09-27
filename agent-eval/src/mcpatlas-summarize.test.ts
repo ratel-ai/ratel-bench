@@ -250,6 +250,66 @@ describe("task summary", () => {
     expect(n.taskSummary[0].no_search_rate).toBe(0);
   });
 
+  // Documented divergence from bfcl/sragents: mcpatlas keeps infra-errored
+  // cells in every denominator (scored as fails) and only COUNTS them, so a
+  // non-zero excluded_cells flags a group whose rates are depressed by infra.
+  it("counts infra-errored cells as excluded_cells without changing any denominator", () => {
+    const wl = new Map<string, McpAtlasWorkload>([
+      ["t1", "version-control"],
+      ["t2", "version-control"],
+      ["t3", "version-control"],
+      ["t4", "version-control"],
+      ["t5", "version-control"],
+      ["t6", "version-control"],
+      ["t7", "version-control"],
+      ["t8", "database"],
+      ["t9", "database"],
+    ]);
+    const failed = (task_id: string, error: string, finish_reason = "error") =>
+      cell({ task_id, error, finish_reason, task_pass: false, tool_selection_pass: false });
+    const cells = [
+      cell({ task_id: "t1" }),
+      failed("t2", "API Error: 529 Overloaded", "success"), // transient
+      failed("t3", "API Error: 403 Forbidden", "success"), // access
+      failed("t4", "", "error_max_turns"), // outcome: a scored fail, not excluded
+      failed("t5", "API Error: 422 bad tool schema", "success"), // request: a scored fail, not excluded
+      // timeout: runCell's thrown shape; a scored fail, not excluded
+      failed(
+        "t6",
+        "claude produced no parseable result envelope (timedOut=true, exitCode=null, signal=SIGTERM): ",
+      ),
+      // gateway never started: infra
+      failed("t7", "ratel cell produced empty telemetry — retrieval data for this cell is lost"),
+      // A second workload and a second arm: counts stay per group.
+      cell({ task_id: "t8" }),
+      failed("t9", "API Error: 529 Overloaded", "success"), // transient
+      cell({ task_id: "t1", arm: "ratel" }),
+    ];
+    const r = summarizeMcpAtlas(input({ cells, workloads: wl }));
+    const row = (arm: string, workload: string) =>
+      r.taskSummary.find((s) => s.arm === arm && s.workload === workload);
+    const vc = row("native", "version-control");
+    expect(vc?.excluded_cells).toBe(3);
+    expect(vc?.errored).toBe(6);
+    expect(vc?.tasks).toBe(7);
+    expect(vc?.task_pass_rate).toBeCloseTo(1 / 7);
+    expect(vc?.tool_selection_pass_rate).toBeCloseTo(1 / 7);
+    expect(row("native", "database")?.excluded_cells).toBe(1);
+    expect(row("native", "database")?.tasks).toBe(2);
+    const all = row("native", "all");
+    expect(all?.excluded_cells).toBe(4);
+    expect(all?.errored).toBe(7);
+    expect(all?.tasks).toBe(9);
+    const ratelRows = r.taskSummary.filter((s) => s.arm === "ratel");
+    expect(ratelRows.length).toBeGreaterThan(0);
+    expect(ratelRows.every((s) => s.excluded_cells === 0)).toBe(true);
+  });
+
+  it("excluded_cells is 0 when nothing errored on infra", () => {
+    const r = summarizeMcpAtlas(input({ cells: [cell()] }));
+    expect(r.taskSummary.every((s) => s.excluded_cells === 0)).toBe(true);
+  });
+
   it("marks variance as unmeasured at k=1", () => {
     expect(summarizeMcpAtlas(input({ cells: [cell()] })).taskSummary[0].variance_measured).toBe(
       false,

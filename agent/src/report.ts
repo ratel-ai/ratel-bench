@@ -4,6 +4,8 @@
 // Pure functions on parsed JSONL — no I/O — so the report logic stays
 // testable. The CLI wrapper (`report-cli.ts`) handles file reads/writes.
 
+import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
+import { cellKeyOf } from "./cell-key.js";
 import type { Arm, CellResult } from "./types.js";
 
 export interface RetrievalRow {
@@ -32,6 +34,61 @@ export interface RetrievalRow {
   ndcg_at_k: number;
 }
 
+/**
+ * A cell's identity within one label's history: the label (`ratel_ai_core_version`)
+ * plus the runner's cell key. The label matters because one SDK version (in the
+ * runner key) backs several labels, e.g. `0.2.0` and `0.3.0-rc.1`.
+ */
+export function labelledCellKeyOf(cell: CellResult): string {
+  return `${cell.ratel_ai_core_version ?? "unknown"}::${cellKeyOf(cell)}`;
+}
+
+/** The row fields `versionSplitCells` reads; BFCL cells and audit rows carry them. */
+export interface VersionedCellRow {
+  scenario_id: string;
+  arm: string;
+  model: string;
+  run_index: number;
+  pool_size: number | null;
+  ratel_ai_core_version?: string;
+  ratel_version?: string;
+}
+
+/** A label cell whose rows carry more than one SDK `ratel_version`. */
+export interface VersionSplitCell {
+  label: string;
+  arm: string;
+  model: string;
+  scenario_id: string;
+  /** Row count per `ratel_version` (`unset` when not recorded). */
+  versions: Record<string, number>;
+}
+
+/**
+ * Label cells (label + scenario/arm/model/run/pool) whose rows span more than one
+ * `ratel_version`. `labelledCellKeyOf` includes the SDK version, so each version
+ * counts as its own cell: a re-drain stamped with another `--ratel-version` than
+ * the rows it replaces double-counts the cell instead of superseding it.
+ */
+export function versionSplitCells(rows: VersionedCellRow[]): VersionSplitCell[] {
+  const cells = new Map<string, VersionSplitCell>();
+  for (const r of rows) {
+    const label = r.ratel_ai_core_version ?? "unknown";
+    const key = [label, r.scenario_id, r.arm, r.model, r.run_index, r.pool_size ?? "null"].join(
+      "::",
+    );
+    const cell =
+      cells.get(key) ??
+      cells
+        .set(key, { label, arm: r.arm, model: r.model, scenario_id: r.scenario_id, versions: {} })
+        .get(key);
+    if (!cell) continue;
+    const version = r.ratel_version ?? "unset";
+    cell.versions[version] = (cell.versions[version] ?? 0) + 1;
+  }
+  return [...cells.values()].filter((c) => Object.keys(c.versions).length > 1);
+}
+
 export function median(xs: number[]): number {
   if (xs.length === 0) return 0;
   const sorted = [...xs].sort((a, b) => a - b);
@@ -42,6 +99,24 @@ export function median(xs: number[]): number {
 export function mean(xs: number[]): number {
   if (xs.length === 0) return 0;
   return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+/** Mean, or null for an empty list (a metric with no rows behind it). */
+export function meanOrNull(xs: number[]): number | null {
+  return xs.length === 0 ? null : mean(xs);
+}
+
+/** Median, or null for an empty list. */
+export function medianOrNull(xs: number[]): number | null {
+  return xs.length === 0 ? null : median(xs);
+}
+
+/**
+ * A row cut off by the output-token limit: `truncated_steps>0` (BFCL, U1+) or a
+ * `length` finish reason (legacy BFCL rows, SR rows). Scored on its verdict.
+ */
+export function isTruncated(r: { truncated_steps?: number; finish_reason?: string }): boolean {
+  return (r.truncated_steps ?? 0) > 0 || r.finish_reason === "length";
 }
 
 /** Normalize a (possibly absent) cell category into a stable grouping key. */
@@ -95,11 +170,15 @@ export interface ArmModelStats {
    * direct + 2 gateway tools (so ~5–7 at top-K=5).
    */
   mean_catalog_size: number;
-  mean_input_tokens: number;
-  mean_total_tokens: number;
-  mean_turns: number;
-  mean_dollar_cost: number;
-  mean_wall_ms: number;
+  /**
+   * Token / turn / $ / wall means cover non-errored cells only (errored ones are
+   * still scored in `success_rate`); `null` when no scenario has a clean cell.
+   */
+  mean_input_tokens: number | null;
+  mean_total_tokens: number | null;
+  mean_turns: number | null;
+  mean_dollar_cost: number | null;
+  mean_wall_ms: number | null;
 }
 
 interface ScenarioStats {
@@ -113,11 +192,12 @@ interface ScenarioStats {
   /** AST passes / ast-applicable runs; `null` when the scenario has no arg ground truth. */
   task_rate: number | null;
   mean_catalog: number;
-  mean_input: number;
-  mean_total: number;
-  mean_turns: number;
-  mean_dollar: number;
-  mean_wall: number;
+  /** Over non-errored runs only; `null` when every run errored. */
+  mean_input: number | null;
+  mean_total: number | null;
+  mean_turns: number | null;
+  mean_dollar: number | null;
+  mean_wall: number | null;
   /** Number of runs aggregated for this scenario. */
   runs: number;
 }
@@ -166,6 +246,8 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       astCells.length > 0
         ? astCells.filter((c) => c.ast_verdict === "pass").length / astCells.length
         : null;
+    // Token/cost/latency means skip errored runs; selection above scores them all.
+    const clean = arr.filter((c) => errorClassOf(c) === null);
     perScenario.push({
       arm: head.arm,
       model: head.model,
@@ -175,11 +257,11 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       success_rate: passes / arr.length,
       task_rate,
       mean_catalog: mean(arr.map((c) => c.catalog_size)),
-      mean_input: mean(arr.map((c) => c.input_tokens)),
-      mean_total: mean(arr.map((c) => c.total_tokens)),
-      mean_turns: mean(arr.map((c) => c.turns)),
-      mean_dollar: mean(arr.map((c) => c.dollar_cost)),
-      mean_wall: mean(arr.map((c) => c.wall_ms)),
+      mean_input: meanOrNull(clean.map((c) => c.input_tokens)),
+      mean_total: meanOrNull(clean.map((c) => c.total_tokens)),
+      mean_turns: meanOrNull(clean.map((c) => c.turns)),
+      mean_dollar: meanOrNull(clean.map((c) => c.dollar_cost)),
+      mean_wall: meanOrNull(clean.map((c) => c.wall_ms)),
       runs: arr.length,
     });
   }
@@ -208,11 +290,11 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
         return rates.length > 0 ? mean(rates) : null;
       })(),
       mean_catalog_size: mean(ps.map((p) => p.mean_catalog)),
-      mean_input_tokens: mean(ps.map((p) => p.mean_input)),
-      mean_total_tokens: mean(ps.map((p) => p.mean_total)),
-      mean_turns: mean(ps.map((p) => p.mean_turns)),
-      mean_dollar_cost: mean(ps.map((p) => p.mean_dollar)),
-      mean_wall_ms: mean(ps.map((p) => p.mean_wall)),
+      mean_input_tokens: meanOfPresent(ps.map((p) => p.mean_input)),
+      mean_total_tokens: meanOfPresent(ps.map((p) => p.mean_total)),
+      mean_turns: meanOfPresent(ps.map((p) => p.mean_turns)),
+      mean_dollar_cost: meanOfPresent(ps.map((p) => p.mean_dollar)),
+      mean_wall_ms: meanOfPresent(ps.map((p) => p.mean_wall)),
     });
   }
   return out.sort(
@@ -224,6 +306,11 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
   );
 }
 
+/** Mean over the non-null values; null when there are none (all-errored scenarios drop out). */
+function meanOfPresent(xs: (number | null)[]): number | null {
+  return meanOrNull(xs.filter((x): x is number => x !== null));
+}
+
 /** Sort comparator that puts agnostic rows (`null`) after every numeric pool size. */
 function comparePoolSizes(a: number | null, b: number | null): number {
   if (a === b) return 0;
@@ -232,29 +319,35 @@ function comparePoolSizes(a: number | null, b: number | null): number {
   return a - b;
 }
 
+/**
+ * Control vs ratel means (non-errored cells, see `ArmModelStats`). A mean is
+ * `null` when its arm has no clean cell (or, for oracle, no row); a savings %
+ * is `null` when either side is.
+ */
 export interface SavingsRow {
   model: string;
   category: string;
   pool_size: number;
-  control_mean_input: number;
-  ratel_mean_input: number;
-  oracle_mean_input: number;
-  input_savings_pct: number;
-  control_mean_total: number;
-  ratel_mean_total: number;
-  total_savings_pct: number;
-  control_mean_dollars: number;
-  ratel_mean_dollars: number;
-  dollar_savings_pct: number;
-  control_mean_turns: number;
-  ratel_mean_turns: number;
-  oracle_mean_turns: number;
-  control_mean_wall_ms: number;
-  ratel_mean_wall_ms: number;
-  wall_savings_pct: number;
+  control_mean_input: number | null;
+  ratel_mean_input: number | null;
+  oracle_mean_input: number | null;
+  input_savings_pct: number | null;
+  control_mean_total: number | null;
+  ratel_mean_total: number | null;
+  total_savings_pct: number | null;
+  control_mean_dollars: number | null;
+  ratel_mean_dollars: number | null;
+  dollar_savings_pct: number | null;
+  control_mean_turns: number | null;
+  ratel_mean_turns: number | null;
+  oracle_mean_turns: number | null;
+  control_mean_wall_ms: number | null;
+  ratel_mean_wall_ms: number | null;
+  wall_savings_pct: number | null;
 }
 
-function pctSavings(control: number, ratel: number): number {
+function pctSavings(control: number | null, ratel: number | null): number | null {
+  if (control === null || ratel === null) return null;
   if (control === 0) return 0;
   return (1 - ratel / control) * 100;
 }
@@ -297,7 +390,7 @@ export function savingsByModel(cells: CellResult[], coarsen = true): SavingsRow[
       pool_size: control.pool_size,
       control_mean_input: control.mean_input_tokens,
       ratel_mean_input: ratel.mean_input_tokens,
-      oracle_mean_input: oracle?.mean_input_tokens ?? 0,
+      oracle_mean_input: oracle?.mean_input_tokens ?? null,
       input_savings_pct: pctSavings(control.mean_input_tokens, ratel.mean_input_tokens),
       control_mean_total: control.mean_total_tokens,
       ratel_mean_total: ratel.mean_total_tokens,
@@ -307,7 +400,7 @@ export function savingsByModel(cells: CellResult[], coarsen = true): SavingsRow[
       dollar_savings_pct: pctSavings(control.mean_dollar_cost, ratel.mean_dollar_cost),
       control_mean_turns: control.mean_turns,
       ratel_mean_turns: ratel.mean_turns,
-      oracle_mean_turns: oracle?.mean_turns ?? 0,
+      oracle_mean_turns: oracle?.mean_turns ?? null,
       control_mean_wall_ms: control.mean_wall_ms,
       ratel_mean_wall_ms: ratel.mean_wall_ms,
       wall_savings_pct: pctSavings(control.mean_wall_ms, ratel.mean_wall_ms),
@@ -524,45 +617,82 @@ export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
   );
 }
 
-function fmtPct(x: number): string {
-  return `${x.toFixed(1)}%`;
+/** `null` (no rows behind a metric) renders as "—" in every formatter. */
+const NONE = "—";
+
+function fmtPct(x: number | null): string {
+  return x === null ? NONE : `${x.toFixed(1)}%`;
 }
 
-function fmtNum(x: number): string {
+function fmtNum(x: number | null): string {
+  if (x === null) return NONE;
   if (x >= 1000) return x.toFixed(0);
   if (x >= 10) return x.toFixed(1);
   return x.toFixed(3);
 }
 
-function fmtDollars(x: number): string {
-  return `$${x.toFixed(4)}`;
+function fmtDollars(x: number | null): string {
+  return x === null ? NONE : `$${x.toFixed(4)}`;
 }
 
-function fmtSeconds(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`;
+function fmtSeconds(ms: number | null): string {
+  return ms === null ? NONE : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Signed turn delta (ratel − control); "—" when either side is null. */
+function fmtTurnsDelta(control: number | null, ratel: number | null): string {
+  if (control === null || ratel === null) return NONE;
+  const delta = ratel - control;
+  return `${delta >= 0 ? "+" : ""}${fmtNum(delta)}`;
 }
 
 function fmtPoolSize(p: number | null): string {
   return p === null ? "—" : String(p);
 }
 
+/**
+ * Render REPORT.md. Cells are superseded first (one per cell: the last final row,
+ * else the last row), then final infra errors (`transient|access`) are dropped;
+ * both counts are shown under the header. Other errors stay scored fails, but
+ * token/cost/latency means skip them ("—" when a group has no clean cell). A group
+ * whose every row was dropped has no row at all. Label cells whose rows span
+ * several `ratel_version`s are flagged (`versionSplitCells`).
+ */
 export function renderReport(args: {
   cells: CellResult[];
   retrieval: RetrievalRow[];
   generatedAt?: Date;
 }): string {
   const date = (args.generatedAt ?? new Date()).toISOString();
-  const stats = statsByArmModel(args.cells);
-  const savings = savingsByModel(args.cells);
+  const latest = supersede(args.cells, labelledCellKeyOf);
+  const cells = latest.filter((c) => !isInfraError(c));
+  const stats = statsByArmModel(cells);
+  const savings = savingsByModel(cells);
   const retrieval = retrievalByPoolSize(args.retrieval);
-  const failures = failureTaxonomy(args.cells);
+  const failures = failureTaxonomy(cells);
 
   const lines: string[] = [];
   lines.push("# Ratel benchmark report");
   lines.push("");
   lines.push(`_Generated: ${date}_`);
   lines.push("");
-  lines.push(`Cells: **${args.cells.length}**, retrieval rows: **${args.retrieval.length}**.`);
+  lines.push(`Cells: **${cells.length}**, retrieval rows: **${args.retrieval.length}**.`);
+  const excluded = latest.length - cells.length;
+  const superseded = args.cells.length - latest.length;
+  if (excluded > 0 || superseded > 0) {
+    lines.push(
+      `Not counted: **${excluded}** infra-errored (transient/access) excluded, ` +
+        `**${superseded}** superseded by a later row of the same cell.`,
+    );
+  }
+  const split = versionSplitCells(args.cells).length;
+  if (split > 0) {
+    lines.push(
+      `Warning: **${split}** ${split === 1 ? "cell appears" : "cells appear"} under more than one ` +
+        "`ratel_version` and each version counts as its own cell (a re-drain must reuse the " +
+        "replaced rows' `--ratel-version`; see `results-audit`).",
+    );
+  }
   lines.push("");
 
   // 1. Headline. Numbers are mean-of-per-scenario-means: every scenario weighs
@@ -596,9 +726,8 @@ export function renderReport(args: {
     );
     lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for (const s of savings) {
-      const turnsDelta = s.ratel_mean_turns - s.control_mean_turns;
       lines.push(
-        `| ${s.model} | ${s.category} | ${s.pool_size} | ${fmtNum(s.control_mean_input)} → ${fmtNum(s.ratel_mean_input)} | **${fmtPct(s.input_savings_pct)}** | ${fmtNum(s.control_mean_total)} → ${fmtNum(s.ratel_mean_total)} | **${fmtPct(s.total_savings_pct)}** | ${fmtDollars(s.control_mean_dollars)} → ${fmtDollars(s.ratel_mean_dollars)} | **${fmtPct(s.dollar_savings_pct)}** | ${fmtSeconds(s.control_mean_wall_ms)} → ${fmtSeconds(s.ratel_mean_wall_ms)} | **${fmtPct(s.wall_savings_pct)}** | ${fmtNum(s.oracle_mean_input)} | ${turnsDelta >= 0 ? "+" : ""}${fmtNum(turnsDelta)} |`,
+        `| ${s.model} | ${s.category} | ${s.pool_size} | ${fmtNum(s.control_mean_input)} → ${fmtNum(s.ratel_mean_input)} | **${fmtPct(s.input_savings_pct)}** | ${fmtNum(s.control_mean_total)} → ${fmtNum(s.ratel_mean_total)} | **${fmtPct(s.total_savings_pct)}** | ${fmtDollars(s.control_mean_dollars)} → ${fmtDollars(s.ratel_mean_dollars)} | **${fmtPct(s.dollar_savings_pct)}** | ${fmtSeconds(s.control_mean_wall_ms)} → ${fmtSeconds(s.ratel_mean_wall_ms)} | **${fmtPct(s.wall_savings_pct)}** | ${fmtNum(s.oracle_mean_input)} | ${fmtTurnsDelta(s.control_mean_turns, s.ratel_mean_turns)} |`,
       );
     }
   }

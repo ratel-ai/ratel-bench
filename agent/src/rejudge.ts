@@ -7,12 +7,14 @@
 //     to scenarios that didn't have it.
 //
 // Skips rows where `programmatic_verdict === "pass"` — the LLM judge was never
-// meant to run on them (see `runner.ts` gating). Errors out fast when a
+// meant to run on them (see `runner.ts` gating) — and errored rows, which have
+// no answer to judge (the runner never judges them either). Errors out fast when a
 // scenario_id is missing from the corpus rather than silently emitting `n/a`.
 
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { LanguageModel } from "ai";
+import { errorClassOf } from "./cell-errors.js";
 import { loadScenarios } from "./corpus.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import { judgeAst } from "./judges/ast.js";
@@ -43,6 +45,8 @@ export interface RejudgeSummary {
   ast_scored: number;
   /** Rows the LLM judge skipped because programmatic_verdict was "pass". */
   skipped_pass: number;
+  /** Rows the LLM judge skipped because the cell errored (no answer to judge). */
+  skipped_error: number;
   /** Rows written to output (== `total`). */
   written: number;
 }
@@ -54,7 +58,8 @@ export interface RejudgeSummary {
  *    from the scenario's `gold_calls` + the stored `tool_calls`. This is how an
  *    older run gets argument-level scoring retroactively.
  *  - **LLM judge** (only when `judgeModel` is set, same gating as the runner):
- *    re-score the coherence/strict verdict for non-passing rows.
+ *    re-score the coherence/strict verdict for non-passing, non-errored rows
+ *    (errored rows pass through unchanged and are counted in `skipped_error`).
  */
 export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
   const judge = args.judge ?? defaultJudgeLLM;
@@ -70,6 +75,7 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
 
   let rejudged = 0;
   let skipped = 0;
+  let skippedError = 0;
   let astScored = 0;
   for (const cell of cells) {
     const scenario = byId.get(cell.scenario_id);
@@ -86,8 +92,11 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
       astScored++;
     }
 
-    // LLM judge — optional, and only for non-passing rows (matches runner gating).
-    if (args.judgeModel && cell.programmatic_verdict !== "pass") {
+    // LLM judge — optional, and only for non-passing, non-errored rows (matches runner
+    // gating). Any non-null error counts, even "".
+    if (errorClassOf(cell) !== null) {
+      skippedError++;
+    } else if (args.judgeModel && cell.programmatic_verdict !== "pass") {
       const judged = await judge({
         prompt: scenario.prompt,
         judgeCriteria: scenario.judge_criteria,
@@ -110,6 +119,7 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
     rejudged,
     ast_scored: astScored,
     skipped_pass: skipped,
+    skipped_error: skippedError,
     written: cells.length,
   };
 }

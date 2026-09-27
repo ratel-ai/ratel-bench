@@ -49,6 +49,7 @@ src/
   pool.ts             builds the per-scenario tool pool (gold + seeded distractors)
   report.ts           aggregator (medians, savings, retrieval, taxonomy)
   report-cli.ts       entry — pnpm report
+  results-audit.ts    entry — pnpm results-audit (read-only error / stale-cache audit of raw JSONL)
   run-all.ts          entry — pnpm run-all (whole benchmark: ingest + a + b + c + report)
   runner.ts           registry-based dispatch, resumable, dollar-capped
   types.ts            AgentDescriptor / AgentRunInput / CellResult / Scenario shapes
@@ -109,13 +110,14 @@ Edits to the upstream SDK in [`ratel-ai/ratel`](https://github.com/ratel-ai/rate
 
 ## Cached control runs
 
-`control-baseline` and `control-oracle` cells are cached across invocations — they don't depend on the ratel code path being iterated on, so re-running them per campaign is pure waste. The cache is keyed by `(ratel_version, scenario_id, arm, model, pool_size, run_index)` and backed by the canonical `agent/results/agent.jsonl`.
+`control-baseline` and `control-oracle` cells are cached across invocations — they don't depend on the ratel code path being iterated on, so re-running them per campaign is pure waste. The cache is version-agnostic — keyed by `(scenario_id, arm, model, pool_size, run_index)` — and backed by the canonical `agent.jsonl`; a reused row is re-stamped to the current `ratel_version` with `cache_source: "reused"` (live rows carry `"live"`).
 
-- **Non-ephemeral runs** (default `--output`): control rows already in `agent.jsonl` are skipped via the existing resume path. Same as before, but now version-aware.
-- **Ephemeral runs** (`--ephemeral`): the canonical `agent.jsonl` is opened read-only at start. For each scheduled cell, if its key is in the cache, the cached row is copied verbatim into the ephemeral output and the live agent loop is skipped. Ratel arms (`ratel-full` / `ratel-pre-discovery` / `ratel-discovery-tool`) still run live every time — that's the point of an ephemeral iteration.
+- **Non-ephemeral runs** (default `--output`): control rows already in the output at the current version are skipped via the resume path.
+- **Ephemeral runs** (`--ephemeral`): the canonical `agent.jsonl` is opened read-only at start. For each scheduled cell, if its key is in the cache, the cached row is re-stamped into the ephemeral output and the live agent loop is skipped. Ratel arms (`ratel-full` / `ratel-pre-discovery` / `ratel-discovery-tool`) still run live every time — that's the point of an ephemeral iteration.
 - **`--force`** disables the cache (and truncates the output file in non-ephemeral mode), so the campaign always re-pays.
+- **Errored rows are never served.** Rerunnable errors (`transient|access|request`, classified by `cell-errors.ts`) are skipped when indexing the cache, so a key whose only cached rows are errors runs live. `timeout`/`outcome` rows are final, scored results and stay reusable. `--cache-source a,b,…` indexes several files (earliest eligible row across them wins).
 
-A run-start stderr line summarizes the hit count: `cache: 47 control cells reused from <path> (ratel 0.1.5), 153 will run`.
+A run-start stderr line summarizes the hit count: `cache: 47 control cells reused (re-stamped to 0.4.0), 153 will run`.
 
 The `--output` cell summary at the end now reports `<run> cells run, <cached> cached, <skipped> skipped`.
 
@@ -185,6 +187,18 @@ pnpm -F @ratel-ai/benchmark report \
 ```
 
 Auto-discovers every `*retrieval.jsonl` under `results/` if `--retrieval` is omitted.
+
+Cells are superseded per cell first (label + cell key; the last final row wins), then final infra errors (`transient|access`) are dropped; the header line reports both counts. Other errors stay scored fails, but token/turn/$/wall means skip them (`—` when a group has no clean cell). `bfcl-summarize` / `sragents-summarize` apply the same rules and add `excluded_cells`, `errored_cells` and `truncated_cells` to every summary row (metrics are `null` for a group with no kept rows); `--label L` limits them to one `ratel_ai_core_version` label. A re-summary replaces a published group only when its timestamp (the group's newest raw row) is >= the published one.
+
+## Audit raw results
+
+```bash
+pnpm -F @ratel-ai/benchmark results-audit --bench bfcl \
+  --agent results/raw/bfcl/agent.jsonl \
+  --cache "$(ls results/raw/bfcl/agent*.jsonl | paste -sd, -)"
+```
+
+Prints errored/truncated row counts per file × label × arm × model × error class × `ratel_version`, the control keys the old earliest-wins cache would have re-served as errors from the `--cache` file set (default: the agent file), and label × arm × model groups that mix providers or output caps. For `--bench bfcl` it also lists label cells whose rows span more than one `ratel_version` (the cell key includes it, so each version counts as its own cell; `bfcl-summarize` and `report` warn about the same) and, per label, the `ratel_version` of its infra-errored rows: the `--ratel-version` a control re-drain must pass to supersede them. It never writes unless `--drop-infra-errors --out <path>` is given, which copies the agent file to `<path>` minus the `transient|access` rows a later row of the same cell supersedes (every other non-blank line byte-for-byte). Final infra rows stay, so the cleaned file summarizes exactly like the original (same `excluded_cells`).
 
 ## Tests
 

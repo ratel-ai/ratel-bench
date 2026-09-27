@@ -10,6 +10,7 @@ import {
   makeRegistryRunCell,
   type RunCellFn,
   type RunnerConfig,
+  type RunnerSummary,
   run,
 } from "./runner.js";
 import type { AgentDescriptor, CellResult, Scenario } from "./types.js";
@@ -102,8 +103,8 @@ function baseConfig(corpusPath: string, outputPath: string): RunnerConfig {
     force: false,
     seed: 42,
     logLevel: "quiet",
-    // Pin a synthetic version so makeFakeRunCell rows (which set ratel_version: "test")
-    // match the keys the runner constructs for resume / cache.
+    // Pin a synthetic version so tests don't depend on the installed SDK; the
+    // runner stamps it on every row it writes.
     ratelVersion: "test",
   };
 }
@@ -155,6 +156,35 @@ describe("runner", () => {
     }
     // One run → one shared run_id across all its cells.
     expect(new Set(rows.map((r) => r.run_id)).size).toBe(1);
+  });
+
+  it("stamps live cells with config.ratelVersion and cache_source 'live'", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const output = join(tempDir, "agent.jsonl");
+
+    // makeFakeRunCell stamps ratel_version "test"; the run measures "9.9.9".
+    await run({
+      ...baseConfig(corpus, output),
+      arms: ["ratel-full"],
+      ratelVersion: "9.9.9",
+      runCell: makeFakeRunCell(0.001, []),
+    });
+
+    const cell = JSON.parse(readFileSync(output, "utf-8").trim()) as CellResult;
+    expect(cell.ratel_version).toBe("9.9.9");
+    expect(cell.cache_source).toBe("live");
+
+    // The stamped version is the resume key: a re-run at "9.9.9" skips the cell.
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["ratel-full"],
+      ratelVersion: "9.9.9",
+      runCell: makeFakeRunCell(0.001, called),
+    });
+    expect(summary.cells_skipped).toBe(1);
+    expect(called).toEqual([]);
   });
 
   it("records pool_size in every emitted cell", async () => {
@@ -515,7 +545,7 @@ describe("runner", () => {
     const summary = await run({
       ...baseConfig(corpus, ephemeral),
       arms: ["control-baseline", "control-oracle", "ratel-full"],
-      cacheSourcePath: canonical,
+      cacheSourcePaths: [canonical],
       runCell: makeFakeRunCell(0.001, calledEphemeral),
     });
 
@@ -529,7 +559,7 @@ describe("runner", () => {
     expect(arms).toEqual(["control-baseline", "control-oracle", "ratel-full"]);
   });
 
-  it("--force bypasses the cache even when cacheSourcePath is set", async () => {
+  it("--force bypasses the cache even when cache sources are set", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
     const canonical = join(tempDir, "canonical.jsonl");
@@ -545,7 +575,7 @@ describe("runner", () => {
     const summary = await run({
       ...baseConfig(corpus, ephemeral),
       arms: ["control-baseline"],
-      cacheSourcePath: canonical,
+      cacheSourcePaths: [canonical],
       force: true,
       runCell: makeFakeRunCell(0.001, called),
     });
@@ -570,7 +600,7 @@ describe("runner", () => {
     const summary = await run({
       ...baseConfig(corpus, ephemeral),
       arms: ["control-baseline"],
-      cacheSourcePath: canonical,
+      cacheSourcePaths: [canonical],
       // New run at a different ratel version → control arms are version-independent,
       // so the prior cell is REUSED and re-stamped to the new version (not re-run).
       ratelVersion: "9.9.9",
@@ -585,6 +615,7 @@ describe("runner", () => {
       .map((l) => JSON.parse(l) as CellResult);
     expect(rows).toHaveLength(1);
     expect(rows[0].ratel_version).toBe("9.9.9");
+    expect(rows[0].cache_source).toBe("reused");
   });
 
   it("appendRow writes one valid JSON line per call without quadratic rewrites", () => {
@@ -757,7 +788,246 @@ describe("runner", () => {
   });
 });
 
-describe("makeRegistryRunCell on an errored cell", () => {
+describe("control cache", () => {
+  // `scenario` alone makes a 1-tool universe, so control-baseline cells land at pool_size 1.
+  function cachedRow(over: Partial<CellResult>): CellResult {
+    return {
+      scenario_id: scenario.id,
+      category: null,
+      arm: "control-baseline",
+      model: "fake-model",
+      run_index: 0,
+      ratel_version: "0.1.0",
+      catalog_size: 1,
+      pool_size: 1,
+      seed: 42,
+      input_tokens: 100,
+      output_tokens: 50,
+      cached_input_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: 150,
+      tool_calls_total: 1,
+      tool_calls_unique: 1,
+      gateway_calls: 0,
+      non_gateway_calls: 1,
+      turns: 1,
+      programmatic_verdict: "pass",
+      ast_verdict: "n/a",
+      judge_verdict: "n/a",
+      final_text: "cached",
+      finish_reason: "stop",
+      error: null,
+      wall_ms: 1,
+      dollar_cost: 0.001,
+      tool_calls: [],
+      effective_tool_ids: ["fs.read_file"],
+      generated_at: "2026-06-01T00:00:00.000Z",
+      cache_source: "live",
+      ...over,
+    };
+  }
+
+  function erroredRow(error: string, over: Partial<CellResult> = {}): CellResult {
+    return cachedRow({
+      programmatic_verdict: "fail",
+      final_text: "",
+      finish_reason: "error",
+      error,
+      effective_tool_ids: [],
+      ...over,
+    });
+  }
+
+  function writeRows(path: string, rows: CellResult[]): void {
+    writeFileSync(path, rows.map((r) => `${JSON.stringify(r)}\n`).join(""));
+  }
+
+  function readRows(path: string): CellResult[] {
+    return readFileSync(path, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as CellResult);
+  }
+
+  async function runBaseline(
+    output: string,
+    over: Partial<RunnerConfig>,
+  ): Promise<{ summary: RunnerSummary; called: string[] }> {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      runCell: makeFakeRunCell(0.001, called),
+      ...over,
+    });
+    return { summary, called };
+  }
+
+  it("skips a transient-error control row and serves a later good row", async () => {
+    const canonical = join(tempDir, "canonical.jsonl");
+    writeRows(canonical, [
+      erroredRow("Failed after 3 attempts. Last error: Overloaded", {
+        generated_at: "2026-06-23T00:00:00.000Z",
+      }),
+      cachedRow({ generated_at: "2026-07-01T00:00:00.000Z", final_text: "good" }),
+    ]);
+    const output = join(tempDir, "out.jsonl");
+
+    const { summary, called } = await runBaseline(output, { cacheSourcePaths: [canonical] });
+
+    expect(summary.cells_cached).toBe(1);
+    expect(called).toEqual([]);
+    const rows = readRows(output);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].error).toBeNull();
+    expect(rows[0].final_text).toBe("good");
+    expect(rows[0].cache_source).toBe("reused");
+  });
+
+  it("runs a control key live when its only cached rows are errors", async () => {
+    const canonical = join(tempDir, "canonical.jsonl");
+    writeRows(canonical, [
+      erroredRow("Internal server error"),
+      erroredRow("model claude-x not found", { error_class: "access" }),
+      erroredRow("tools: too many tools", { error_class: "request" }),
+    ]);
+    const output = join(tempDir, "out.jsonl");
+
+    const { summary, called } = await runBaseline(output, { cacheSourcePaths: [canonical] });
+
+    expect(summary.cells_cached).toBe(0);
+    expect(summary.cells_run).toBe(1);
+    expect(called).toEqual(["fs-001::control-baseline::fake-model::0"]);
+  });
+
+  it.each([
+    ["timeout", "run timed out after 60000ms"],
+    ["outcome", "prompt is too long: 250000 tokens > 200000 maximum"],
+  ])("[guard] still reuses a %s-errored control row (a final, scored outcome)", async (_cls, error) => {
+    // Output-as-source (no cacheSourcePaths) so this also held before U2.
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [erroredRow(error)]);
+
+    const { summary, called } = await runBaseline(output, {});
+
+    expect(summary.cells_cached).toBe(1);
+    expect(called).toEqual([]);
+    expect(readRows(output).at(-1)?.error).toBe(error);
+  });
+
+  // Both orders, so neither "last file wins" nor "only the last source is read" passes.
+  it.each([
+    ["canonical first", ["canonical", "backfill"]],
+    ["backfill first", ["backfill", "canonical"]],
+  ])("reads multiple sources; the earliest eligible row across files wins (%s)", async (_label, order) => {
+    const files: Record<string, string> = {
+      canonical: join(tempDir, "canonical.jsonl"),
+      backfill: join(tempDir, "backfill.jsonl"),
+    };
+    writeRows(files.canonical, [
+      erroredRow("Overloaded", { generated_at: "2026-05-01T00:00:00.000Z" }),
+      cachedRow({ generated_at: "2026-07-01T00:00:00.000Z", final_text: "canonical-late" }),
+    ]);
+    writeRows(files.backfill, [
+      cachedRow({ generated_at: "2026-06-01T00:00:00.000Z", final_text: "backfill-early" }),
+    ]);
+    const output = join(tempDir, "out.jsonl");
+
+    const { summary, called } = await runBaseline(output, {
+      cacheSourcePaths: order.map((name) => files[name]),
+    });
+
+    expect(summary.cells_cached).toBe(1);
+    expect(called).toEqual([]);
+    expect(readRows(output)[0].final_text).toBe("backfill-early");
+  });
+
+  it.each([
+    ["first", (missing: string, canonical: string) => [missing, canonical]],
+    ["last", (missing: string, canonical: string) => [canonical, missing]],
+  ])("skips cache sources that don't exist (missing %s)", async (_label, sources) => {
+    const canonical = join(tempDir, "canonical.jsonl");
+    writeRows(canonical, [cachedRow({ final_text: "good" })]);
+    const output = join(tempDir, "out.jsonl");
+
+    const { summary } = await runBaseline(output, {
+      cacheSourcePaths: sources(join(tempDir, "missing.jsonl"), canonical),
+    });
+
+    expect(summary.cells_cached).toBe(1);
+    expect(readRows(output)[0].final_text).toBe("good");
+  });
+
+  it("with no cache sources, reuses the output's own prior-version controls", async () => {
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [cachedRow({ final_text: "own-prior" })]);
+
+    const { summary, called } = await runBaseline(output, {});
+
+    expect(summary.cells_cached).toBe(1);
+    expect(called).toEqual([]);
+    const last = readRows(output).at(-1);
+    expect(last?.final_text).toBe("own-prior");
+    expect(last?.cache_source).toBe("reused");
+    expect(last?.ratel_version).toBe("test");
+  });
+
+  it("with no cache sources, an output holding only a rerunnable error runs live", async () => {
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [erroredRow("Overloaded")]);
+
+    const { summary } = await runBaseline(output, {});
+
+    expect(summary.cells_cached).toBe(0);
+    expect(summary.cells_run).toBe(1);
+  });
+
+  // U5 flips this when resume starts re-queueing rerunnable errors.
+  it("[guard] resume still skips a current-version rerunnable-errored control", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const canonical = join(tempDir, "canonical.jsonl");
+    writeRows(output, [erroredRow("Overloaded", { ratel_version: "test" })]);
+    writeRows(canonical, [cachedRow({ final_text: "good" })]); // must not be served either
+
+    const { summary, called } = await runBaseline(output, { cacheSourcePaths: [canonical] });
+
+    expect(summary.cells_skipped).toBe(1);
+    expect(summary.cells_cached).toBe(0);
+    expect(summary.cells_run).toBe(0);
+    expect(called).toEqual([]);
+    expect(readRows(output)).toHaveLength(1);
+  });
+
+  // U5 flips this too. ratel-full is never cached, so only resume can skip it.
+  it("[guard] resume still skips a current-version rerunnable-errored ratel-full cell", async () => {
+    const output = join(tempDir, "out.jsonl");
+    writeRows(output, [
+      erroredRow("Overloaded", { arm: "ratel-full", ratel_version: "test", pool_size: 1 }),
+    ]);
+
+    const { summary, called } = await runBaseline(output, { arms: ["ratel-full"] });
+
+    expect(summary.cells_skipped).toBe(1);
+    expect(summary.cells_run).toBe(0);
+    expect(called).toEqual([]);
+  });
+
+  it("explicit cache sources replace the output as a source", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const empty = join(tempDir, "empty.jsonl");
+    writeRows(output, [cachedRow({ final_text: "own-prior" })]);
+    writeRows(empty, []);
+
+    const { summary } = await runBaseline(output, { cacheSourcePaths: [empty] });
+
+    expect(summary.cells_cached).toBe(0);
+    expect(summary.cells_run).toBe(1);
+  });
+});
+
+describe("makeRegistryRunCell: errored cells and the judge gate", () => {
   // Step 1 calls the gold tool with the gold args; step 2 fails. The partial
   // trace must not score: errored cells stay fail/fail, as before the error
   // taxonomy, while keeping the usage and cost of step 1.
@@ -798,9 +1068,16 @@ describe("makeRegistryRunCell on an errored cell", () => {
     });
   }
 
-  async function runCell(model: MockLanguageModelV3, perRunTimeoutMs: number) {
+  async function runCell(
+    model: MockLanguageModelV3,
+    perRunTimeoutMs: number,
+    judgeModel?: MockLanguageModelV3,
+  ) {
     const registry = new Map([[controlBaseline.id, controlBaseline]]);
-    return makeRegistryRunCell(registry)({
+    return makeRegistryRunCell(
+      registry,
+      judgeModel,
+    )({
       scenario: goldScenario,
       arm: controlBaseline.id,
       model: { id: "priced-model", model },
@@ -846,6 +1123,58 @@ describe("makeRegistryRunCell on an errored cell", () => {
     const cell = await runCell(model, 5_000);
     expect(cell.error_class).toBe("request");
     expectUnscoredButMetered(cell);
+  });
+
+  function judge(): MockLanguageModelV3 {
+    return new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: JSON.stringify({ verdict: "pass", explanation: "ok" }) }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 10, text: 10, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+  }
+
+  // "" is still an error (an APICallError built from an empty statusText).
+  it.each([["tools: too many tools"], [""]])("skips the LLM judge (error %j)", async (message) => {
+    const model = modelFailingStep2(async () => {
+      throw new APICallError({
+        message,
+        url: "https://api.test/v1",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    });
+    const judgeModel = judge();
+    const cell = await runCell(model, 5_000, judgeModel);
+    expect(cell.error).toBe(message);
+    expect(judgeModel.doGenerateCalls).toHaveLength(0);
+    expect(cell.judge_verdict).toBe("n/a");
+  });
+
+  it("[guard] judges a clean programmatic-fail cell", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "I cannot read files." }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const judgeModel = judge();
+    const cell = await runCell(model, 5_000, judgeModel);
+    expect(cell.error).toBeNull();
+    expect(cell.programmatic_verdict).toBe("fail");
+    expect(judgeModel.doGenerateCalls).toHaveLength(1);
+    expect(cell.judge_verdict).toBe("pass");
   });
 
   it("stays fail/fail when step 2 hangs past the deadline", async () => {

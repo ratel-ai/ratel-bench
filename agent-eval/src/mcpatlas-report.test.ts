@@ -58,6 +58,7 @@ function task(over: Partial<McpAtlasTaskSummaryRow> = {}): McpAtlasTaskSummaryRo
     mean_search_ms_total: 0,
     mean_turns: 3,
     errored: 0,
+    excluded_cells: 0,
     no_search_rate: 0,
     variance_measured: false,
     ...over,

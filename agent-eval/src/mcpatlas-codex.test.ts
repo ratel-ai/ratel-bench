@@ -9,6 +9,7 @@ import {
   turnUsagesFromTranscript,
 } from "./mcpatlas-agent.js";
 import { type AssembleCellInput, assembleCell, type CellContext } from "./mcpatlas-build.js";
+import { cellErrorClass } from "./mcpatlas-cell-errors.js";
 import {
   buildCodexArgs,
   buildCodexConfigToml,
@@ -267,6 +268,64 @@ describe("parseCodexEvents", () => {
     expect(parseCodexEvents(stdout)?.failed).toEqual({ message: "boom" });
   });
 
+  // codex emits a non-fatal `error` event per stream retry ("Reconnecting... n/m");
+  // a fatal one is always followed by turn.failed, never turn.completed.
+  it("a stream-retry error the turn recovers from is not a failure", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "th-3" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 1/5 (stream disconnected before completion: idle timeout)",
+      }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }),
+    ].join("\n");
+    expect(parseCodexEvents(stdout)?.failed).toBeNull();
+  });
+
+  it("[guard] a trailing error event with no turn.completed is a failure", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "th-4" }),
+      JSON.stringify({ type: "error", message: "boom" }),
+    ].join("\n");
+    expect(parseCodexEvents(stdout)?.failed).toEqual({ message: "boom" });
+  });
+
+  // codex's real fatal shape: the fatal message is also emitted as an `error`
+  // event before turn.failed, after an earlier recovered stream retry.
+  it("turn.failed wins over an earlier stream-retry error event", () => {
+    const fatal =
+      '{"error":{"message":"Your input exceeds the context window","type":"invalid_request_error","code":"context_length_exceeded"}}';
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "th-6" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 1/5 (stream disconnected before completion: idle timeout)",
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "working" },
+      }),
+      JSON.stringify({ type: "error", message: fatal }),
+      JSON.stringify({ type: "turn.failed", error: { message: fatal } }),
+    ].join("\n");
+    const p = parseCodexEvents(stdout);
+    expect(p?.failed).toEqual({ message: fatal });
+    if (!p) throw new Error("fixture must parse");
+    const r = codexResultFromEvents(p, 100, false, CODEX_PRICING["gpt-5.6-luna"]);
+    expect(r.error_text).toBe(fatal);
+    expect(r.result).toBe("working");
+    // A context overflow is the model's outcome, not a re-runnable stream drop.
+    expect(
+      cellErrorClass({
+        error: r.error_text ?? null,
+        finish_reason: r.subtype,
+        claim_rubric: { judge_error: null },
+      }),
+    ).toBe("outcome");
+  });
+
   it("returns null on unrecognizable output — the codex twin of 'no parseable result envelope'", () => {
     expect(parseCodexEvents("not json at all")).toBeNull();
     expect(parseCodexEvents("")).toBeNull();
@@ -403,6 +462,35 @@ describe("codexResultFromEvents", () => {
     expect(r.is_error).toBe(true);
     expect(r.subtype).toBe("error_during_execution");
     expect(r.result).toBe("rate limited");
+    expect(r.error_text).toBe("rate limited");
+  });
+
+  // The final message is the judge's input and cell.final_text; the failure is
+  // what the error classifier must read.
+  it("a turn that fails after an agent message keeps the prose as result and the failure as error_text", () => {
+    const p = parseCodexEvents(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "th-5" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Checking the issue now." },
+        }),
+        JSON.stringify({
+          type: "turn.failed",
+          error: { message: "exceeded retry limit, last status: 429 Too Many Requests" },
+        }),
+      ].join("\n"),
+    );
+    if (!p) throw new Error("fixture must parse");
+    const r = codexResultFromEvents(p, 100, false, pricing);
+    expect(r.result).toBe("Checking the issue now.");
+    expect(r.error_text).toBe("exceeded retry limit, last status: 429 Too Many Requests");
+  });
+
+  it("a successful turn carries no error_text", () => {
+    const p = parseCodexEvents(EVENTS);
+    if (!p) throw new Error("fixture must parse");
+    expect(codexResultFromEvents(p, 100, false, pricing).error_text).toBeUndefined();
   });
 });
 

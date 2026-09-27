@@ -5,13 +5,20 @@
 //   - selection  (LLM `sragents-select` cells → task-completion-rows [OVERWRITE]
 //                 + task-completion-summary [APPEND])
 //
+// Errored cells follow `bfcl-summarize`: rows are superseded per cell (the last
+// final row wins, so a re-run replaces a transient error and a duplicated
+// ratel-full row counts once); final `transient|access` rows are excluded and
+// counted; other errors stay scored fails. `--label L` restricts the output to
+// one `ratel_ai_core_version` label.
+//
 // Pure aggregation lives in `summarizeSragents()`; the CLI shell does the I/O.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
-import { corpusOf, mean, median } from "./report.js";
+import { corpusOf, isTruncated, mean, meanOrNull, median, medianOrNull } from "./report.js";
 import type {
   SragentsRetrievalRow,
   SragentsRetrievalSummaryRow,
@@ -45,6 +52,21 @@ function latest(timestamps: string[]): string {
   return timestamps.filter(Boolean).sort().at(-1) ?? "";
 }
 
+/**
+ * A selection cell's identity within one label's history: the label plus the
+ * `sragents-select` control key (`scenario::arm::model::pool::run`).
+ */
+export function sragentsCellKeyOf(c: SragentsSelectCell): string {
+  return [
+    c.ratel_ai_core_version,
+    c.scenario_id,
+    c.arm,
+    c.model,
+    c.pool_size ?? "null",
+    c.run_index,
+  ].join("::");
+}
+
 export interface SummarizeResult {
   retrievalSummary: SragentsRetrievalSummaryRow[];
   taskRows: SragentsTaskRow[];
@@ -54,16 +76,31 @@ export interface SummarizeResult {
 /**
  * Build the retrieval summary and (when cells are present) the selection per-row
  * records + selection summary from already-parsed raw inputs. Pure — no I/O.
+ *
+ * @param label Optional `ratel_ai_core_version` filter: emit only that label's groups.
  */
 export function summarizeSragents(args: {
   retrievalRows: SragentsRetrievalRow[];
   cells?: SragentsSelectCell[];
+  label?: string;
 }): SummarizeResult {
-  const taskRows = buildTaskRows(args.cells ?? []);
+  const { label } = args;
+  const inLabel = (version: string | undefined) => !label || (version ?? "unknown") === label;
+  const cells = (args.cells ?? []).filter(
+    (c) => datasetOfCell(c) !== null && inLabel(c.ratel_ai_core_version),
+  );
+  const taskRows = buildTaskRows(supersede(cells, sragentsCellKeyOf));
   return {
-    retrievalSummary: summarizeRetrieval(args.retrievalRows),
+    retrievalSummary: summarizeRetrieval(
+      args.retrievalRows.filter((r) => inLabel(r.ratel_ai_core_version)),
+    ),
     taskRows,
-    taskSummary: summarizeTask(taskRows),
+    // Timestamps span every row (superseded and excluded ones too), so a
+    // re-summary of the same rows ties the summary it replaces and, appended
+    // last, wins. A published summary newer than every raw row of its group
+    // (its rows were later rewritten) stays newer until rows are appended (a
+    // re-drain re-stamps generated_at).
+    taskSummary: summarizeTask(taskRows, groupTimestamps(cells)),
   };
 }
 
@@ -163,38 +200,48 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
       precision: selected.size === 0 ? 0 : hits / selected.size,
       total_tokens: c.total_tokens,
       wall_ms: c.wall_ms,
+      error_class: errorClassOf(c),
+      excluded: isInfraError(c),
+      truncated: isTruncated(c),
     });
   }
   return out;
 }
 
 /** Per (dataset, model, arm) selection summary, plus an `all` rollup per (model, arm). */
-function summarizeTask(rows: SragentsTaskRow[]): SragentsTaskSummaryRow[] {
+function summarizeTask(
+  rows: SragentsTaskRow[],
+  timestamps: Map<string, string>,
+): SragentsTaskSummaryRow[] {
   if (rows.length === 0) return [];
   const groups = new Map<string, SragentsTaskRow[]>();
   for (const r of rows) {
-    for (const ds of [r.dataset, ALL_DATASET]) {
-      const key = `${r.ratel_ai_core_version}::${ds}::${r.model}::${r.arm}`;
+    for (const key of groupKeys(r)) {
       (groups.get(key) ?? groups.set(key, []).get(key))?.push(r);
     }
   }
   const out: SragentsTaskSummaryRow[] = [];
   for (const [key, arr] of groups) {
     const [version, dataset, model, arm] = key.split("::");
+    const kept = arr.filter((r) => !r.excluded);
+    const clean = kept.filter((r) => r.error_class === null);
     out.push({
-      timestamp: latest(arr.map((r) => r.generated_at)),
+      timestamp: timestamps.get(key) ?? "",
       ratel_ai_core_version: version,
       source: "task_completion",
       model,
       arm,
       dataset,
-      scenarios: arr.length,
-      task_completion_accuracy: mean(arr.map((r) => (r.task_completion_pass ? 1 : 0))),
-      selection_accuracy: mean(arr.map((r) => (r.selection_pass ? 1 : 0))),
-      recall: mean(arr.map((r) => r.recall)),
-      precision: mean(arr.map((r) => r.precision)),
-      mean_total_tokens: mean(arr.map((r) => r.total_tokens)),
-      latency_p50_ms: median(arr.map((r) => r.wall_ms)),
+      scenarios: kept.length,
+      task_completion_accuracy: meanOrNull(kept.map((r) => (r.task_completion_pass ? 1 : 0))),
+      selection_accuracy: meanOrNull(kept.map((r) => (r.selection_pass ? 1 : 0))),
+      recall: meanOrNull(kept.map((r) => r.recall)),
+      precision: meanOrNull(kept.map((r) => r.precision)),
+      mean_total_tokens: meanOrNull(clean.map((r) => r.total_tokens)),
+      latency_p50_ms: medianOrNull(clean.map((r) => r.wall_ms)),
+      excluded_cells: arr.length - kept.length,
+      errored_cells: kept.length - clean.length,
+      truncated_cells: kept.filter((r) => r.truncated).length,
     });
   }
   const rank = (d: string) => (d === ALL_DATASET ? 1 : 0);
@@ -205,6 +252,32 @@ function summarizeTask(rows: SragentsTaskRow[]): SragentsTaskSummaryRow[] {
       rank(a.dataset) - rank(b.dataset) ||
       a.dataset.localeCompare(b.dataset),
   );
+}
+
+/** Summary groups of a row: its own dataset and the `all` rollup (label × dataset × LLM × arm). */
+function groupKeys(r: {
+  ratel_ai_core_version: string;
+  dataset: string;
+  model: string;
+  arm: string;
+}): string[] {
+  return [r.dataset, ALL_DATASET].map(
+    (ds) => `${r.ratel_ai_core_version}::${ds}::${r.model}::${r.arm}`,
+  );
+}
+
+/** Latest `generated_at` per summary group, over every given cell. */
+function groupTimestamps(cells: SragentsSelectCell[]): Map<string, string> {
+  const byGroup = new Map<string, string[]>();
+  for (const c of cells) {
+    const dataset = datasetOfCell(c);
+    if (dataset === null) continue;
+    const version = c.ratel_ai_core_version ?? "unknown";
+    for (const key of groupKeys({ ...c, ratel_ai_core_version: version, dataset })) {
+      (byGroup.get(key) ?? byGroup.set(key, []).get(key))?.push(c.generated_at ?? "");
+    }
+  }
+  return new Map([...byGroup].map(([key, ts]) => [key, latest(ts)]));
 }
 
 // ── CLI shell (I/O) ─────────────────────────────────────────────────────────
@@ -242,10 +315,18 @@ function main(): void {
   const taskSummaryOut = resolveRepoPath(
     arg("--task-summary-out", "results/raw/sragents/task-completion-summary.jsonl"),
   );
+  const label = arg("--label", "") || undefined; // omit ⇒ every ratel_ai_core_version label
 
   const retrievalRows = readJsonl<SragentsRetrievalRow>(retrievalRowsPath);
   const cells = readJsonl<SragentsSelectCell>(agentPath); // [] when the campaign hasn't run
-  const { retrievalSummary, taskRows, taskSummary } = summarizeSragents({ retrievalRows, cells });
+  const { retrievalSummary, taskRows, taskSummary } = summarizeSragents({
+    retrievalRows,
+    cells,
+    label,
+  });
+  const excluded = taskSummary
+    .filter((s) => s.dataset === ALL_DATASET)
+    .reduce((n, s) => n + s.excluded_cells, 0);
 
   appendRows(retrievalSummaryOut, retrievalSummary); // history
   if (taskRows.length > 0) {
@@ -257,7 +338,8 @@ function main(): void {
   console.log(
     `sragents-summarize: ${retrievalSummary.length} retrieval-summary rows (append) ` +
       `across ${datasets.size} bucket(s): ${[...datasets].join(", ") || "(none)"}; ` +
-      `${taskRows.length} task rows (overwrite), ${taskSummary.length} task-summary rows (append)`,
+      `${taskRows.length} task rows (overwrite), ${taskSummary.length} task-summary rows (append), ` +
+      `${excluded} infra-errored cells excluded [label=${label ?? "all"}]`,
   );
 }
 

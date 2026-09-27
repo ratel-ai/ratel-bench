@@ -10,6 +10,12 @@
 //   - retrieval-summary.jsonl      (APPEND)
 //   - task-completion-summary.jsonl (APPEND)
 //
+// Errored cells: rows are superseded per cell first (the last final row wins,
+// so a re-run replaces a transient error). Final `transient|access` rows are
+// excluded from every metric and counted (`excluded_cells`); `request|timeout|
+// outcome` errors stay scored fails (`errored_cells`). `--label L` restricts the
+// output to one `ratel_ai_core_version` label.
+//
 // Pure aggregation lives in `summarizeBfcl()`; the CLI shell does the I/O.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -21,11 +27,22 @@ import type {
   TaskRow,
   TaskSummaryRow,
 } from "./bfcl-types.js";
+import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { astArgRecall } from "./judges/ast.js";
 import { effectiveCalls } from "./metering.js";
 import { resolveRepoPath } from "./paths.js";
-import { corpusOf, mean, median } from "./report.js";
+import {
+  corpusOf,
+  isTruncated,
+  labelledCellKeyOf,
+  mean,
+  meanOrNull,
+  median,
+  medianOrNull,
+  type VersionSplitCell,
+  versionSplitCells,
+} from "./report.js";
 import type { CellResult, Scenario } from "./types.js";
 
 /** `bfcl-simple-…` → `simple`, `bfcl-multiple-…` → `multiple`; null otherwise. */
@@ -51,6 +68,8 @@ export interface SummarizeResult {
   retrievalSummary: RetrievalSummaryRow[];
   taskRows: TaskRow[];
   taskSummary: TaskSummaryRow[];
+  /** Selected label cells counted once per `ratel_version` (see `versionSplitCells`). */
+  versionSplitCells: VersionSplitCell[];
 }
 
 /**
@@ -59,18 +78,36 @@ export interface SummarizeResult {
  *
  * @param arm Optional arm filter. Omit to include every arm (per-arm breakdown);
  * pass e.g. `ratel-full` to restrict to one.
+ * @param label Optional `ratel_ai_core_version` filter: emit only that label's groups.
  */
 export function summarizeBfcl(args: {
   retrievalRows: BfclRetrievalRow[];
   cells: CellResult[];
   scenarios: Scenario[];
   arm?: string;
+  label?: string;
 }): SummarizeResult {
-  const taskRows = buildTaskRows(args.cells, args.scenarios, args.arm);
+  const { arm, label } = args;
+  const inLabel = (version: string | undefined) => !label || (version ?? "unknown") === label;
+  const cells = args.cells.filter(
+    (c) =>
+      bfclType(c.scenario_id) !== null &&
+      (!arm || c.arm === arm) &&
+      inLabel(c.ratel_ai_core_version),
+  );
+  const taskRows = buildTaskRows(supersede(cells, labelledCellKeyOf), args.scenarios);
   return {
-    retrievalSummary: summarizeRetrieval(args.retrievalRows),
+    retrievalSummary: summarizeRetrieval(
+      args.retrievalRows.filter((r) => inLabel(r.ratel_ai_core_version)),
+    ),
     taskRows,
-    taskSummary: summarizeTask(taskRows),
+    // Timestamps span every row (superseded and excluded ones too), so a
+    // re-summary of the same rows ties the summary it replaces and, appended
+    // last, wins. A published summary newer than every raw row of its group
+    // (its rows were later rewritten) stays newer until rows are appended (a
+    // re-drain re-stamps generated_at).
+    taskSummary: summarizeTask(taskRows, groupTimestamps(cells)),
+    versionSplitCells: versionSplitCells(cells),
   };
 }
 
@@ -128,13 +165,12 @@ function summarizeRetrieval(rows: BfclRetrievalRow[]): RetrievalSummaryRow[] {
 
 // ── Task completion ─────────────────────────────────────────────────────────
 
-function buildTaskRows(cells: CellResult[], scenarios: Scenario[], arm?: string): TaskRow[] {
+function buildTaskRows(cells: CellResult[], scenarios: Scenario[]): TaskRow[] {
   const byId = new Map(scenarios.map((s) => [s.id, s]));
   const out: TaskRow[] = [];
   for (const c of cells) {
     const type = bfclType(c.scenario_id);
     if (type === null) continue;
-    if (arm && c.arm !== arm) continue;
     const scenario = byId.get(c.scenario_id);
     out.push({
       ratel_ai_core_version: c.ratel_ai_core_version ?? "unknown",
@@ -158,42 +194,76 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[], arm?: string)
       dollar_cost: c.dollar_cost,
       wall_ms: c.wall_ms,
       turns: c.turns,
+      error_class: errorClassOf(c),
+      excluded: isInfraError(c),
+      truncated: isTruncated(c),
     });
   }
   return out;
 }
 
-function summarizeTask(rows: TaskRow[]): TaskSummaryRow[] {
+function summarizeTask(rows: TaskRow[], timestamps: Map<string, string>): TaskSummaryRow[] {
   const groups = new Map<string, TaskRow[]>();
   for (const r of rows) {
-    const key = `${r.ratel_ai_core_version}::${r.type}::${r.model}::${r.arm}`;
+    const key = groupKey(r);
     (groups.get(key) ?? groups.set(key, []).get(key))?.push(r);
   }
   const out: TaskSummaryRow[] = [];
   for (const [key, arr] of groups) {
     const [version, type, model, arm] = key.split("::");
-    const astRows = arr.filter((r) => r.task_completion_pass !== null);
-    const recalls = arr.map((r) => r.recall).filter((x): x is number => x !== null);
+    const kept = arr.filter((r) => !r.excluded);
+    const clean = kept.filter((r) => r.error_class === null);
+    const astRows = kept.filter((r) => r.task_completion_pass !== null);
+    const recalls = kept.map((r) => r.recall).filter((x): x is number => x !== null);
     out.push({
-      timestamp: latest(arr.map((r) => r.generated_at)),
+      timestamp: timestamps.get(key) ?? "",
       ratel_ai_core_version: version,
       source: "task_completion",
       model,
       arm,
       type: type as BfclType,
-      scenarios: arr.length,
-      task_completion_accuracy:
-        astRows.length === 0 ? null : mean(astRows.map((r) => (r.task_completion_pass ? 1 : 0))),
-      selection_accuracy: mean(arr.map((r) => (r.selection_pass ? 1 : 0))),
-      recall: recalls.length === 0 ? null : mean(recalls),
-      mean_total_tokens: mean(arr.map((r) => r.total_tokens)),
-      latency_p50_ms: median(arr.map((r) => r.wall_ms)),
+      scenarios: kept.length,
+      task_completion_accuracy: meanOrNull(astRows.map((r) => (r.task_completion_pass ? 1 : 0))),
+      selection_accuracy: meanOrNull(kept.map((r) => (r.selection_pass ? 1 : 0))),
+      recall: meanOrNull(recalls),
+      mean_total_tokens: meanOrNull(clean.map((r) => r.total_tokens)),
+      latency_p50_ms: medianOrNull(clean.map((r) => r.wall_ms)),
+      excluded_cells: arr.length - kept.length,
+      errored_cells: kept.length - clean.length,
+      truncated_cells: kept.filter((r) => r.truncated).length,
     });
   }
   return out.sort(
     (a, b) =>
       a.type.localeCompare(b.type) || a.model.localeCompare(b.model) || a.arm.localeCompare(b.arm),
   );
+}
+
+/** Summary group of a task row / cell: label × type × LLM × arm. */
+function groupKey(r: {
+  ratel_ai_core_version: string;
+  type: BfclType;
+  model: string;
+  arm: string;
+}): string {
+  return `${r.ratel_ai_core_version}::${r.type}::${r.model}::${r.arm}`;
+}
+
+/** Latest `generated_at` per summary group, over every given cell. */
+function groupTimestamps(cells: CellResult[]): Map<string, string> {
+  const byGroup = new Map<string, string[]>();
+  for (const c of cells) {
+    const type = bfclType(c.scenario_id);
+    if (type === null) continue;
+    const key = groupKey({
+      ratel_ai_core_version: c.ratel_ai_core_version ?? "unknown",
+      type,
+      model: c.model,
+      arm: c.arm,
+    });
+    (byGroup.get(key) ?? byGroup.set(key, []).get(key))?.push(c.generated_at ?? "");
+  }
+  return new Map([...byGroup].map(([key, ts]) => [key, latest(ts)]));
 }
 
 // ── CLI shell (I/O) ─────────────────────────────────────────────────────────
@@ -224,6 +294,7 @@ function main(): void {
   const agentPath = resolveRepoPath(arg("--agent", "results/raw/bfcl/agent.jsonl"));
   const corpusPath = resolveRepoPath(arg("--corpus", "test-data/bfcl-all.jsonl"));
   const arm = arg("--arm", "") || undefined; // omit ⇒ all arms (per-arm breakdown)
+  const label = arg("--label", "") || undefined; // omit ⇒ every ratel_ai_core_version label
   const retrievalSummaryOut = resolveRepoPath(
     arg("--retrieval-summary-out", "results/raw/bfcl/retrieval-summary.jsonl"),
   );
@@ -238,12 +309,25 @@ function main(): void {
   const cells = readJsonl<CellResult>(agentPath);
   const scenarios = existsSync(corpusPath) ? readJsonl<Scenario>(corpusPath) : [];
 
-  const { retrievalSummary, taskRows, taskSummary } = summarizeBfcl({
+  const { retrievalSummary, taskRows, taskSummary, versionSplitCells } = summarizeBfcl({
     retrievalRows,
     cells,
     scenarios,
     arm,
+    label,
   });
+  const excluded = taskSummary.reduce((n, s) => n + s.excluded_cells, 0);
+  const splitByLabel = new Map<string, number>();
+  for (const c of versionSplitCells) {
+    splitByLabel.set(c.label, (splitByLabel.get(c.label) ?? 0) + 1);
+  }
+  for (const [splitLabel, n] of splitByLabel) {
+    console.error(
+      `bfcl-summarize: warning: ${n} cells in label ${splitLabel} appear under >1 ratel_version; ` +
+        "they are counted once per version (a re-drain must reuse the replaced rows' " +
+        "--ratel-version; see results-audit)",
+    );
+  }
 
   appendRows(retrievalSummaryOut, retrievalSummary); // history
   writeOverwrite(taskRowsOut, taskRows); // latest run only
@@ -251,8 +335,8 @@ function main(): void {
 
   console.log(
     `bfcl-summarize: ${retrievalSummary.length} retrieval-summary rows (append), ` +
-      `${taskRows.length} task rows (overwrite), ${taskSummary.length} task-summary rows (append) ` +
-      `[arm=${arm ?? "all"}]`,
+      `${taskRows.length} task rows (overwrite), ${taskSummary.length} task-summary rows (append), ` +
+      `${excluded} infra-errored cells excluded [arm=${arm ?? "all"}, label=${label ?? "all"}]`,
   );
 }
 
