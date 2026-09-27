@@ -41,7 +41,12 @@ import {
   type ParsedTranscript,
   parseUses,
 } from "./mcpatlas-build.js";
-import { isReusableCell } from "./mcpatlas-cell-errors.js";
+import {
+  type CellErrorRow,
+  cellErrorClass,
+  isInfraErrorClass,
+  isReusableCell,
+} from "./mcpatlas-cell-errors.js";
 import {
   buildCodexArgs,
   buildCodexConfigToml,
@@ -1470,20 +1475,34 @@ export interface CampaignOptions<T> {
   onCell: (r: RunCellResult) => void;
   runOne: (item: T) => Promise<RunCellResult>;
   quiet?: boolean;
+  /** Stops the campaign once it trips. Share one across campaigns to count
+   *  across them; omitted = no breaker. */
+  breaker?: InfraErrorBreaker;
 }
 
 export interface CampaignSummary {
   cells_run: number;
   cells_skipped: number;
   total_dollars: number;
-  stopped_reason: "completed" | "global_cap";
+  stopped_reason: "completed" | "global_cap" | "error_circuit";
+  /** Why the breaker tripped; set only with `error_circuit`. */
+  abort_reason?: string;
+}
+
+/** Counts consecutive infra-errored cells (transient|access). */
+export interface InfraErrorBreaker {
+  record(cell: CellErrorRow): void;
+  /** Why it tripped, or null while closed. */
+  readonly tripReason: string | null;
 }
 
 /** Hand-rolled worker pool mirroring agent/src/sragents-select.ts's `worker()`
  *  loop. Best-effort dollar cap: overshoot is bounded by ~concurrency in-flight
  *  cells, since the check only runs at the top of each worker's next iteration
- *  — an accepted tradeoff, not a bug. Generic over the queue item type: the
- *  pool never inspects an item itself, only dispatches it to `runOne`. */
+ *  — an accepted tradeoff, not a bug. The breaker is checked at the same spot,
+ *  so in-flight cells still finish and are delivered after it trips. Generic
+ *  over the queue item type: the pool never inspects an item itself, only
+ *  dispatches it to `runOne`. */
 export async function runCampaign<T>(
   queue: readonly T[],
   opts: CampaignOptions<T>,
@@ -1495,6 +1514,7 @@ export async function runCampaign<T>(
 
   async function worker(): Promise<void> {
     while (true) {
+      if (opts.breaker?.tripReason != null) return;
       if (opts.dollarCap != null && dollars >= opts.dollarCap) {
         stopped = true;
         return;
@@ -1504,23 +1524,84 @@ export async function runCampaign<T>(
       const result = await opts.runOne(queue[idx]);
       dollars += result.dollarCost;
       run++;
+      const wasTripped = opts.breaker?.tripReason != null;
+      opts.breaker?.record(result.cell);
       opts.onCell(result);
       if (!opts.quiet) {
         console.log(
           `[${run}/${queue.length}] ${result.cell.cell_key} ${result.cell.error ? "ERROR" : result.cell.task_pass ? "pass" : "fail"} $${dollars.toFixed(4)}`,
         );
+        if (!wasTripped && opts.breaker?.tripReason != null) {
+          console.log(`error circuit: ${opts.breaker.tripReason} — launching no new cells`);
+        }
       }
     }
   }
 
   await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()));
 
+  const tripReason = opts.breaker?.tripReason ?? null;
   return {
     cells_run: run,
     cells_skipped: queue.length - run,
     total_dollars: dollars,
-    stopped_reason: stopped ? "global_cap" : "completed",
+    ...(tripReason != null
+      ? { stopped_reason: "error_circuit", abort_reason: tripReason }
+      : { stopped_reason: stopped ? "global_cap" : "completed" }),
   };
+}
+
+/**
+ * Trips after `k` consecutive infra-errored cells (transient|access): a gated,
+ * daily-capped or unreachable model, where every further cell only writes
+ * another errored row. An error-free cell resets the count. Other errors
+ * (timeout, max-turns, request, outcome) neither count nor reset: none is an
+ * infra failure (the provider answered, or the cell hit its deadline), but none
+ * is a clean run either. `k` 0 = never trips. Once tripped it stays tripped.
+ */
+export function createInfraErrorBreaker(k: number): InfraErrorBreaker {
+  let consecutive = 0;
+  let tripReason: string | null = null;
+  return {
+    get tripReason() {
+      return tripReason;
+    },
+    record(cell) {
+      if (k <= 0 || tripReason != null) return;
+      const cls = cellErrorClass(cell);
+      if (cls === null) consecutive = 0;
+      else if (isInfraErrorClass(cls)) consecutive++;
+      if (consecutive >= k) {
+        // One log line: envelope errors embed multi-line stderr.
+        const last = (cell.error ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+        tripReason = `${k} consecutive infra-errored cells (last: ${cls}: ${last})`;
+      }
+    },
+  };
+}
+
+/** The native and ratel passes as one run. A tripped breaker outranks the
+ *  dollar cap: it is the stop that needs acting on. */
+export function mergeCampaignSummaries(a: CampaignSummary, b: CampaignSummary): CampaignSummary {
+  const abortReason = a.abort_reason ?? b.abort_reason;
+  const reasons = [a.stopped_reason, b.stopped_reason];
+  return {
+    cells_run: a.cells_run + b.cells_run,
+    cells_skipped: a.cells_skipped + b.cells_skipped,
+    total_dollars: a.total_dollars + b.total_dollars,
+    stopped_reason: reasons.includes("error_circuit")
+      ? "error_circuit"
+      : reasons.includes("global_cap")
+        ? "global_cap"
+        : "completed",
+    ...(abortReason != null ? { abort_reason: abortReason } : {}),
+  };
+}
+
+/** 2 when the breaker stopped the run (agent/'s code for the same stop), so a
+ *  broken model fails the build. A dollar-cap stop is a planned bound: 0. */
+export function campaignExitCode(summary: CampaignSummary): number {
+  return summary.stopped_reason === "error_circuit" ? 2 : 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1575,6 +1656,28 @@ export function parsePositiveInt(flag: string, raw: string): number {
   const n = Number(raw);
   if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(n)) {
     throw new Error(`${flag} must be a positive integer — got "${raw}"`);
+  }
+  return n;
+}
+
+/** RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS's default: same knob and default as agent/'s breaker. */
+export const DEFAULT_ABORT_AFTER_CONSECUTIVE_ERRORS = 10;
+const ABORT_AFTER_ENV = "RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS";
+
+/** RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS: unset = the default, 0 = off. One
+ *  build env sets it for agent/ too, so this copies agent/'s grammar
+ *  (breakerThresholdFromEnv → parseNonNegativeInt: padded digits; empty is an
+ *  error), not parsePositiveInt's stricter flag grammar. Throws with the
+ *  message the CLI prints. Not recorded in the frozen config: it decides when a
+ *  run stops, never how a cell scores. */
+export function abortAfterConsecutiveErrorsFromEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): number {
+  const raw = env[ABORT_AFTER_ENV];
+  if (raw === undefined) return DEFAULT_ABORT_AFTER_CONSECUTIVE_ERRORS;
+  const n = Number(raw);
+  if (!/^\s*\d+\s*$/.test(raw) || !Number.isSafeInteger(n)) {
+    throw new Error(`${ABORT_AFTER_ENV} must be a non-negative integer (got "${raw}")`);
   }
   return n;
 }
@@ -1636,6 +1739,12 @@ export function formatDoneLine(summary: CampaignSummary, cellsCached: number): s
     `${summary.cells_skipped} skipped, $${summary.total_dollars.toFixed(4)} spent, ` +
     `stopped=${summary.stopped_reason}`
   );
+}
+
+/** The `aborted: <model> — <reason>` line printed beside the `done:` line when
+ *  the breaker tripped; null otherwise. */
+export function formatAbortLine(model: string, summary: CampaignSummary): string | null {
+  return summary.abort_reason != null ? `aborted: ${model} — ${summary.abort_reason}` : null;
 }
 
 async function loadLocalEnv(): Promise<void> {
@@ -1759,7 +1868,10 @@ export async function main(): Promise<void> {
   // every summary group key, and the report nesting.
   let harness: AgentHarness;
   let codexPricing: CodexPricing | undefined;
+  // Consecutive infra-errored cells before the campaign stops (0 = off).
+  let abortAfterConsecutiveErrors: number;
   try {
+    abortAfterConsecutiveErrors = abortAfterConsecutiveErrorsFromEnv(process.env);
     caps = parseCapFlags(process.argv, judgeModelId);
     ({ harness, codexPricing } = validateHarnessOptions({
       harness: arg("--harness", "claude-code"),
@@ -2035,9 +2147,14 @@ export async function main(): Promise<void> {
         cacheSource: "live",
       });
 
+    // One breaker for both passes: the ratel pass never starts on a model the
+    // native pass found broken, and the count runs across the pass boundary.
+    const breaker = createInfraErrorBreaker(abortAfterConsecutiveErrors);
+
     const nativeSummary = await runCampaign(nativeItems, {
       concurrency,
       dollarCap,
+      breaker,
       runOne: runOneNative,
       onCell: (r) => {
         appendJsonl(outputPath, r.cell);
@@ -2069,6 +2186,7 @@ export async function main(): Promise<void> {
     const ratelSummary = await runCampaign(ratelItems, {
       concurrency,
       dollarCap: dollarCap != null ? Math.max(0, dollarCap - nativeSummary.total_dollars) : null,
+      breaker,
       runOne: runOneRatel,
       onCell: (r) => {
         appendJsonl(outputPath, r.cell);
@@ -2080,17 +2198,12 @@ export async function main(): Promise<void> {
 
     teardownSandbox(handle, "mcpatlas-sandbox", keepStack);
 
-    const summary: CampaignSummary = {
-      cells_run: nativeSummary.cells_run + ratelSummary.cells_run,
-      cells_skipped: nativeSummary.cells_skipped + ratelSummary.cells_skipped,
-      total_dollars: nativeSummary.total_dollars + ratelSummary.total_dollars,
-      stopped_reason:
-        nativeSummary.stopped_reason === "global_cap" ||
-        ratelSummary.stopped_reason === "global_cap"
-          ? "global_cap"
-          : "completed",
-    };
+    const summary = mergeCampaignSummaries(nativeSummary, ratelSummary);
+    const abortLine = formatAbortLine(model, summary);
+    if (abortLine) console.log(abortLine);
     console.log(formatDoneLine(summary, reusedCells.length));
+    const exitCode = campaignExitCode(summary);
+    if (exitCode) process.exitCode = exitCode;
   }
 }
 

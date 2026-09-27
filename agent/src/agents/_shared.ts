@@ -6,6 +6,7 @@
 
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { type Tool as AISDKTool, jsonSchema, stepCountIs, ToolLoopAgent, tool } from "ai";
+import { FatalProviderError } from "../cell-errors.js";
 import { cellRetry } from "../llm-retry.js";
 import {
   type AgentLikeResult,
@@ -155,6 +156,10 @@ export function emptyToolBundle(): ToolBundle {
  * `llm-retry.ts`; the SDK's own retries are off) and the loop is aborted after
  * `perRunTimeoutMs` of active time (retry sleeps don't count), with a hard
  * backstop at deadline + grace. Retry counters and the policy land on the row.
+ *
+ * A fatal provider error (gated/missing model, daily cap) writes no row: it is
+ * rethrown as a `FatalProviderError` after metering, carrying the cell's spend
+ * (`dollarCost`), so the runner can abort the model and still count the dollars.
  */
 export async function runMeteredLoop(
   armId: string,
@@ -179,11 +184,17 @@ export async function runMeteredLoop(
     onStepFinish: recorder.record,
   });
 
+  let thrown: unknown;
   const generate = async (): Promise<AgentLikeResult> => {
-    const result = await retry.run(() =>
-      agent.generate({ prompt: input.scenario.prompt, abortSignal: retry.signal }),
-    );
-    return result as unknown as AgentLikeResult;
+    try {
+      const result = await retry.run(() =>
+        agent.generate({ prompt: input.scenario.prompt, abortSignal: retry.signal }),
+      );
+      return result as unknown as AgentLikeResult;
+    } catch (err) {
+      thrown = err;
+      throw err;
+    }
   };
 
   const { cell } = await meter(
@@ -204,6 +215,11 @@ export async function runMeteredLoop(
     input.pricing as PricingTable | undefined,
     recorder,
   );
+  if (retry.stats.fatal) {
+    const fatal = thrown instanceof FatalProviderError ? thrown : new FatalProviderError(thrown);
+    fatal.dollarCost = cell.dollar_cost;
+    throw fatal;
+  }
   cell.max_output_tokens = input.model.maxOutputTokens;
   Object.assign(cell, retry.rowFields());
   return cell;

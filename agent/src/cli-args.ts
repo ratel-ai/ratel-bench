@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import type { OutputCapOverride } from "./output-limits.js";
 import { parsePositiveInt, parseTimerMs } from "./positive-int.js";
+import { applyRerunFlag, DEFAULT_RERUN_SETTINGS, type RerunSettings } from "./rerun.js";
 import { CACHEABLE_ARMS, type RunnerConfig } from "./runner.js";
 import type { Arm, RetrievalMethod } from "./types.js";
 
@@ -76,6 +77,12 @@ export interface ParsedArgs {
   seed: number;
   /** Cells in flight at once. See `RunnerConfig.concurrency` for cap semantics. */
   concurrency: number;
+  /**
+   * `--retry-errors infra|all|none`, `--max-attempts N` (0 = unlimited),
+   * `--retry-rounds N`, `--retry-delay-s S`: which errored rows resume and the
+   * in-process rounds re-run (see `rerun.ts`).
+   */
+  rerun: RerunSettings;
   logLevel: "quiet" | "normal" | "verbose";
 }
 
@@ -120,6 +127,7 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
     seed: 42,
     concurrency: 10,
     logLevel: "normal",
+    rerun: { ...DEFAULT_RERUN_SETTINGS },
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -225,6 +233,12 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.concurrency = n;
         break;
       }
+      case "--retry-errors":
+      case "--max-attempts":
+      case "--retry-rounds":
+      case "--retry-delay-s":
+        applyRerunFlag(args.rerun, flag, next());
+        break;
       case "--verbose":
       case "-v":
         args.logLevel = "verbose";

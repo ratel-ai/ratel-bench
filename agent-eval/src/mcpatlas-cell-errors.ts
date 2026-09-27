@@ -1,5 +1,6 @@
 // Error classes for an McpAtlasCell, so the native cache never re-serves an
-// infra failure and summaries can count them.
+// infra failure, summaries can count them, and runCampaign's error circuit can
+// stop a dead model.
 //
 // A LOCAL COPY of the benchmark taxonomy in agent/src/cell-errors.ts, which
 // agent-eval must not import. Keep the two in step. The classes mean the same:
@@ -118,7 +119,12 @@ export function cellErrorClass(cell: CellErrorRow): CellErrorClass | null {
 
 /** Infra errors (transient|access) say nothing about the model. */
 export function isInfraErrorCell(cell: CellErrorRow): boolean {
-  const cls = cellErrorClass(cell);
+  return isInfraErrorClass(cellErrorClass(cell));
+}
+
+/** The class-level test behind `isInfraErrorCell`, for callers that already
+ *  hold the class. */
+export function isInfraErrorClass(cls: CellErrorClass | null): boolean {
   return cls === "transient" || cls === "access";
 }
 

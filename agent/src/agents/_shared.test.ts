@@ -2,6 +2,7 @@ import type { ExecutableTool } from "@ratel-ai/sdk";
 import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
+import { FatalProviderError } from "../cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "../llm-retry.js";
 import type { AgentRunInput, ToolSpec } from "../types.js";
 import {
@@ -511,7 +512,7 @@ describe("runMeteredLoop", () => {
     expect(cell.retries).toBe(0);
   });
 
-  it("an exhausted retry budget is a transient cell; a fatal error an access cell", async () => {
+  it("an exhausted retry budget is a transient cell", async () => {
     const exhausted = new MockLanguageModelV3({
       doGenerate: async () => {
         throw throttled();
@@ -526,9 +527,28 @@ describe("runMeteredLoop", () => {
     expect(cell.error).toBe("Failed after 4 attempts. Last error: Too Many Requests");
     expect(cell.error_class).toBe("transient");
     expect(cell.retries).toBe(3);
+  });
 
+  it("rethrows a fatal provider error after metering: no row, the spend on the error", async () => {
+    // Step 1 is billed; step 2 hits a gated model (403 → access → fatal).
+    let call = 0;
     const gated = new MockLanguageModelV3({
       doGenerate: async () => {
+        if (call++ === 0) {
+          return {
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "c1",
+                toolName: "fs_read_file",
+                input: JSON.stringify({ path: "/etc/hosts" }),
+              },
+            ],
+            finishReason: { unified: "tool-calls", raw: "tool_use" },
+            usage: usage(120, 30),
+            warnings: [],
+          };
+        }
         throw new APICallError({
           message: "Forbidden",
           url: "https://api.test/v1",
@@ -537,13 +557,14 @@ describe("runMeteredLoop", () => {
         });
       },
     });
-    const fatal = await runMeteredLoop(
+    const err = await runMeteredLoop(
       "control-baseline",
       input(gated, null, { retry: retry(async () => {}) }),
       buildToolBundle([spec]),
-    );
-    expect(gated.doGenerateCalls).toHaveLength(1);
-    expect(fatal.error).toBe("Forbidden");
-    expect(fatal.error_class).toBe("access");
+    ).catch((e: unknown) => e);
+    expect(gated.doGenerateCalls).toHaveLength(2);
+    expect(err).toBeInstanceOf(FatalProviderError);
+    expect((err as FatalProviderError).message).toBe("Forbidden");
+    expect((err as FatalProviderError).dollarCost).toBeCloseTo((120 * 1 + 30 * 5) / 1e6, 12);
   });
 });

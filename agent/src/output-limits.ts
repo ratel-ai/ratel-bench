@@ -13,9 +13,10 @@
 // live legacy rows only warn, with or without the flag.
 
 import { existsSync, readFileSync } from "node:fs";
-import { type ErrorRow, isInfraError } from "./cell-errors.js";
+import { isInfraError } from "./cell-errors.js";
 import { providerOf } from "./metering.js";
 import { modelsJsonPath } from "./pricing.js";
+import type { AttemptRow } from "./rerun.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
 
 /** The models.json fields caps read (the file carries more, e.g. pricing). */
@@ -41,9 +42,8 @@ export interface Harness {
 }
 
 /** A row as `checkResumeCaps` sees it (BFCL `CellResult` and SR cells both fit). */
-export interface ResumeRow extends ErrorRow, Harness {
+export interface ResumeRow extends AttemptRow, Harness {
   model: string;
-  cache_source?: "live" | "reused";
 }
 
 /**

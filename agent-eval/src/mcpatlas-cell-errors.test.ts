@@ -3,6 +3,7 @@ import {
   type CellErrorClass,
   cellErrorClass,
   isInfraErrorCell,
+  isInfraErrorClass,
   isReusableCell,
 } from "./mcpatlas-cell-errors.js";
 
@@ -415,6 +416,16 @@ describe("isInfraErrorCell", () => {
     );
     expect(isInfraErrorCell(row({ error: "", finish_reason: "error_max_turns" }))).toBe(false);
     expect(isInfraErrorCell(row({ error: null, finish_reason: "success" }))).toBe(false);
+  });
+});
+
+describe("isInfraErrorClass", () => {
+  it("is true for transient and access only", () => {
+    expect(isInfraErrorClass("transient")).toBe(true);
+    expect(isInfraErrorClass("access")).toBe(true);
+    for (const cls of ["request", "timeout", "outcome", null] as const) {
+      expect(isInfraErrorClass(cls)).toBe(false);
+    }
   });
 });
 

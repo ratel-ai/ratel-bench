@@ -17,15 +17,21 @@
 //
 // Retries change a cell's completion probability, not its answer. Judges are not
 // wrapped (they pass `maxRetries` to the SDK) and never feed these stats.
+//
+// Across cells, a per-model `createBreaker` stops a gated or daily-capped model
+// from writing rows: a `FatalProviderError` aborts it at once (the cell writes no
+// row), and so do K consecutive transport-class (`transient|access`) error rows.
 
 import type { LanguageModel } from "ai";
 import {
   CellTimeoutError,
   classifyError,
+  type ErrorRow,
+  errorClassOf,
   FatalProviderError,
   RetriesExhaustedError,
 } from "./cell-errors.js";
-import { parsePositiveInt, parseTimerMs } from "./positive-int.js";
+import { parseNonNegativeInt, parsePositiveInt, parseTimerMs } from "./positive-int.js";
 
 export interface RetryPolicy {
   /** Calls per `doGenerate` (first try included). */
@@ -86,6 +92,8 @@ export interface RetrySettings {
   sleep?: SleepFn;
   random?: () => number;
   log?: (line: string) => void;
+  /** The run's rerun policy (`rerunLabel`), appended to `retry_policy` as `;rerun=…`. */
+  rerunLabel?: string;
 }
 
 /** The retry fields stamped on a row (BFCL `CellResult`, SR `SragentsSelectCell`). */
@@ -106,6 +114,28 @@ export interface CellRetry<M extends LanguageModel> {
   /** Run the cell's work under the backstop, then release the deadline's timers. */
   run<T>(work: () => Promise<T>): Promise<T>;
   rowFields(): RetryRowFields;
+}
+
+/** Why a model was aborted: a fatal provider error, or K consecutive transport errors. */
+export type AbortReason = "fatal" | "error_circuit";
+
+export interface ModelAbort {
+  reason: AbortReason;
+  /** The fatal error's message, or the streak length and its last error. */
+  detail: string;
+}
+
+/** Per-model circuit breaker over a run's cells (see `createBreaker`). */
+export interface Breaker {
+  /** A written row's outcome: a transport-class error extends the streak, a success resets it. */
+  record(model: string, row: ErrorRow): void;
+  /** A cell met a `FatalProviderError`: abort its model now. */
+  fatal(model: string, err: unknown): void;
+  isAborted(model: string): boolean;
+  /** Every aborted model and why (its first abort wins). */
+  aborted(): Record<string, ModelAbort>;
+  /** The run's stop reason from its aborts (`fatal` over `error_circuit`); undefined when none. */
+  stopped(): AbortReason | undefined;
 }
 
 export const DEFAULT_RETRY_SETTINGS: RetrySettings = {
@@ -129,6 +159,10 @@ const ENV_KNOBS = {
 >;
 /** The backstop grace: a timer delay too. */
 const GRACE_KNOB = "RATEL_CELL_TIMEOUT_GRACE_MS";
+
+/** `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`: the breaker's streak length (0 = off). */
+export const DEFAULT_ABORT_AFTER_CONSECUTIVE_ERRORS = 10;
+const BREAKER_KNOB = "RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS";
 
 // Statuses that mean "slow down" rather than "broken" (throttle / overload).
 const THROTTLE_STATUSES = new Set([429, 503, 529]);
@@ -197,7 +231,9 @@ export function cellRetry<M extends LanguageModel>(
       retries: stats.retries,
       throttled_retries: stats.throttledRetries,
       retry_wait_ms: Math.round(stats.waitMs),
-      retry_policy: retryPolicyLabel(policy, timeoutMs, settings.graceMs),
+      retry_policy:
+        retryPolicyLabel(policy, timeoutMs, settings.graceMs) +
+        (settings.rerunLabel ? `;rerun=${settings.rerunLabel}` : ""),
     }),
   };
 }
@@ -273,6 +309,50 @@ export class PausableDeadline implements Pausable {
 }
 
 /**
+ * A per-model breaker. `fatal` aborts a model at once. `record` counts the
+ * written rows' transport-class errors (`transient|access`, stamped or derived
+ * from the message) per model, in completion order: `threshold` in a row abort
+ * it (`error_circuit`), a success resets the streak, and every other class
+ * (`timeout|request|outcome`: the provider answered) leaves it as is. A
+ * `threshold` of 0 turns the streak check off; fatal errors still abort.
+ */
+export function createBreaker(threshold = DEFAULT_ABORT_AFTER_CONSECUTIVE_ERRORS): Breaker {
+  const streaks = new Map<string, number>();
+  const aborts = new Map<string, ModelAbort>();
+  const abort = (model: string, why: ModelAbort): void => {
+    if (!aborts.has(model)) aborts.set(model, why);
+  };
+  return {
+    record(model, row) {
+      const cls = errorClassOf(row);
+      if (cls === null) {
+        streaks.set(model, 0);
+        return;
+      }
+      if (cls !== "transient" && cls !== "access") return;
+      const streak = (streaks.get(model) ?? 0) + 1;
+      streaks.set(model, streak);
+      if (threshold > 0 && streak >= threshold) {
+        abort(model, {
+          reason: "error_circuit",
+          detail: `${streak} consecutive transient/access errors (last: ${row.error})`,
+        });
+      }
+    },
+    fatal(model, err) {
+      abort(model, { reason: "fatal", detail: err instanceof Error ? err.message : String(err) });
+    },
+    isAborted: (model) => aborts.has(model),
+    aborted: () => Object.fromEntries(aborts),
+    stopped() {
+      const reasons = [...aborts.values()].map((a) => a.reason);
+      if (reasons.includes("fatal")) return "fatal";
+      return reasons.length > 0 ? "error_circuit" : undefined;
+    },
+  };
+}
+
+/**
  * The `retry_policy` stamped on each row: attempts/base/cap/wait budget, then the
  * active-time deadline and its backstop grace (`a8/b2000/c60000/w180000;timeout=active:180000+g30000`).
  */
@@ -336,6 +416,26 @@ export function retrySettingsLine(settings: RetrySettings, timeoutMs: number): s
     `retry: attempts=${p.maxAttempts} base=${p.baseMs}ms max-delay=${p.maxDelayMs}ms ` +
     `max-wait=${p.maxTotalWaitMs}ms; timeout=${timeoutMs}ms active + ${settings.graceMs}ms grace`
   );
+}
+
+/**
+ * `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS` (default 10; 0 = off): the breaker's
+ * streak length. Throws on anything but a non-negative integer.
+ */
+export function breakerThresholdFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = env[BREAKER_KNOB];
+  return raw === undefined
+    ? DEFAULT_ABORT_AFTER_CONSECUTIVE_ERRORS
+    : parseNonNegativeInt(BREAKER_KNOB, raw);
+}
+
+/** The startup echo of the breaker knob. */
+export function breakerLine(threshold: number): string {
+  const streak =
+    threshold > 0
+      ? `after ${threshold} consecutive transient/access errors`
+      : "streak check off (RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS=0)";
+  return `breaker: abort a model on a fatal provider error, or ${streak}`;
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

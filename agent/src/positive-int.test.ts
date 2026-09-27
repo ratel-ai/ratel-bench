@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { MAX_TIMER_MS, parsePositiveInt, parseTimerMs } from "./positive-int.js";
+import {
+  MAX_TIMER_MS,
+  parseNonNegativeInt,
+  parsePositiveInt,
+  parseTimerMs,
+} from "./positive-int.js";
 
 describe("parsePositiveInt", () => {
   it("accepts digits only (surrounding space allowed), ≥ 1", () => {
@@ -17,5 +22,17 @@ describe("parseTimerMs", () => {
       '--timeout-ms must be ≤ 2147483647 ms (got "2147483648")',
     );
     expect(() => parseTimerMs("--timeout-ms", "0")).toThrow(/must be a positive integer/);
+  });
+});
+
+describe("parseNonNegativeInt", () => {
+  it("accepts 0 (a knob's 'off' / 'unlimited') and positive integers; nothing else", () => {
+    expect(parseNonNegativeInt("--max-attempts", "0")).toBe(0);
+    expect(parseNonNegativeInt("--max-attempts", " 3 ")).toBe(3);
+    for (const bad of ["-1", "1.5", "abc", ""]) {
+      expect(() => parseNonNegativeInt("--max-attempts", bad)).toThrow(
+        `--max-attempts must be a non-negative integer (got "${bad}")`,
+      );
+    }
   });
 });

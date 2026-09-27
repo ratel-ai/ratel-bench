@@ -19,13 +19,25 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
    **Errored rows are never reused, never double-counted** (taxonomy: `agent/src/cell-errors.ts`).
    - *Cache:* rerunnable errors (`transient|access|request`) are skipped, so a key whose only
      cached rows are errors runs live; `timeout|outcome` rows are final, scored results and stay
-     reusable. `--cache-source a,b,…` reads several files (best harness tier, then earliest, across
+     reusable (except under `--retry-errors all`, which re-queues them, so the cache stops serving
+     them too). `--cache-source a,b,…` reads several files (best harness tier, then earliest, across
      them — see *Harness*; e.g. canonical + a controls backfill); `--ratel-version V` stamps re-drained control rows
      with a label's original SDK version (control arms only). V must equal the `ratel_version` of
      the rows being replaced, as `results-audit` prints it per label (e.g. `0.1.5` for label
      `0.2.0`, `0.3.0-rc.1` for label `0.3.0-rc.1`). A different or omitted V (the installed SDK
      version) doesn't supersede them: each version counts as its own cell, so the label is
      double-counted (`bfcl-summarize` / `report` warn; `results-audit` lists the split cells).
+   - *Resume:* a cell whose current-version rows are all rerunnable (`--retry-errors infra`,
+     the default: `transient|access|request`; `all` adds `timeout|outcome`; `none` keeps them) is
+     **re-queued**, not skipped, until it has spent `--max-attempts` (3; 0 = unlimited) live
+     attempts (`cache_source: "reused"` rows don't count; rows record `attempt`). This covers every
+     arm, `ratel-full` included, in both `start` and `sragents-select`. It is what makes a
+     re-drain work: re-running a label's controls (`--ratel-version V --cache-source
+     <canonical>,<backfill>`) re-queues its errored control rows, the cache serves the good rows,
+     and the appended rows supersede the errors in summaries. Re-queued/exhausted counts print as
+     `resume: K re-queued (transient a, access b, request c); M exhausted` (non-zero classes
+     only). The resume cap guard skips rows whose cell the run re-queues, so re-running at a fixed
+     cap replaces the `request` rows a rejected cap left.
    - *Harness:* controls are reused only under the same harness (`provider|max_output_tokens`):
      exact match first, then legacy rows (no recorded cap; a recorded provider must still match),
      earliest within a tier, never a different recorded backend or cap. A same-provider row with no
@@ -123,6 +135,22 @@ version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are c
   its answer**, so accuracy stays comparable across policies; `latency_p50_ms`, `mean_wall_ms` and
   `wall_savings_pct` are unchanged (wall-clock, waits included). The BFCL LLM judge is not
   wrapped: it passes `maxRetries: 6` to the SDK and never feeds the agent's counters.
+- **Breaker & re-runs** (`start`, `sragents-select`): a fatal provider error (gated model, daily
+  cap) writes **no row** and aborts that model (its spend still counts); so do
+  `RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS` (10; 0 = off) consecutive `transient|access` rows of one
+  model (`error_circuit`; those rows are written, a clean row resets the streak). After the main
+  pass, `--retry-rounds` (1) in-process rounds, `--retry-delay-s` (60) apart, re-run this run's
+  rerunnable cells with attempts left, under the same dollar cap and output (never re-truncated),
+  skipping aborted models. `retry_policy` gains the rerun policy (`;rerun=infra/3`). The run ends
+  with one line, `done: N cells run, C cached, S skipped, $X spent, stopped=R, R retries (T
+  throttled), E errors, Q re-queued, X exhausted` (SR prints it after its own summary), plus one
+  `aborted: <model> — <fatal|error_circuit>: <detail>` line per aborted model; **any abort exits
+  with code 2**. `stopped` ranks `fatal` > `error_circuit` > `global_cap` > `completed`; an abort
+  that outranks a hit cap reads `stopped=fatal+global_cap` (or `error_circuit+global_cap`). `N`
+  and `E` count live **rows**, retry-round attempts included: a cell a round recovered adds 2 to
+  `N` and 1 to `E`; final failures are `X exhausted` plus the non-rerunnable errors. The AWS
+  runner's `bench-flags.mjs` passes each flag only when the file that parses it (`cli-args.ts`,
+  `sragents-select.ts`) spells it as a quoted literal (`"--retry-errors"`); a test pins this.
 - **Models:** whatever LLM(s) under test — cloud (`claude-sonnet-4-6`, `gpt-5.4-mini`) or
   user-hosted via URL (`https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b`).
 
