@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isInfraError } from "./cell-errors.js";
 import { providerOf } from "./metering.js";
+import { canonicalModelId } from "./model-identity.js";
 import { modelsJsonPath } from "./pricing.js";
 import type { AttemptRow } from "./rerun.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
@@ -22,6 +23,8 @@ import type { ResolvedModel, RunnerModel } from "./types.js";
 /** The models.json fields caps read (the file carries more, e.g. pricing). */
 export interface ModelCatalogEntry {
   id: string;
+  /** Alternate route IDs retained for historical callers. */
+  aliases?: string[];
   /** `<baseURL>#<model-name>` for self-hosted models; matched against the run's id. */
   endpoint?: string;
   bedrockProfile?: string;
@@ -61,11 +64,25 @@ export function resolveOutputCap(
   if (override !== undefined) {
     return positiveInt(override, `--max-output-tokens must be a positive integer or "none"`);
   }
-  const entry = catalog.find((e) => e.id === modelId || e.endpoint === modelId);
+  const entry = findModelCatalogEntry(modelId, catalog);
   if (entry?.maxOutputTokens === undefined) return null;
   return positiveInt(
     entry.maxOutputTokens,
     `models.json: ${entry.id}.maxOutputTokens must be a positive integer`,
+  );
+}
+
+/** Look up a catalog entry by serving identity, alias, or hosted endpoint. */
+export function findModelCatalogEntry(
+  modelId: string,
+  catalog: readonly ModelCatalogEntry[],
+): ModelCatalogEntry | undefined {
+  const canonical = canonicalModelId(modelId);
+  return catalog.find(
+    (entry) =>
+      canonicalModelId(entry.id) === canonical ||
+      entry.aliases?.some((alias) => canonicalModelId(alias) === canonical) ||
+      entry.endpoint === canonical,
   );
 }
 
@@ -81,7 +98,33 @@ export function loadModelCatalog(path: string = modelsJsonPath()): ModelCatalogE
   } catch (err) {
     throw new Error(`models.json at ${path} is not valid JSON: ${(err as Error).message}`);
   }
-  return (catalog.run ?? []).filter((e) => typeof e?.id === "string");
+  if (!Array.isArray(catalog.run)) {
+    if (catalog.run === undefined) return [];
+    throw new Error(`models.json at ${path}: run must be an array`);
+  }
+  const owners = new Map<string, number>();
+  for (const [index, entry] of catalog.run.entries()) {
+    if (!entry || typeof entry.id !== "string") {
+      throw new Error(`models.json at ${path}: every run entry needs a model id`);
+    }
+    if (entry.aliases !== undefined && !Array.isArray(entry.aliases)) {
+      throw new Error(`models.json at ${path}: ${entry.id}.aliases must be an array`);
+    }
+    const routes = [
+      entry.id,
+      ...(entry.aliases ?? []),
+      ...(entry.endpoint ? [entry.endpoint] : []),
+    ];
+    for (const route of routes) {
+      const canonical = canonicalModelId(route);
+      const owner = owners.get(canonical);
+      if (owner !== undefined && owner !== index) {
+        throw new Error(`models.json at ${path}: duplicate catalog route ${canonical}`);
+      }
+      owners.set(canonical, index);
+    }
+  }
+  return catalog.run;
 }
 
 /**
@@ -97,13 +140,18 @@ export function buildRunnerModels(
   opts: { catalog: readonly ModelCatalogEntry[]; override: OutputCapOverride | undefined },
 ): RunnerModel[] {
   return modelIds.map((modelId) => {
-    const { id, model } = resolve(modelId);
-    return { id, model, maxOutputTokens: resolveOutputCap(id, opts.catalog, opts.override) };
+    const canonicalId = canonicalModelId(modelId);
+    const { model } = resolve(canonicalId);
+    return {
+      id: canonicalId,
+      model,
+      maxOutputTokens: resolveOutputCap(canonicalId, opts.catalog, opts.override),
+    };
   });
 }
 
 /**
- * Startup log line, e.g. `caps: claude-haiku-4-5=4096, ollama:qwen3.5=none (no
+ * Startup log line, e.g. `caps: bedrock/claude-haiku-4-5=4096, ollama:qwen3.5=none (no
  * models.json cap)`. Uncapped models are called out, never implied.
  */
 export function capsLine(models: readonly RunnerModel[], override?: OutputCapOverride): string {

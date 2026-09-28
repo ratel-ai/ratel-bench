@@ -22,6 +22,7 @@ import {
   selectForCell,
   sragentsCachePaths,
   sragentsCapOptions,
+  sragentsModels,
   sragentsRerunOptions,
   sragentsTimeoutMs,
   stratifiedSample,
@@ -29,6 +30,16 @@ import {
 } from "./sragents-select.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
+
+describe("sragentsModels", () => {
+  it("defaults to Bedrock and keeps explicit historical direct routes", () => {
+    expect(sragentsModels([])).toEqual(["bedrock/claude-sonnet-5"]);
+    expect(sragentsModels(["--models", "gpt-5.4-mini,openai/gpt-5.4-mini"])).toEqual([
+      "bedrock/gpt-5.4-mini",
+      "openai/gpt-5.4-mini",
+    ]);
+  });
+});
 
 // Fixed price so cost assertions don't depend on models.json / MODELS_JSON.
 vi.mock("./pricing.js", () => ({

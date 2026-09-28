@@ -1,7 +1,7 @@
 {
   "run": [
     {
-      "id": "claude-sonnet-5",
+      "id": "bedrock/claude-sonnet-5",
       "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-sonnet-5",
       "pricing": {
@@ -17,10 +17,13 @@
           "cachedInputPer1M": 0.3,
           "cacheCreationPer1M": 3.75
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-sonnet-5"
+      ]
     },
     {
-      "id": "claude-sonnet-4-6",
+      "id": "bedrock/claude-sonnet-4-6",
       "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-sonnet-4-6",
       "pricing": {
@@ -36,10 +39,13 @@
           "cachedInputPer1M": 0.3,
           "cacheCreationPer1M": 3.75
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-sonnet-4-6"
+      ]
     },
     {
-      "id": "claude-haiku-4-5",
+      "id": "bedrock/claude-haiku-4-5",
       "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
       "pricing": {
@@ -55,10 +61,13 @@
           "cachedInputPer1M": 0.1,
           "cacheCreationPer1M": 1.25
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-haiku-4-5"
+      ]
     },
     {
-      "id": "claude-opus-4-8",
+      "id": "bedrock/claude-opus-4-8",
       "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-opus-4-8",
       "anthropicEndpoint": "https://api.anthropic.com/v1",
@@ -75,10 +84,13 @@
           "cachedInputPer1M": 0.5,
           "cacheCreationPer1M": 6.25
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-opus-4-8"
+      ]
     },
     {
-      "id": "claude-opus-4-5",
+      "id": "bedrock/claude-opus-4-5",
       "maxOutputTokens": 4096,
       "bedrockProfile": "eu.anthropic.claude-opus-4-5-20251101-v1:0",
       "pricing": {
@@ -94,10 +106,13 @@
           "cachedInputPer1M": 0.5,
           "cacheCreationPer1M": 6.25
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-opus-4-5"
+      ]
     },
     {
-      "id": "claude-fable-5",
+      "id": "bedrock/claude-fable-5",
       "maxOutputTokens": 16384,
       "bedrockProfile": "global.anthropic.claude-fable-5",
       "anthropicEndpoint": "https://api.anthropic.com/v1",
@@ -114,10 +129,13 @@
           "cachedInputPer1M": 1.0,
           "cacheCreationPer1M": 12.5
         }
-      }
+      },
+      "aliases": [
+        "anthropic/claude-fable-5"
+      ]
     },
     {
-      "id": "gpt-5.4-mini",
+      "id": "openai/gpt-5.4-mini",
       "maxOutputTokens": 16384,
       "pricing": {
         "openai": {
@@ -129,7 +147,7 @@
       }
     },
     {
-      "id": "gpt-5.6-luna",
+      "id": "openai/gpt-5.6-luna",
       "maxOutputTokens": 16384,
       "pricing": {
         "openai": {
@@ -141,11 +159,11 @@
       }
     },
     {
-      "id": "qwen3-4b",
+      "id": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
     },
     {
-      "id": "mistral-7b-instruct",
+      "id": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct"
     }
   ]

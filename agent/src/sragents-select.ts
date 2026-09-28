@@ -61,7 +61,9 @@ import { loadModelPricing } from "./pricing.js";
 // unpriced → $0 cells and the dollar cap simply doesn't bound the run.
 const PRICING = loadModelPricing();
 
+import { DEFAULT_SRAGENTS_MODEL } from "./model-defaults.js";
 import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import { canonicalModelList, parseModelIdentity } from "./model-identity.js";
 import { resolveRepoPath } from "./paths.js";
 import { parseTimerMs } from "./positive-int.js";
 import {
@@ -93,7 +95,6 @@ import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./version
 
 loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
 
-const OLLAMA_PREFIX = "ollama:";
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
 /** `--timeout-ms` default: active time per selection call (retry sleeps don't count). */
@@ -118,29 +119,30 @@ const CACHEABLE_ARMS = new Set<SragentsArm>(["control-baseline", "control-oracle
 //    the campaign CLI). Output caps are attached afterwards (`buildRunnerModels`). ──
 
 function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): ResolvedModel {
+  const identity = parseModelIdentity(modelId);
   // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
   const ep = parseCustomEndpoint(modelId);
   if (ep) {
     const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
     return { id: modelId, model: provider.chat(ep.modelName) };
   }
-  if (modelId.startsWith(OLLAMA_PREFIX)) {
+  if (identity.kind === "ollama") {
     const provider = createOpenAI({ baseURL: ollamaBaseURL, apiKey: "ollama" });
-    return { id: modelId, model: provider.chat(modelId.slice(OLLAMA_PREFIX.length)) };
+    return { id: identity.canonicalId, model: provider.chat(identity.model) };
   }
-  if (modelId.startsWith("claude")) {
+  if (identity.kind === "provider" && identity.provider === "anthropic") {
     if (!process.env.ANTHROPIC_API_KEY) {
       throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY`);
     }
-    return { id: modelId, model: anthropic(modelId) };
+    return { id: identity.canonicalId, model: anthropic(identity.model) };
   }
-  if (modelId.startsWith("gpt")) {
+  if (identity.kind === "provider" && identity.provider === "openai") {
     if (!process.env.OPENAI_API_KEY) throw new Error(`model ${modelId} requires OPENAI_API_KEY`);
-    return { id: modelId, model: openai(modelId) };
+    return { id: identity.canonicalId, model: openai(identity.model) };
   }
   throw new Error(
-    `unknown model provider for: ${modelId} ` +
-      `(expected gpt-*, claude-*, ollama:<tag>, or a user-hosted <baseURL>#<model-name> URL)`,
+    `model ${identity.canonicalId} needs a ${identity.kind === "provider" ? identity.provider : "hosted"} adapter; ` +
+      "native provider resolution is required before inference",
   );
 }
 
@@ -621,6 +623,14 @@ function arg(name: string, fallback: string): string {
   return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : fallback;
 }
 
+export function sragentsModels(argv: readonly string[]): string[] {
+  const index = argv.indexOf("--models");
+  if (index < 0) return [DEFAULT_SRAGENTS_MODEL];
+  const raw = argv[index + 1];
+  if (raw === undefined || raw.startsWith("--")) throw new Error("--models requires model IDs");
+  return canonicalModelList(raw);
+}
+
 /** Version-agnostic identity for a control cell (reused across ratel versions). */
 export function controlKey(
   scenarioId: string,
@@ -887,7 +897,7 @@ async function main(): Promise<void> {
   const catalogPath = resolveRepoPath(arg("--catalog", "test-data/sragents-skills.jsonl"));
   const outputPath = resolveRepoPath(arg("--output", "results/raw/sragents/agent.jsonl"));
   const arms = arg("--arms", ALL_ARMS.join(",")).split(",") as SragentsArm[];
-  const models = arg("--models", "gpt-5.4-mini").split(",");
+  const models = sragentsModels(process.argv);
   const poolSize = Number(arg("--pool-size", "50"));
   const ratelTopK = Number(arg("--top-k", "10"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all

@@ -66,14 +66,14 @@ Ingests both corpora (if missing), runs retrieval modes (a) + (b), runs the mode
 
 Flags: `--force` (re-ingest), `--skip-ingest`, `--skip-agent` (skip mode (c) even with keys), `--only metatool|toolret`.
 
-The auto-invoked mode (c) defaults to: 50 sampled scenarios × 1 run × every committed arm (the two control arms plus the three ratel ablations), available models only (`claude-sonnet-4-6` and/or `gpt-5.4-mini` depending on which key is set), pool size 180, $5 global cap. The local-only `claude-sdk-tool-search` arm is excluded by default. For the headline variance run see the next section.
+The auto-invoked mode (c) defaults to: 50 sampled scenarios × 1 run × every committed arm (the two control arms plus the three ratel ablations), available direct routes only (`anthropic/claude-sonnet-4-6` and/or `openai/gpt-5.4-mini` depending on which key is set), pool size 180, $5 global cap. The local-only `claude-sdk-tool-search` arm is excluded by default. For the headline variance run see the next section.
 
 ## Run the headline agent campaign (mode c)
 
 ```bash
 # Required env (one or both):
 #   OPENAI_API_KEY     — for gpt-5.4-mini
-#   ANTHROPIC_API_KEY  — for claude-sonnet-4-6 (also powers the LLM judge)
+#   ANTHROPIC_API_KEY  — for anthropic/claude-sonnet-4-6
 #
 # The default --corpus path expects the ingested MetaTool snapshot at
 # test-data/metatool.jsonl. Run `pnpm -F @ratel-ai/benchmark run-all`
@@ -84,7 +84,7 @@ pnpm -F @ratel-ai/benchmark start \
   --output agent/results/agent.jsonl \
   --scenarios 200 \
   --arms control-baseline,control-oracle,ratel-full,ratel-pre-discovery,ratel-discovery-tool \
-  --models gpt-5.4-mini,claude-sonnet-4-6 \
+  --models openai/gpt-5.4-mini,anthropic/claude-sonnet-4-6 \
   --runs 5 \
   --top-k 5 \
   --pool-sizes 30,100,180 \
@@ -107,7 +107,7 @@ Resumable — re-runs skip cells already in `agent.jsonl` unless `--force`, exce
 
 ## Output caps (`maxOutputTokens`)
 
-Every agent LLM call requests the model's output cap, taken from one place: `models.json` `run[].maxOutputTokens` (4096 for claude-haiku-4-5 / claude-sonnet-4-6 / claude-opus-4-5; 16384 for claude-sonnet-5 / claude-opus-4-8 / claude-fable-5 / gpt-5.4-mini / gpt-5.6-luna). A test (`models-catalog.test.ts`) requires it on every entry with a `bedrockProfile` or a `claude-`/`gpt-` id. There is no silent default: a model without a catalog cap (self-hosted `qwen3-4b` / `mistral-7b-instruct`, `ollama:*`, ad-hoc `<url>#name` ids — matched to an entry by its `endpoint`) sends no cap, and the startup line says so: `caps: claude-haiku-4-5=4096, ollama:qwen3.5=none (no models.json cap)`. Judge calls send no cap unless `--judge-max-output-tokens` is set.
+Every agent LLM call requests the model's output cap from `models.json` `run[].maxOutputTokens`. Catalog entries and aliases use explicit serving providers, so `bedrock/claude-haiku-4-5` and `anthropic/claude-haiku-4-5` can share a cap while retaining distinct serving identities and prices. Bare names always mean Bedrock, including `gpt-*`; use `openai/gpt-5.4-mini` or `anthropic/claude-sonnet-4-6` for the historical direct routes. Hosted `<url>#<model>` and `ollama:<tag>` identities are preserved. A model without a catalog cap sends no cap, and the startup line says so. Judge calls send no cap unless `--judge-max-output-tokens` is set.
 
 - `--max-output-tokens N|none` (`start`, `sragents-select`) overrides the catalog for every agent model; `none` sends no cap. Agent calls only.
 - `--judge-max-output-tokens N` (`start`, `rejudge`) caps the LLM judge. Unset (the default) sends no cap.
@@ -190,7 +190,7 @@ For a fast local smoke (~$0.20–$1):
 pnpm -F @ratel-ai/benchmark start \
   --scenarios 50 --runs 1 \
   --arms control-baseline,control-oracle,ratel-full \
-  --models claude-sonnet-4-6 \
+  --models anthropic/claude-sonnet-4-6 \
   --pool-sizes 180 \
   --dollar-global 5 \
   --concurrency 10
@@ -215,7 +215,7 @@ pnpm -F @ratel-ai/benchmark start \
 
 Flags:
 - `--ollama-base-url URL` — override the default `http://localhost:11434/v1` (or set `OLLAMA_BASE_URL` in the env). Useful for remote Ollama instances.
-- `--judge-model MODEL` — pick any model id (cloud or `ollama:*`) for the LLM judge. Defaults to `claude-sonnet-4-6` when `ANTHROPIC_API_KEY` is set, otherwise the LLM judge is disabled and only the programmatic verdict is recorded.
+- `--judge-model MODEL` — pick an explicit serving route (or `ollama:*`) for the LLM judge. The automatic judge route is `bedrock/claude-sonnet-5` when the Bedrock backend is configured; otherwise only the programmatic verdict runs. `rejudge` uses the same Bedrock route unless overridden or given `--no-judge`.
 
 `dollar_cost` is recorded as `0` for `ollama:*` cells — `--dollar-global` therefore never trips on local-only runs. If you mix cloud + local models in one run, the cap still bounds the cloud spend. The model id keeps its `ollama:` prefix in the JSONL row and the report so local vs cloud cells stay distinguishable.
 

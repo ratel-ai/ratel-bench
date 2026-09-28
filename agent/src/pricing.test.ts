@@ -7,7 +7,8 @@ import { activeBackend, loadModelPricing } from "./pricing.js";
 const CATALOG = {
   run: [
     {
-      id: "claude-haiku-4-5",
+      id: "bedrock/claude-haiku-4-5",
+      aliases: ["anthropic/claude-haiku-4-5"],
       bedrockProfile: "eu.anthropic.claude-haiku-4-5",
       pricing: {
         bedrock: {
@@ -25,7 +26,7 @@ const CATALOG = {
       },
     },
     {
-      id: "gpt-5.4-mini",
+      id: "openai/gpt-5.4-mini",
       pricing: {
         openai: {
           inputPer1M: 0.75,
@@ -36,16 +37,41 @@ const CATALOG = {
       },
     },
     // Self-hosted, no pricing → absent from the table.
-    { id: "qwen3-4b", endpoint: "https://host/v1#qwen3-4b" },
+    { id: "https://host/v1#qwen3-4b", endpoint: "https://host/v1#qwen3-4b" },
     // Flat ModelPrice (no backend key) → applies to any backend.
     {
-      id: "claude-flat-test",
+      id: "bedrock/claude-flat-test",
       pricing: { inputPer1M: 7, outputPer1M: 8, cachedInputPer1M: 0, cacheCreationPer1M: 0 },
     },
   ],
 };
 
 describe("loadModelPricing", () => {
+  it("prices canonical routes from the same catalog entry without sharing rates", () => {
+    const file = join(tmpdir(), `pricing-routes-${process.pid}.json`);
+    try {
+      writeFileSync(
+        file,
+        JSON.stringify({
+          run: [
+            {
+              id: "bedrock/claude-haiku-4-5",
+              aliases: ["anthropic/claude-haiku-4-5"],
+              pricing: {
+                bedrock: { inputPer1M: 1, outputPer1M: 2 },
+                anthropic: { inputPer1M: 3, outputPer1M: 4 },
+              },
+            },
+          ],
+        }),
+      );
+      const rates = loadModelPricing(file);
+      expect(rates["bedrock/claude-haiku-4-5"].inputPer1M).toBe(1);
+      expect(rates["anthropic/claude-haiku-4-5"].inputPer1M).toBe(3);
+    } finally {
+      rmSync(file, { force: true });
+    }
+  });
   let dir: string;
   let path: string;
   const savedBackend = process.env.RATEL_LLM_BACKEND;
@@ -62,26 +88,27 @@ describe("loadModelPricing", () => {
     else process.env.RATEL_LLM_BACKEND = savedBackend;
   });
 
-  it("keys claude-* to the Anthropic rate when no backend is set", () => {
+  it("keeps direct and Bedrock prices separate", () => {
     const t = loadModelPricing(path);
-    expect(t["claude-haiku-4-5"].inputPer1M).toBe(2.0); // anthropic block
-    expect(t["gpt-5.4-mini"].outputPer1M).toBe(4.5);
+    expect(t["anthropic/claude-haiku-4-5"].inputPer1M).toBe(2.0);
+    expect(t["bedrock/claude-haiku-4-5"].inputPer1M).toBe(1.0);
+    expect(t["openai/gpt-5.4-mini"].outputPer1M).toBe(4.5);
   });
 
-  it("keys claude-* to the Bedrock rate under RATEL_LLM_BACKEND=bedrock", () => {
+  it("ignores the legacy global backend setting for explicit routes", () => {
     process.env.RATEL_LLM_BACKEND = "bedrock";
     const t = loadModelPricing(path);
-    expect(t["claude-haiku-4-5"].inputPer1M).toBe(1.0); // bedrock block
+    expect(t["anthropic/claude-haiku-4-5"].inputPer1M).toBe(2.0);
   });
 
   it("omits unpriced (self-hosted) models", () => {
     const t = loadModelPricing(path);
-    expect(t["qwen3-4b"]).toBeUndefined();
+    expect(t["https://host/v1#qwen3-4b"]).toBeUndefined();
   });
 
   it("accepts a flat ModelPrice for any backend", () => {
     const t = loadModelPricing(path);
-    expect(t["claude-flat-test"].inputPer1M).toBe(7);
+    expect(t["bedrock/claude-flat-test"].inputPer1M).toBe(7);
   });
 
   it("returns an empty table (never throws) when the catalog is missing", () => {
@@ -96,15 +123,17 @@ describe("activeBackend", () => {
     else process.env.RATEL_LLM_BACKEND = saved;
   });
 
-  it("routes gpt-* to openai, ollama/links to null", () => {
-    expect(activeBackend("gpt-5.4-mini")).toBe("openai");
+  it("defaults bare names to Bedrock and leaves hosted routes separate", () => {
+    expect(activeBackend("gpt-5.4-mini")).toBe("bedrock");
+    expect(activeBackend("openai/gpt-5.4-mini")).toBe("openai");
     expect(activeBackend("ollama:qwen3.5")).toBeNull();
   });
 
-  it("routes claude-* by RATEL_LLM_BACKEND", () => {
+  it("does not let the legacy backend env change an explicit route", () => {
     delete process.env.RATEL_LLM_BACKEND;
-    expect(activeBackend("claude-haiku-4-5")).toBe("anthropic");
+    expect(activeBackend("claude-haiku-4-5")).toBe("bedrock");
     process.env.RATEL_LLM_BACKEND = "bedrock";
     expect(activeBackend("claude-haiku-4-5")).toBe("bedrock");
+    expect(activeBackend("anthropic/claude-haiku-4-5")).toBe("anthropic");
   });
 });
