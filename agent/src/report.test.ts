@@ -818,6 +818,39 @@ describe("failureTaxonomy", () => {
 });
 
 describe("renderReport", () => {
+  it("renders matching column counts for every Headline table row", () => {
+    const markdown = renderReport({
+      cells: [cell({})],
+      retrieval: [],
+      generatedAt: new Date("2026-05-01"),
+    });
+    const headline = markdown.split("## Headline\n\n")[1]?.split("\n\n")[0].split("\n") ?? [];
+    expect(headline).toHaveLength(3);
+    expect(headline.map((line) => line.split("|").length)).toEqual([17, 17, 17]);
+  });
+
+  it("validates kept route provenance before report history supersession", () => {
+    const earlier = cell({
+      model: "gcp/gemini-alias",
+      resolved_model: "gemini-2.5-pro",
+      generated_at: "2026-09-28T00:00:00.000Z",
+    });
+    const later = cell({
+      model: "gcp/gemini-alias",
+      resolved_model: "gemini-3-pro",
+      generated_at: "2026-09-29T00:00:00.000Z",
+    });
+    expect(() => renderReport({ cells: [earlier, later], retrieval: [] })).toThrow(
+      /resolved_model/,
+    );
+    expect(() =>
+      renderReport({
+        cells: [earlier, { ...later, error: "Overloaded" }],
+        retrieval: [],
+      }),
+    ).not.toThrow();
+  });
+
   it("produces a markdown document with each panel", () => {
     const cells = [
       cell({

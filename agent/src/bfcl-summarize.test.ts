@@ -177,6 +177,34 @@ describe("summarizeBfcl — task completion", () => {
     ];
     expect(() => summarizeBfcl({ retrievalRows: [], cells, scenarios })).toThrow(/resolved_model/);
   });
+  it("ignores stale infrastructure errors when validating route provenance", () => {
+    const cells = [
+      cell({ model: "gcp/claude-alias", resolved_model: "claude-sonnet-5@20260901" }),
+      cell({
+        model: "gcp/claude-alias",
+        run_index: 1,
+        error: "Overloaded",
+        resolved_model: "claude-sonnet-5@20260801",
+      }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({ scenarios: 1, excluded_cells: 1 });
+  });
+  it("rejects conflicting kept routes before a later row supersedes the same cell", () => {
+    const cells = [
+      cell({
+        model: "gcp/claude-alias",
+        resolved_model: "claude-sonnet-5@20260801",
+        generated_at: "2026-09-28T00:00:00.000Z",
+      }),
+      cell({
+        model: "gcp/claude-alias",
+        resolved_model: "claude-sonnet-5@20260901",
+        generated_at: "2026-09-29T00:00:00.000Z",
+      }),
+    ];
+    expect(() => summarizeBfcl({ retrievalRows: [], cells, scenarios })).toThrow(/resolved_model/);
+  });
   it("builds per-row records for every arm, joined to the corpus", () => {
     const cells = [
       cell({ scenario_id: "bfcl-simple-0" }), // ratel-full

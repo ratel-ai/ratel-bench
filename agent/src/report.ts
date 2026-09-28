@@ -156,6 +156,16 @@ export function assertSingleModelProvenance(
   }
 }
 
+function assertModelGroups(rows: readonly (CellResult & { model: string })[]): void {
+  const groups = new Map<string, CellResult[]>();
+  for (const row of rows) {
+    const group = groups.get(row.model) ?? [];
+    group.push(row);
+    groups.set(row.model, group);
+  }
+  for (const [model, group] of groups) assertSingleModelProvenance(group, model);
+}
+
 /**
  * A row's wall-clock time net of its retry backoff (`wall_ms − retry_wait_ms`):
  * only the backoff slept is removed; failed attempts' own call time (throttled,
@@ -289,13 +299,7 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
   const cat = (c: Pick<CellResult, "category">): string =>
     coarsen ? coarseCategory(categoryOf(c)) : categoryOf(c);
   const routed = cells.map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
-  const provenanceByModel = new Map<string, CellResult[]>();
-  for (const cell of routed) {
-    const group = provenanceByModel.get(cell.model) ?? [];
-    group.push(cell);
-    provenanceByModel.set(cell.model, group);
-  }
-  for (const [model, group] of provenanceByModel) assertSingleModelProvenance(group, model);
+  assertModelGroups(routed);
   // Stage 1: per (scenario, arm, model, pool_size) → per-scenario means.
   const byScenario = new Map<string, CellResult[]>();
   for (const c of routed) {
@@ -742,6 +746,7 @@ export function renderReport(args: {
 }): string {
   const date = (args.generatedAt ?? new Date()).toISOString();
   const routed = args.cells.map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
+  assertModelGroups(routed.filter((cell) => !isInfraError(cell)));
   const latest = supersede(routed, labelledCellKeyOf);
   const cells = latest.filter((c) => !isInfraError(c));
   const stats = statsByArmModel(cells);
@@ -784,7 +789,7 @@ export function renderReport(args: {
   lines.push(
     "| arm | model | category | pool | catalog | scenarios | n | selection | task-completion | mean input | mean total | mean turns | mean $ | mean wall | mean wall (net) |",
   );
-  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+  lines.push("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
   for (const s of stats) {
     const task = s.task_completion_rate === null ? "—" : fmtPct(s.task_completion_rate * 100);
     lines.push(

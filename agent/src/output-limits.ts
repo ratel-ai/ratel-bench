@@ -161,29 +161,31 @@ export function buildRunnerModels(
 ): RunnerModel[] {
   return modelIds.map((modelId) => {
     const canonicalId = canonicalModelId(modelId);
-    const { model } = resolve(canonicalId);
+    const resolved = resolve(canonicalId);
     const identity = parseModelIdentity(canonicalId);
     const entry = findModelCatalogEntry(canonicalId, opts.catalog);
     return {
       id: canonicalId,
-      model,
+      model: resolved.model,
       maxOutputTokens: resolveOutputCap(canonicalId, opts.catalog, opts.override),
       ...(identity.kind === "provider"
         ? {
-            servingProvider: identity.provider,
+            servingProvider: resolved.servingProvider ?? identity.provider,
             publisher:
+              resolved.publisher ??
               entry?.publisher ??
               (identity.provider === "gcp"
                 ? vertexPublisher(entry?.vertexModelId ?? identity.model)
                 : undefined),
             resolvedModel:
-              identity.provider === "gcp"
+              resolved.resolvedModel ??
+              (identity.provider === "gcp"
                 ? (entry?.vertexModelId ?? identity.model)
                 : identity.provider === "bedrock"
                   ? (entry?.bedrockProfile ?? identity.model)
-                  : identity.model,
-            ...(identity.provider === "gcp" && entry?.vertexLocation
-              ? { vertexLocation: entry.vertexLocation }
+                  : identity.model),
+            ...(identity.provider === "gcp" && (resolved.vertexLocation ?? entry?.vertexLocation)
+              ? { vertexLocation: resolved.vertexLocation ?? entry?.vertexLocation }
               : {}),
           }
         : {}),

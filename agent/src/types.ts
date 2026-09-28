@@ -79,6 +79,11 @@ export interface ResolvedModel {
   id: string;
   /** AI SDK model instance. */
   model: LanguageModel;
+  /** Route provenance resolved by the factory from catalog, options, and environment. */
+  servingProvider?: string;
+  publisher?: string;
+  resolvedModel?: string;
+  vertexLocation?: string;
 }
 
 /**
@@ -89,10 +94,6 @@ export interface ResolvedModel {
  */
 export type RunnerModel = ResolvedModel & {
   maxOutputTokens: number | null;
-  servingProvider?: string;
-  publisher?: string;
-  resolvedModel?: string;
-  vertexLocation?: string;
 };
 
 export interface AgentRunInput {

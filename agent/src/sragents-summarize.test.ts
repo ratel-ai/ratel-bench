@@ -195,6 +195,36 @@ describe("summarizeSragents — skill selection (task)", () => {
     ];
     expect(() => summarizeSragents({ retrievalRows: [], cells })).toThrow(/resolved_model/);
   });
+  it("ignores stale infrastructure errors when validating route provenance", () => {
+    const cells = [
+      cell({ model: "gcp/gemini-alias", resolved_model: "gemini-3-pro" }),
+      cell({
+        model: "gcp/gemini-alias",
+        run_index: 1,
+        error: "Overloaded",
+        resolved_model: "gemini-2.5-pro",
+      }),
+    ];
+    const all = summarizeSragents({ retrievalRows: [], cells }).taskSummary.find(
+      (row) => row.dataset === "all",
+    );
+    expect(all).toMatchObject({ scenarios: 1, excluded_cells: 1 });
+  });
+  it("rejects conflicting kept routes before a later row supersedes the same cell", () => {
+    const cells = [
+      cell({
+        model: "gcp/gemini-alias",
+        resolved_model: "gemini-2.5-pro",
+        generated_at: "2026-09-28T00:00:00.000Z",
+      }),
+      cell({
+        model: "gcp/gemini-alias",
+        resolved_model: "gemini-3-pro",
+        generated_at: "2026-09-29T00:00:00.000Z",
+      }),
+    ];
+    expect(() => summarizeSragents({ retrievalRows: [], cells })).toThrow(/resolved_model/);
+  });
   it("computes per-row selection metrics (hit, complete, recall, precision)", () => {
     const cells = [
       // single-gold, exact hit → all 1.0
