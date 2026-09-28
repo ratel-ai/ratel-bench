@@ -46,12 +46,14 @@ describe("formatDoneLine", () => {
           unresolved: 1,
           unknown: 1,
           untrackedRows: 0,
+          unattributedAttempts: 2,
           knownUsd: 0.5,
           completeness: "partial",
         },
       }),
     );
     expect(line).toContain("spent (known lower bound; 1 unresolved, 1 unknown");
+    expect(line).toContain("2 unattributed attempts");
   });
   it("labels a known subtotal when some cells have unknown cost", () => {
     expect(formatDoneLine(summary({ unknown_cost_cells: 2 }))).toContain(

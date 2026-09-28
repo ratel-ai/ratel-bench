@@ -331,7 +331,7 @@ export function tallyRow(
 export function formatDoneLine(s: DoneSummary): string {
   const accounting =
     s.spend?.completeness === "partial"
-      ? ` (known lower bound; ${s.spend.unresolved} unresolved, ${s.spend.unknown} unknown, ${s.spend.untrackedRows ?? 0} untracked rows)`
+      ? ` (known lower bound; ${s.spend.unresolved} unresolved, ${s.spend.unknown} unknown, ${s.spend.untrackedRows ?? 0} untracked rows, ${s.spend.unattributedAttempts ?? 0} unattributed attempts)`
       : "";
   return (
     `done: ${s.cells_run} cells run, ${s.cells_cached} cached, ${s.cells_skipped} skipped, ` +

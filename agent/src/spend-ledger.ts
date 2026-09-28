@@ -56,6 +56,8 @@ export interface SpendSummary {
   completeness: "complete" | "partial";
   /** Legacy live rows without evidence of provider-attempt journaling. */
   untrackedRows?: number;
+  /** Legacy attempts compatible with this benchmark but lacking trustworthy scope evidence. */
+  unattributedAttempts?: number;
 }
 
 interface Attempt {
@@ -158,7 +160,11 @@ export function openSpendLedger(path: string) {
     hasRun(runId: string, scope?: string): boolean {
       return scope === undefined
         ? runIds.has(runId)
-        : (scopedRunIds.get(scope)?.has(runId) ?? false);
+        : (scopedRunIds.get(scope)?.has(runId) ?? false) ||
+            [...attempts.values()].some(
+              ({ dispatch }) =>
+                !dispatch.scope && dispatch.runId === runId && legacyScopeOf(dispatch) === scope,
+            );
     },
     dispatch(value: SpendDispatch): void {
       if (attempts.has(value.id)) {
@@ -178,24 +184,60 @@ export function openSpendLedger(path: string) {
       append({ type: "settle", id, value });
     },
     summary(scope?: string): SpendSummary {
-      const value =
-        scope === undefined
-          ? totals
-          : (scoped.get(scope) ?? {
-              attempts: 0,
-              unresolved: 0,
-              unknown: 0,
-              knownTicks: 0,
-            });
+      const value = scope === undefined ? totals : { ...(scoped.get(scope) ?? emptyTotals()) };
+      let unattributedAttempts = 0;
+      if (scope !== undefined) {
+        for (const attempt of attempts.values()) {
+          if (attempt.dispatch.scope) continue;
+          const inferred = legacyScopeOf(attempt.dispatch);
+          if (inferred === scope) addAttempt(value, attempt);
+          else if (!inferred && benchmarkMatchesScope(attempt.dispatch.kind, scope)) {
+            unattributedAttempts++;
+          }
+        }
+      }
       return {
         attempts: value.attempts,
         unresolved: value.unresolved,
         unknown: value.unknown,
         knownUsd: value.knownTicks / 10_000_000_000,
-        completeness: value.unresolved || value.unknown ? "partial" : "complete",
+        completeness:
+          value.unresolved || value.unknown || unattributedAttempts ? "partial" : "complete",
+        ...(unattributedAttempts ? { unattributedAttempts } : {}),
       };
     },
   };
+}
+
+function emptyTotals(): Totals {
+  return { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+}
+
+function addAttempt(totals: Totals, attempt: Attempt): void {
+  totals.attempts++;
+  if (!attempt.settlement) {
+    totals.unresolved++;
+    return;
+  }
+  const ticks = costTicks(attempt.dispatch.model, attempt.dispatch.price, attempt.settlement);
+  if (ticks === null) totals.unknown++;
+  else totals.knownTicks += ticks;
+}
+
+function legacyScopeOf(dispatch: SpendDispatch): string | undefined {
+  if (dispatch.kind !== "bfcl" && dispatch.kind !== "judge") return undefined;
+  const parts = dispatch.cellKey.split("::");
+  if (parts.length !== 5 && parts.length !== 6) return undefined;
+  const [version, scenario, arm, model, runIndex, pool] = parts;
+  if (!version || !scenario || !arm || !model || !/^(0|[1-9]\d*)$/.test(runIndex)) return undefined;
+  if (pool !== undefined && !/^p(0|[1-9]\d*)$/.test(pool)) return undefined;
+  return `bfcl/${version}`;
+}
+
+function benchmarkMatchesScope(kind: SpendDispatch["kind"], scope: string): boolean {
+  if (scope.startsWith("bfcl/")) return kind === "bfcl" || kind === "judge";
+  if (scope.startsWith("sragents/")) return kind === "sragents";
+  return false;
 }
 
 export type SpendLedger = ReturnType<typeof openSpendLedger>;

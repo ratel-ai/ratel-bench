@@ -233,6 +233,68 @@ describe("runner", () => {
     expect(summary.spend).toMatchObject({ untrackedRows: 1, completeness: "partial" });
   });
 
+  it("retains legacy paid spend and an ambiguous crash in a BFCL resume summary", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const config = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    };
+    const previous = await makeFakeRunCell(
+      0.5,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: config.models[0],
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config,
+    });
+    writeRows(output, [{ ...previous, run_id: "legacy-paid", cache_source: "live" }]);
+    const ledger = openSpendLedger(`${output}.spend.jsonl`);
+    ledger.dispatch({
+      id: "phase10-paid",
+      runId: "legacy-paid",
+      kind: "bfcl",
+      cellKey: "test::fs-001::control-baseline::fake-model::0::p1",
+      model: "fake-model",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("phase10-paid", {
+      status: "completed",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    ledger.dispatch({
+      id: "phase10-crashed",
+      kind: "bfcl",
+      cellKey: "test::untrusted",
+      model: "fake-model",
+      price: null,
+    });
+
+    const summary = await run(config);
+
+    expect(summary.spend).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.00002,
+      unattributedAttempts: 1,
+      untrackedRows: 0,
+      completeness: "partial",
+    });
+    expect(summary.coverage).toEqual({
+      requested: 1,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 0,
+      status: "partial",
+    });
+  });
+
   it("persists agent and judge attempts and reuses them on resume without new spend", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     const output = join(tempDir, "agent.jsonl");
