@@ -782,12 +782,11 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   const runId = randomUUID();
   const runTimestamp = new Date().toISOString();
   const ratelVersion = config.ratelVersion ?? sdkVersion();
-  const spendScope = `bfcl/${ratelVersion}`;
+  const baseSpendScope = `bfcl/${ratelVersion}`;
   const spendLedger =
     config.spendLedger ??
     openSpendLedger(config.spendLedgerPath ?? `${config.outputPath}.spend.jsonl`);
   if (config.campaignBudget) await reconcileCampaignBudget(spendLedger, config.campaignBudget);
-  config = { ...config, spendLedger, spendRunId: runId, spendScope };
 
   const allScenarios = loadScenarios(config.corpusPath);
   const scenarios = sampleScenarios(allScenarios, config.scenarioLimit, config.seed);
@@ -801,6 +800,10 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     // Truncate so re-runs don't append duplicates onto previous cells.
     writeFileSync(config.outputPath, "", "utf-8");
   }
+  const spendScope = config.force
+    ? spendLedger.startGeneration(baseSpendScope)
+    : spendLedger.currentScope(baseSpendScope);
+  config = { ...config, spendLedger, spendRunId: runId, spendScope };
 
   // Build the registry only when the runner needs it: production runs (no
   // injected `runCell`) need it for dispatch; test runs that inject `runCell`

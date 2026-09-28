@@ -379,6 +379,93 @@ describe("runner", () => {
     });
   });
 
+  it("starts fresh BFCL spend on force and keeps that generation on resume", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((item) => JSON.stringify(item)).join("\n"),
+    );
+    writeFileSync(output, "stale output\n");
+    const ledger = openSpendLedger(`${output}.spend.jsonl`);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 0,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "prior-generation",
+      kind: "bfcl",
+      scope: "bfcl/test",
+      cellKey: "test::old::control-baseline::bedrock/m::0::p1",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("prior-generation", {
+      status: "completed",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return {
+          content: [{ type: "text", text: "done" }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 0, text: 0, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      pricing: { "bedrock/m": price },
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+      dollarGlobalCap: 0.0000005,
+    };
+
+    const forced = await run({ ...config, force: true });
+
+    expect(calls).toBe(1);
+    expect(forced.cells_run).toBe(1);
+    expect(forced.spend).toMatchObject({ attempts: 1, knownUsd: 0.000001 });
+    const journal = readFileSync(`${output}.spend.jsonl`, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(journal.some((event) => event.type === "generation")).toBe(true);
+    expect(openSpendLedger(`${output}.spend.jsonl`).summary()).toMatchObject({
+      attempts: 2,
+      knownUsd: 0.000002,
+    });
+    const resumed = await run(config);
+    expect(calls).toBe(1);
+    expect(resumed.cells_run).toBe(0);
+    expect(resumed.spend).toMatchObject({ attempts: 1, knownUsd: 0.000001 });
+    expect(resumed.stopped_reason).toBe("global_cap");
+  });
+
+  it("does not advance BFCL spend generation when force fails before output reset", async () => {
+    const output = join(tempDir, "agent.jsonl");
+    const spendLedgerPath = `${output}.spend.jsonl`;
+
+    await expect(
+      run({
+        ...baseConfig(join(tempDir, "missing-corpus.jsonl"), output),
+        spendLedgerPath,
+        force: true,
+      }),
+    ).rejects.toThrow();
+
+    expect(openSpendLedger(spendLedgerPath).currentScope("bfcl/test")).toBe("bfcl/test");
+  });
+
   it("persists agent and judge attempts and reuses them on resume without new spend", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     const output = join(tempDir, "agent.jsonl");

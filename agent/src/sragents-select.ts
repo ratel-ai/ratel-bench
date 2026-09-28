@@ -331,6 +331,7 @@ export interface SelectArgs {
   spendLedger?: SpendLedger;
   campaignBudget?: CampaignBudget;
   spendRunId?: string;
+  spendScope?: string;
   pricing?: PricingTable;
 }
 
@@ -387,7 +388,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       args.spendLedger,
       {
         runId: args.spendRunId,
-        scope: SR_SPEND_SCOPE,
+        scope: args.spendScope ?? SR_SPEND_SCOPE,
         kind: "sragents",
         attemptOrdinal: args.attempt ?? 1,
         cellKey: taskKey(args),
@@ -544,6 +545,10 @@ export interface CampaignOptions {
   spendLedger?: SpendLedger;
   campaignBudget?: CampaignBudget;
   spendRunId?: string;
+  /** Start a new append-only spend generation, ignoring prior cap spend. */
+  force?: boolean;
+  /** Explicit generation selected by the CLI shell. */
+  spendScope?: string;
   pricing?: PricingTable;
   signal?: AbortSignal;
 }
@@ -583,8 +588,14 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
   const breaker = createBreaker(opts.abortAfterConsecutiveErrors);
   const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
   const runId = opts.spendRunId ?? randomUUID();
+  const spendScope =
+    opts.spendScope ??
+    (opts.force
+      ? opts.spendLedger?.startGeneration(SR_SPEND_SCOPE)
+      : opts.spendLedger?.currentScope(SR_SPEND_SCOPE)) ??
+    SR_SPEND_SCOPE;
   const tally = newRunTally();
-  let dollars = opts.spendLedger?.summary(SR_SPEND_SCOPE).knownUsd ?? 0;
+  let dollars = opts.spendLedger?.summary(spendScope).knownUsd ?? 0;
   let unknownCostCells = 0;
   let capHit = false;
   const effectiveDollarCap = opts.campaignBudget
@@ -596,7 +607,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
 
   const spend = (dollarCost: number): void => {
     dollars = opts.spendLedger
-      ? opts.spendLedger.summary(SR_SPEND_SCOPE).knownUsd
+      ? opts.spendLedger.summary(spendScope).knownUsd
       : dollars + dollarCost;
     if (dollars >= effectiveDollarCap) capHit = true;
   };
@@ -634,6 +645,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
               spendLedger: opts.spendLedger,
               campaignBudget: opts.campaignBudget,
               spendRunId: runId,
+              spendScope,
               pricing: opts.pricing,
             });
           } catch (err) {
@@ -704,7 +716,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     (t) => !capHit && !opts.signal?.aborted && !breaker.isAborted(t.model.id),
   );
 
-  const spendSummary = opts.spendLedger?.summary(SR_SPEND_SCOPE);
+  const spendSummary = opts.spendLedger?.summary(spendScope);
   const stoppedReason = opts.signal?.aborted
     ? "interrupted"
     : (breaker.stopped() ?? (capHit ? "global_cap" : "completed"));
@@ -1148,6 +1160,9 @@ async function main(): Promise<void> {
     rerun,
     runId,
   });
+  const spendScope = force
+    ? spendLedger.startGeneration(SR_SPEND_SCOPE)
+    : spendLedger.currentScope(SR_SPEND_SCOPE);
 
   console.log(
     `sragents-select: ${tasks.length} cells ` +
@@ -1182,6 +1197,7 @@ async function main(): Promise<void> {
       onCell: (c) => appendJsonl(outputPath, c),
       spendLedger,
       spendRunId: runId,
+      spendScope,
       signal: controller.signal,
     });
   } finally {
@@ -1204,9 +1220,9 @@ async function main(): Promise<void> {
     (row) =>
       requestedKeys.has(rowKey(row)) &&
       row.cache_source !== "reused" &&
-      (!row.run_id || !spendLedger.hasRun(row.run_id, SR_SPEND_SCOPE)),
+      (!row.run_id || !spendLedger.hasRun(row.run_id, spendScope)),
   ).length;
-  const ledgerSummary = spendLedger.summary(SR_SPEND_SCOPE);
+  const ledgerSummary = spendLedger.summary(spendScope);
   const spend = {
     ...ledgerSummary,
     untrackedRows,

@@ -1988,6 +1988,66 @@ describe("runCampaign: breaker, rounds and cap", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("starts fresh SR spend on force and keeps that generation on resume", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-force-spend-"));
+    const path = join(dir, "attempts.jsonl");
+    const ledger = openSpendLedger(path);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 0,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "prior-generation",
+      kind: "sragents",
+      scope: `sragents/${RATEL_AI_CORE_VERSION}`,
+      cellKey: "old",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("prior-generation", {
+      status: "completed",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return answer;
+      },
+    });
+    const task = taskOf("bedrock/m", model, 0);
+
+    const forced = await campaign([task], {
+      spendLedger: ledger,
+      pricing: { "bedrock/m": price },
+      dollarCap: 0.0000005,
+      force: true,
+    });
+
+    expect(calls).toBe(1);
+    expect(forced.result.cells_run).toBe(1);
+    expect(forced.result.spend).toMatchObject({ attempts: 1, knownUsd: 0.0001 });
+    const journal = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(journal.some((event) => event.type === "generation")).toBe(true);
+    const resumedLedger = openSpendLedger(path);
+    expect(resumedLedger.summary()).toMatchObject({ attempts: 2, knownUsd: 0.000101 });
+    const resumed = await campaign([task], {
+      spendLedger: resumedLedger,
+      pricing: { "bedrock/m": price },
+      dollarCap: 0.0000005,
+    });
+    expect(calls).toBe(1);
+    expect(resumed.result.cells_run).toBe(0);
+    expect(resumed.result.spend).toMatchObject({ attempts: 1, knownUsd: 0.0001 });
+    expect(resumed.result.stopped_reason).toBe("global_cap");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("keeps SR spend from a fatal request with no result row", async () => {
     const dir = mkdtempSync(join(tmpdir(), "sr-fatal-spend-"));
     const spendLedger = openSpendLedger(join(dir, "attempts.jsonl"));

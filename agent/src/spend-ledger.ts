@@ -76,6 +76,11 @@ interface Attempt {
   settlement?: SpendSettlement;
 }
 
+interface SpendGeneration {
+  baseScope: string;
+  scope: string;
+}
+
 interface Totals {
   attempts: number;
   unresolved: number;
@@ -84,6 +89,7 @@ interface Totals {
 }
 
 type Event =
+  | { type: "generation"; value: SpendGeneration }
   | { type: "dispatch"; value: SpendDispatch }
   | { type: "settle"; id: string; value: SpendSettlement };
 
@@ -92,6 +98,7 @@ export function openSpendLedger(path: string) {
   const attempts = new Map<string, Attempt>();
   const runIds = new Set<string>();
   const scopedRunIds = new Map<string, Set<string>>();
+  const currentScopes = new Map<string, string>();
   const totals: Totals = { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
   const scoped = new Map<string, Totals>();
   const forScope = (scope: string): Totals => {
@@ -113,7 +120,9 @@ export function openSpendLedger(path: string) {
   }
 
   function apply(event: Event): void {
-    if (event.type === "dispatch") {
+    if (event.type === "generation") {
+      currentScopes.set(event.value.baseScope, event.value.scope);
+    } else if (event.type === "dispatch") {
       const old = attempts.get(event.value.id);
       if (old && JSON.stringify(old.dispatch) !== JSON.stringify(event.value))
         throw new Error(`conflicting spend attempt ${event.value.id}`);
@@ -168,6 +177,14 @@ export function openSpendLedger(path: string) {
   }
 
   return {
+    currentScope(baseScope: string): string {
+      return currentScopes.get(baseScope) ?? baseScope;
+    },
+    startGeneration(baseScope: string): string {
+      const scope = `${baseScope}/generation/${randomUUID()}`;
+      append({ type: "generation", value: { baseScope, scope } });
+      return scope;
+    },
     entries(): ReadonlyArray<Readonly<Attempt>> {
       return [...attempts.values()];
     },
