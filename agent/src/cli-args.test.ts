@@ -18,6 +18,10 @@ const KNOWN_ARMS = [
 const parse = (...argv: string[]) => parseArgs(argv, KNOWN_ARMS);
 
 describe("parseArgs", () => {
+  it("accepts an exact SDK release independently of the control-row label", () => {
+    expect(parse("--sdk-version", "0.12.0").sdkVersion).toBe("0.12.0");
+    expect(() => parse("--sdk-version", "")).toThrow(/--sdk-version/);
+  });
   it("defaults", () => {
     const args = parse();
     expect(args).toMatchObject({

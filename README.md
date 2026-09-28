@@ -87,7 +87,7 @@ Every retrieval row and agent cell is **stamped with the Ratel version it was pr
 There are **two version knobs**, and which one matters depends on the eval:
 
 - **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). Swap it with the `version-set` / `version-reset` bookends below.
-- **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it; you bump it in `agent/package.json` (see Scenario 4).
+- **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it. Select an installed exact release with `--sdk-version` (for example `0.12.0`); the default dependency remains `0.4.0` for historical runs. The SDK and core have independent release numbers (current stable pair: SDK `0.12.0`, core `0.11.0`).
 
 > **Pre-0.4.0 versions all run the identical experiment above — the commands don't change between them.** 0.4.0 is the first version that lets you **choose the retriever**, so its runs differ only slightly: pin the 0.4.0 SDK, tag the run with a method-suffixed label (`RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`), and add `--retriever bm25|semantic|hybrid`. Everything else — pools, top-k, arms, scenario counts — is unchanged. `control-baseline` and `control-oracle` are retriever-independent, so they're **reused from the canonical 0.2.0 cache** rather than re-run — but purge any stale/pre-fix cached cells (`--force` on the *first* method) so a gold-incomplete or poisoned 0.2.0 pool can't skew the 0.4.0 numbers. See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact per-method commands.
 
@@ -239,20 +239,20 @@ pnpm version-reset
 
 ### Scenario 4 — LLM eval · BFCL
 
-> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` only sets the `ratel_ai_core_version` **label** on the cells — to actually measure a version's retrieval you must bump the **SDK**. Do both so the label and the retriever agree. **Needs an API key.**
+> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` sets the `ratel_ai_core_version` label; `--sdk-version` selects the actual SDK. Record and verify both versions independently. **Needs an API key.**
 
 ```bash
 # 1. pin the core (sets the ratel_ai_core_version label)
 pnpm version-reset
 pnpm version-set --crate 0.3.0 --expect 0.3.0
 
-# 2. bump the SDK to the matching release so retrieval is ACTUALLY 0.3.0
-#    edit agent/package.json:  "@ratel-ai/sdk": "npm:@ratel-ai/sdk@<0.3.0-sdk-version>"
-pnpm install
+# 2. install pinned aliases; select one on each BFCL command
+pnpm install --frozen-lockfile
 
 # 3. agent campaign — normal
 pnpm -F @ratel-ai/benchmark start \
   --corpus test-data/bfcl-all.jsonl \
+  --sdk-version 0.4.0 \
   --output results/raw/bfcl/agent.jsonl \
   --arms control-baseline,control-oracle,ratel-full \
   --models claude-sonnet-4-6 \
@@ -261,6 +261,7 @@ pnpm -F @ratel-ai/benchmark start \
 # 3b. agent campaign — parallelized (raise in-flight API calls)
 pnpm -F @ratel-ai/benchmark start \
   --corpus test-data/bfcl-all.jsonl \
+  --sdk-version 0.4.0 \
   --output results/raw/bfcl/agent.jsonl \
   --arms control-baseline,control-oracle,ratel-full \
   --models claude-sonnet-4-6 \
@@ -270,7 +271,7 @@ pnpm -F @ratel-ai/benchmark start \
 pnpm -F @ratel-ai/benchmark bfcl-summarize
 pnpm -F @ratel-ai/benchmark bfcl-report
 
-# 5. restore baseline (and revert the package.json SDK bump if not shipping it)
+# 5. restore the core baseline
 pnpm version-reset
 ```
 
@@ -280,7 +281,7 @@ pnpm version-reset
 - **Normal vs parallelized:** the BFCL agent doesn't use the Rust thread-pool; it's network-latency-bound, so parallelism is just `--concurrency` (raise it to overlap more in-flight API calls — mind provider rate limits).
 - `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Set a *different* list than Scenario 3 for per-benchmark models.
 - **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Bearer token → `agent/.env` as `AWS_BEDROCK_BEARER` (or `--model-api-key`), unauthenticated endpoints need none; the endpoint is auto-warmed before the run; cells record `$0` and keep the full URL as the model id. Use a longer `--timeout-ms` (e.g. 120000) for cold/remote models. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
-- summarize/report fold the cells into `report.json`. Because both `ratel_version` (SDK) and `ratel_ai_core_version` (core, from the lock) are recorded, the report can refuse to merge layers whose versions disagree — which is why steps 1 and 2 must target the same 0.3.0. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
+- summarize/report fold the cells into `report.json`. `ratel_version` records the selected SDK; `ratel_ai_core_version` records the independently selected core label. Check both before combining layers. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
 - **Errored cells** (both summarizers and `report`): rows are superseded per cell (the last final row wins, so a re-run replaces a transient error and duplicates count once). Final infra errors (`transient|access`) are excluded from every metric and counted in `excluded_cells`; `request|timeout|outcome` errors stay scored fails (`errored_cells`); output-limit cut-offs are kept and scored on their verdict (counted in `truncated_cells`). Token/cost/latency means cover non-errored rows only (`—` / null when none). In the summaries a group with no kept rows emits null metrics; in `REPORT.md` such a group has no row. The control cache never serves `transient|access|request` rows. `--label L` summarizes one `ratel_ai_core_version` label only. BFCL cells key on the SDK `ratel_version` too, so a control re-drain must pass `--ratel-version` equal to the `ratel_version` of the rows it replaces (the audit prints it per label); otherwise both versions count and `bfcl-summarize` / `report` warn. Before summarizing or migrating, audit with `pnpm -F @ratel-ai/benchmark results-audit --bench bfcl|sragents --agent <file> [--cache a,b,…]` (read-only unless `--drop-infra-errors --out <path>`, which drops only superseded `transient|access` rows). See [`EXPERIMENTS.md`](EXPERIMENTS.md) Rule 1.
 
 ---

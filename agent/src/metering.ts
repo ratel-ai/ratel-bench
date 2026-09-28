@@ -2,22 +2,16 @@
 // CellResult ready for JSONL persistence. Structural typing on the result lets
 // us swap providers/SDK versions without coupling the meter to a specific shape.
 
-import { createRequire } from "node:module";
-import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
 import type { LanguageModel } from "ai";
 import { classifyError, type ErrorClass } from "./cell-errors.js";
 import type { RetryStats } from "./llm-retry.js";
+import { GATEWAY_INVOKE_ID, GATEWAY_SEARCH_ID, sdkVersion } from "./sdk/resolve.js";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
-// Resolve the installed SDK version once. Used as the `ratel_version` row
-// dimension and (downstream) cache-key component, so a campaign run is
-// "ratel v0.1.5 ran on this corpus" rather than "whatever was on the tree".
-export const SDK_VERSION: string = (() => {
-  const requirePkg = createRequire(import.meta.url);
-  const pkg = requirePkg("@ratel-ai/sdk/package.json") as { version: string };
-  return pkg.version;
-})();
+// Historical default for callers that report it directly. Rows resolve the
+// selected package at measurement time, after --sdk-version is parsed.
+export const SDK_VERSION: string = sdkVersion();
 
 /** Loose shape of `agent.generate()` output we depend on. Keeps us decoupled from AI SDK internals. */
 export interface AgentLikeResult {
@@ -133,7 +127,7 @@ export interface MeterContext {
   retryStats?: Pick<RetryStats, "retries">;
 }
 
-const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
+const GATEWAY_NAMES = new Set<string>([GATEWAY_SEARCH_ID, GATEWAY_INVOKE_ID]);
 
 /**
  * Run `generate`, time it, and roll the result into a `CellResult`. Returns the
@@ -182,7 +176,7 @@ export async function meter(
     model: ctx.model,
     provider: ctx.provider,
     run_index: ctx.runIndex,
-    ratel_version: SDK_VERSION,
+    ratel_version: sdkVersion(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
@@ -250,8 +244,8 @@ export function providerOf(model: LanguageModel): string | undefined {
 export function effectiveToolIds(calls: ToolCall[]): string[] {
   const out: string[] = [];
   for (const call of calls) {
-    if (call.toolId === SEARCH_TOOLS_ID) continue;
-    if (call.toolId === INVOKE_TOOL_ID) {
+    if (call.toolId === GATEWAY_SEARCH_ID) continue;
+    if (call.toolId === GATEWAY_INVOKE_ID) {
       const inner = call.args?.toolId;
       if (typeof inner === "string") out.push(inner);
       continue;
@@ -277,8 +271,8 @@ export interface EffectiveCall {
 export function effectiveCalls(calls: ToolCall[]): EffectiveCall[] {
   const out: EffectiveCall[] = [];
   for (const call of calls) {
-    if (call.toolId === SEARCH_TOOLS_ID) continue;
-    if (call.toolId === INVOKE_TOOL_ID) {
+    if (call.toolId === GATEWAY_SEARCH_ID) continue;
+    if (call.toolId === GATEWAY_INVOKE_ID) {
       const inner = call.args?.toolId;
       if (typeof inner !== "string") continue;
       const nested = call.args?.args;

@@ -5,10 +5,6 @@
 // of the codebase may still `import type` from it (types are erased, so they
 // cost nothing at runtime and keep call sites readable).
 //
-// Phase 1 resolves the plain `@ratel-ai/sdk` specifier only — the same module
-// the code imported directly before. Alias selection (`@ratel-ai/sdk-0.5.0`)
-// arrives with `--sdk-version`; `select()` is the seam it will use.
-
 import { createRequire } from "node:module";
 
 const requirePkg = createRequire(import.meta.url);
@@ -19,6 +15,8 @@ const requirePkg = createRequire(import.meta.url);
 export type SdkModule = typeof import("@ratel-ai/sdk");
 
 const DEFAULT_SPECIFIER = "@ratel-ai/sdk";
+export const GATEWAY_SEARCH_ID = "search_tools";
+export const GATEWAY_INVOKE_ID = "invoke_tool";
 
 let specifier = DEFAULT_SPECIFIER;
 let cached: Promise<SdkModule> | null = null;
@@ -59,6 +57,9 @@ export function selectVersion(version: string): void {
     select(DEFAULT_SPECIFIER);
     return;
   }
+  if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) {
+    throw new Error(`--sdk-version needs an exact release (got "${version}")`);
+  }
   const spec = `@ratel-ai/sdk-${version}`;
   try {
     requirePkg.resolve(`${spec}/package.json`);
@@ -67,6 +68,14 @@ export function selectVersion(version: string): void {
       `--sdk-version ${version}: no alias "${spec}" installed. Add it to agent/package.json ` +
         `as "${spec}": "npm:@ratel-ai/sdk@${version}" and run pnpm install, or pass ` +
         `--sdk-version local to use the default @ratel-ai/sdk dependency.`,
+    );
+  }
+  const declared = requirePkg("../../package.json") as {
+    dependencies: Record<string, string>;
+  };
+  if (declared.dependencies[spec] !== `npm:@ratel-ai/sdk@${version}`) {
+    throw new Error(
+      `--sdk-version ${version}: alias "${spec}" must pin npm:@ratel-ai/sdk@${version}`,
     );
   }
   select(spec);
@@ -78,14 +87,52 @@ export function selectVersion(version: string): void {
  * paths that shouldn't await a lookup this cheap.
  */
 export function sdkVersion(): string {
-  const pkg = requirePkg(`${specifier}/package.json`) as { version: string };
+  const pkg = requirePkg(`${specifier}/package.json`) as { name: string; version: string };
+  const requested = specifier.match(/^@ratel-ai\/sdk-(.+)$/)?.[1];
+  if (pkg.name !== "@ratel-ai/sdk" || (requested && pkg.version !== requested)) {
+    throw new Error(
+      `SDK identity mismatch: selected ${specifier}, loaded ${pkg.name}@${pkg.version}`,
+    );
+  }
   return pkg.version;
 }
 
 /** Load (and memoize) the selected SDK. */
 export function loadSdk(): Promise<SdkModule> {
-  if (!cached) cached = import(specifier);
+  if (!cached) {
+    sdkVersion();
+    cached = import(specifier).then((mod) => {
+      assertSdkApi(mod);
+      return mod;
+    });
+  }
   return cached;
+}
+
+/** Fail at campaign startup when a selected release cannot run benchmark catalogs. */
+export async function validateSdk(): Promise<void> {
+  await loadSdk();
+}
+
+export function assertSdkApi(mod: SdkModule): void {
+  const api = mod as unknown as Record<string, unknown>;
+  for (const name of ["ToolCatalog", "SkillCatalog", "searchToolsTool", "invokeToolTool"]) {
+    if (typeof api[name] !== "function") {
+      throw new Error(`unsupported SDK API in ${specifier}: missing ${name}`);
+    }
+  }
+  if (api.SEARCH_TOOLS_ID !== GATEWAY_SEARCH_ID || api.INVOKE_TOOL_ID !== GATEWAY_INVOKE_ID) {
+    throw new Error(`unsupported SDK API in ${specifier}: search_tools/invoke_tool ids changed`);
+  }
+  for (const name of ["ToolCatalog", "SkillCatalog"] as const) {
+    const proto = (api[name] as { prototype: Record<string, unknown> }).prototype;
+    if (
+      typeof proto?.register !== "function" ||
+      (typeof proto?.searchAsync !== "function" && typeof proto?.search !== "function")
+    ) {
+      throw new Error(`unsupported SDK API in ${specifier}: ${name} needs register and search`);
+    }
+  }
 }
 
 /**

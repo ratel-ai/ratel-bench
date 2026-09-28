@@ -42,7 +42,7 @@ import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
 import { judgeProgrammatic } from "./judges/programmatic.js";
 import { createBreaker, DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
-import { effectiveCalls, type PricingTable, SDK_VERSION } from "./metering.js";
+import { effectiveCalls, type PricingTable } from "./metering.js";
 import {
   cacheTier,
   guardResumeCaps,
@@ -71,6 +71,7 @@ import {
   runRounds,
   tallyRow,
 } from "./rerun.js";
+import { sdkVersion } from "./sdk/resolve.js";
 import type {
   AgentDescriptor,
   Arm,
@@ -695,7 +696,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     }
   }
 
-  const ratelVersion = config.ratelVersion ?? SDK_VERSION;
+  const ratelVersion = config.ratelVersion ?? sdkVersion();
   const rerun = config.rerun ?? DEFAULT_RERUN_SETTINGS;
   const logLevel = config.logLevel ?? "normal";
   // Resume: completed cells are skipped; rerunnable rows with attempts left re-run.

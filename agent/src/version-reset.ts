@@ -22,7 +22,9 @@ const BASELINE_DIR = resolveRepoPath(".version-set-baseline");
 
 function main(): void {
   if (!existsSync(BASELINE_DIR)) {
-    console.log("• version-reset: no active version-set (.version-set-baseline/ absent) — nothing to restore.");
+    console.log(
+      "• version-reset: no active version-set (.version-set-baseline/ absent) — nothing to restore.",
+    );
     return;
   }
 
@@ -31,7 +33,9 @@ function main(): void {
   rmSync(BASELINE_DIR, { recursive: true, force: true });
 
   const version = parseLockVersion(readFileSync(CARGO_LOCK, "utf-8"), CRATE) ?? "?";
-  console.log(`✓ version-reset: restored baseline (${CRATE} ${version}). Working tree is back to the committed dependency.`);
+  console.log(
+    `✓ version-reset: restored baseline (${CRATE} ${version}). Working tree is back to the committed dependency.`,
+  );
 }
 
 main();

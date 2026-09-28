@@ -46,6 +46,8 @@ export interface ParsedArgs {
   /** `--ratel-version V`: stamp (and resume) rows as version V instead of the
    * installed SDK's. Controls only — used to re-drain a label's controls. */
   ratelVersion?: string;
+  /** Exact installed SDK alias for this campaign; omitted uses the historical default. */
+  sdkVersion?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
@@ -158,6 +160,14 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
           throw new Error(`--ratel-version needs a version, e.g. 0.1.5 (got "${v}")`);
         }
         args.ratelVersion = v;
+        break;
+      }
+      case "--sdk-version": {
+        const v = next().trim();
+        if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(v)) {
+          throw new Error(`--sdk-version needs an exact release (got "${v}")`);
+        }
+        args.sdkVersion = v;
         break;
       }
       case "--scenarios":

@@ -62,7 +62,7 @@ function loadReport(path: string): Report | null {
 
 /** Sort version labels: 0.2.0 < 0.3.0-semantic.1 < 0.3.0-semantic.2 (numeric-aware). */
 function sortVersions(vs: string[]): string[] {
-  const parts = (v: string) => v.split(/[.\-]/).map((p) => (/^\d+$/.test(p) ? Number(p) : p));
+  const parts = (v: string) => v.split(/[.-]/).map((p) => (/^\d+$/.test(p) ? Number(p) : p));
   return [...vs].sort((a, b) => {
     const pa = parts(a);
     const pb = parts(b);
@@ -110,8 +110,11 @@ function compareBenchmark(
   if (versions.length === 0) return out.concat("_no versions in report_", "");
 
   const evalByVersion = new Map<string, Record<string, Bucket>>();
-  for (const v of versions) evalByVersion.set(v, report.ratel_versions[v].retriever_evaluation ?? {});
-  const buckets = sortBuckets([...new Set(versions.flatMap((v) => Object.keys(evalByVersion.get(v)!)))]);
+  for (const v of versions)
+    evalByVersion.set(v, report.ratel_versions[v].retriever_evaluation ?? {});
+  const buckets = sortBuckets([
+    ...new Set(versions.flatMap((v) => Object.keys(evalByVersion.get(v)!))),
+  ]);
 
   out.push(`_pool ${pool}, k ${k}_`, "");
 
@@ -123,7 +126,12 @@ function compareBenchmark(
   for (const { key, label } of METRICS) {
     const header = [rowLabel, "n", ...versions];
     if (showDelta) header.push(`Δ (${last}−${first})`);
-    const lines = [`### ${label}`, "", `| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
+    const lines = [
+      `### ${label}`,
+      "",
+      `| ${header.join(" | ")} |`,
+      `| ${header.map(() => "---").join(" | ")} |`,
+    ];
 
     let any = false;
     for (const bk of buckets) {
@@ -132,9 +140,10 @@ function compareBenchmark(
       any = true;
       // n shown per version only if they differ; else a single value.
       const ns = cells.map((c) => c?.n);
-      const nDisplay = new Set(ns.filter((x) => x !== undefined)).size <= 1
-        ? `${ns.find((x) => x !== undefined) ?? "—"}`
-        : versions.map((v, i) => `${v.split("-").pop()}:${ns[i] ?? "—"}`).join(" / ");
+      const nDisplay =
+        new Set(ns.filter((x) => x !== undefined)).size <= 1
+          ? `${ns.find((x) => x !== undefined) ?? "—"}`
+          : versions.map((v, i) => `${v.split("-").pop()}:${ns[i] ?? "—"}`).join(" / ");
       const row = [bk, nDisplay, ...cells.map((c) => f3(c?.[key] as number | undefined))];
       if (showDelta) {
         const a = cells[0]?.[key] as number | undefined;
@@ -149,7 +158,9 @@ function compareBenchmark(
   // Compact run-timestamp footer.
   out.push("### Run timestamps", "", `| version | timestamp |`, `| --- | --- |`);
   for (const v of versions) {
-    const ts = [...new Set(Object.values(evalByVersion.get(v)!).map((b) => b.timestamp))].filter(Boolean);
+    const ts = [...new Set(Object.values(evalByVersion.get(v)!).map((b) => b.timestamp))].filter(
+      Boolean,
+    );
     out.push(`| \`${v}\` | ${ts.join(", ") || "—"} |`);
   }
   out.push("");
