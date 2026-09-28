@@ -518,9 +518,16 @@ export function validateSuiteResult(raw: unknown): SuiteResult {
       result.budget.accounting !== "complete")
   )
     throw new Error("completed result lacks publishable coverage/accounting");
+  if (
+    result.status === "completed" &&
+    result.costs.rateSnapshotChecksum !== manifest.provenance.pricingChecksum
+  )
+    throw new Error("completed result rate snapshot checksum differs from frozen pricing checksum");
   if (result.budget.ceilingUsd !== manifest.request.campaignBudgetUsd)
     throw new Error("campaign budget differs from frozen request");
   if (result.budget.accounting === "complete") {
+    if (result.budget.reservedUsd !== 0)
+      throw new Error("complete budget accounting requires zero reserved spend");
     const { spentUsd, remainingUsd } = result.budget;
     const { currentProviderUsd } = result.costs;
     if (

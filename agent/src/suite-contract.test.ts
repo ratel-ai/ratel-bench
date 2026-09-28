@@ -456,6 +456,23 @@ describe("frozen suite manifest and public result v1", () => {
     expect(() => sealSuiteResult(body)).toThrow();
   });
 
+  it("rejects complete accounting with reserved spend", () => {
+    const body = completedFixtureBody();
+    body.budget.reservedUsd = 100;
+    body.budget.remainingUsd = 900;
+    expect(() => sealSuiteResult(body)).toThrow(
+      /complete budget accounting requires zero reserved spend/,
+    );
+  });
+
+  it("rejects a completed result with a rate snapshot from different frozen pricing", () => {
+    const body = completedFixtureBody();
+    body.costs.rateSnapshotChecksum = "sha256:different-prices";
+    expect(() => sealSuiteResult(body)).toThrow(
+      /completed result rate snapshot checksum differs from frozen pricing checksum/,
+    );
+  });
+
   it("checks encoded attachment size before spend and rejects oversized diagnostics", () => {
     const result = fixture("result-partial.json");
     expect(attachmentBytes(result)).toBeLessThan(20_000_000);
@@ -565,7 +582,7 @@ describe("frozen suite manifest and public result v1", () => {
         infrastructureIncluded: [escaped],
         infrastructureExcluded: [escaped],
         attempts: { billed: 0, unresolved: 0, usageUnknown: 0, failed: 0, retries: 0, judges: 0 },
-        rateSnapshotChecksum: "x".repeat(128),
+        rateSnapshotChecksum: manifest.provenance.pricingChecksum,
         rateSnapshot: maxModels.map((model) => ({
           model,
           provider: "bedrock",
