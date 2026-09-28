@@ -45,9 +45,11 @@ recipient; recipients stay outside the public artifact.
 The frozen manifest includes one stable compatible SDK/core pair, all three
 retrievers (BM25, dense, hybrid), the fixed BFCL/SR scenario and arm design,
 immutable source and corpus provenance, and unique expected work-unit keys.
-The public result contains coverage, bounded reports, errors, timing, provider
-and infrastructure accounting, and a checksum. Attachment sizing includes
-base64 encoding and is checked before spend and again on the final JSON.
+The public result contains one reconciled stage for every requested model,
+benchmark and retriever, bounded reports and diagnostics, timing, provider and
+infrastructure accounting, and a checksum. BM25 stages own the shared controls;
+dense and hybrid stages own their Ratel cells. Attachment sizing uses serialized
+JSON bytes plus base64 encoding and is checked before spend and on the final JSON.
 See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact work matrix.
 
 ## Corpora

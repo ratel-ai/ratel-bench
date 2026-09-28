@@ -10,12 +10,19 @@ import {
   normalizeSuiteRequest,
   resolveStablePair,
   sealSuiteResult,
+  suiteCoverageStages,
   suiteResultV1Schema,
   validateSuiteResult,
 } from "./suite-contract.js";
 
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(resolve(REPO_ROOT, "fixtures/suite", name), "utf8"));
+
+function fixtureBody(name = "result-partial.json"): Record<string, unknown> {
+  const result = structuredClone(fixture(name)) as Record<string, unknown>;
+  delete result.checksumSha256;
+  return result;
+}
 
 const releases = {
   sdk: [
@@ -86,6 +93,102 @@ describe("suite request contract v1", () => {
 });
 
 describe("frozen suite manifest and public result v1", () => {
+  it("rejects malformed nested manifests at the public sealing boundary", () => {
+    const invalid = [
+      (body: Record<string, unknown>) => {
+        const manifest = body.manifest as Record<string, unknown>;
+        (manifest.request as Record<string, unknown>).modelConcurrency = -2;
+      },
+      (body: Record<string, unknown>) => {
+        const manifest = body.manifest as Record<string, unknown>;
+        manifest.release = { sdk: {}, core: {} };
+        manifest.provenance = { corpusHashes: {} };
+      },
+      (body: Record<string, unknown>) => {
+        (body.manifest as Record<string, unknown>).publishable = "false";
+      },
+      (body: Record<string, unknown>) => {
+        const request = (body.manifest as Record<string, unknown>).request as Record<
+          string,
+          unknown
+        >;
+        const models = request.models as string[];
+        models.push(models[0]);
+      },
+    ];
+    for (const mutate of invalid) {
+      const body = fixtureBody();
+      mutate(body);
+      expect(() => sealSuiteResult(body as never)).toThrow();
+    }
+  });
+
+  it("applies the same bounds while constructing manifests before spend", () => {
+    const request = normalizeSuiteRequest({ schemaVersion: 1, runOnlyModels: ["bedrock/example"] });
+    const inputs = {
+      benchmarkSha: "a".repeat(40),
+      awsSha: "b".repeat(40),
+      imageDigest: `sha256:${"c".repeat(64)}`,
+      bfclScenarioIds: ["bfcl-1"],
+      srScenarioIds: ["sr-1"],
+      corpusHashes: { bfcl: "sha256:bfcl", sragents: "sha256:sr" },
+      catalogChecksum: "sha256:catalog",
+      pricingChecksum: "sha256:prices",
+      smoke: true,
+    };
+    expect(() =>
+      buildSuiteManifest({ ...request, modelConcurrency: -2 }, releases, inputs),
+    ).toThrow();
+    expect(() =>
+      buildSuiteManifest(
+        {
+          ...request,
+          excludedModels: Array.from({ length: 17 }, (_, i) => `bedrock/excluded-${i}`),
+        },
+        releases,
+        inputs,
+      ),
+    ).toThrow();
+    expect(() =>
+      buildSuiteManifest(request, releases, { ...inputs, catalogChecksum: "x".repeat(129) }),
+    ).toThrow();
+  });
+
+  it("rejects foreign, duplicate and inconsistent terminal stages", () => {
+    const body = fixtureBody();
+    const coverage = body.coverage as Record<string, unknown>;
+    coverage.stages = [
+      {
+        model: "x".repeat(2_000_000),
+        benchmark: "bfcl",
+        retriever: "bm25",
+        status: "completed",
+        completed: 999_999,
+        expected: 1,
+      },
+    ];
+    expect(() => sealSuiteResult(body as never)).toThrow();
+
+    const honest = fixtureBody();
+    const honestCoverage = honest.coverage as Record<string, unknown>;
+    const stages = honestCoverage.stages as Array<Record<string, unknown>>;
+    stages.push(structuredClone(stages[0]));
+    expect(() => sealSuiteResult(honest as never)).toThrow(/stage/i);
+
+    const wrongStatus = fixtureBody();
+    const wrongStatusStages = (wrongStatus.coverage as Record<string, unknown>).stages as Array<
+      Record<string, unknown>
+    >;
+    wrongStatusStages[0].status = "completed";
+    expect(() => sealSuiteResult(wrongStatus as never)).toThrow(/status/);
+
+    const wrongCount = fixtureBody();
+    const wrongCountStages = (wrongCount.coverage as Record<string, unknown>).stages as Array<
+      Record<string, unknown>
+    >;
+    wrongCountStages[0].expected = 1;
+    expect(() => sealSuiteResult(wrongCount as never)).toThrow(/counts/);
+  });
   it("freezes independently resolved latest stable compatible SDK/core and fixed design", () => {
     expect(resolveStablePair(releases)).toEqual({
       sdk: { version: "0.12.0", integrity: "sha512-sdk" },
@@ -156,12 +259,26 @@ describe("frozen suite manifest and public result v1", () => {
     ).toThrow();
   });
 
+  it("validates the completed synthetic fixture without making it publishable", () => {
+    const result = validateSuiteResult(fixture("result-completed.json"));
+    expect(result.status).toBe("completed");
+    expect(result.manifest.publishable).toBe(false);
+    expect(result.coverage.completed).toBe(result.coverage.expected);
+    expect(result.coverage.stages.every((stage) => stage.status === "completed")).toBe(true);
+    expect(result.reports).toHaveLength(12);
+    expect(result.costs.rateSnapshot).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("notifyToEmails");
+  });
+
   it("checks encoded attachment size before spend and rejects oversized diagnostics", () => {
     const result = fixture("result-partial.json");
     expect(attachmentBytes(result)).toBeLessThan(20_000_000);
     expect(() =>
       validateSuiteResult({ ...(result as object), diagnostics: ["x".repeat(9000)] }),
     ).toThrow();
+    const body = fixtureBody();
+    body.diagnostics = ["\0".repeat(100)];
+    expect(() => sealSuiteResult(body as never)).toThrow(/diagnostics/);
   });
 
   it("bounds the largest supported full campaign including reports and diagnostics", () => {
@@ -199,19 +316,95 @@ describe("frozen suite manifest and public result v1", () => {
     );
     expect(manifest.expectedWorkUnitKeys).toHaveLength(95_920 + 21_582);
     expect(() => assertAttachmentPreflight(manifest)).not.toThrow();
-    const groups = 16 * 2 * 3 + 2 * 3;
-    const worst = {
+    const dimensions = [null, ...maxModels].flatMap((model) =>
+      (["bfcl", "sragents"] as const).flatMap((benchmark) =>
+        (["bm25", "dense", "hybrid"] as const).map((retriever) => ({
+          model,
+          benchmark,
+          retriever,
+        })),
+      ),
+    );
+    const escaped = "\0💥".repeat(40);
+    const completed = sealSuiteResult({
+      schemaVersion: 1,
+      runId: "max-valid-envelope",
+      status: "completed",
       manifest,
-      completedKeys: manifest.expectedWorkUnitKeys,
-      reports: Array.from({ length: groups }, () => "x".repeat(32_768)),
-      diagnostics: Array.from({ length: groups * 8 }, () => "x".repeat(512)),
-      configurations: Array.from({ length: 16 }, () => "x".repeat(16_384)),
-      rates: Array.from({ length: 16 }, () => "x".repeat(16_384)),
-      usage: Array.from({ length: 16 }, () => "x".repeat(4096)),
-      errors: Array.from({ length: 128 }, () => "x".repeat(1024)),
-      infrastructure: "x".repeat(16_384),
-    };
-    expect(attachmentBytes(worst)).toBeLessThan(20_000_000);
+      resolvedModels: maxModels.map((id) => ({
+        id,
+        provider: "bedrock",
+        publisher: "P".repeat(128),
+        invocationId: "i".repeat(256),
+        endpoint: "e".repeat(256),
+        sourceRegion: "r".repeat(64),
+        adapter: "a".repeat(128),
+        outputLimit: 16_384,
+        capabilityProfile: { escaped: escaped.repeat(20) },
+      })),
+      coverage: {
+        expected: manifest.expectedWorkUnitKeys.length,
+        completed: manifest.expectedWorkUnitKeys.length,
+        failed: 0,
+        skipped: 0,
+        cancelled: 0,
+        completedKeys: manifest.expectedWorkUnitKeys,
+        stages: suiteCoverageStages(manifest, manifest.expectedWorkUnitKeys),
+      },
+      reports: dimensions.map((dimension) => ({
+        ...dimension,
+        payload: { escaped: escaped.repeat(17) },
+      })),
+      errors: [],
+      diagnostics: Array.from({ length: dimensions.length * 8 }, () => escaped),
+      timing: {
+        startedAt: "2026-09-28T00:00:00.000Z",
+        endedAt: "2026-09-28T00:00:01.000Z",
+        wallMs: 1000,
+        workerActiveMs: 900,
+        llmActiveMs: 800,
+      },
+      budget: {
+        scope: "model_api",
+        ceilingUsd: 1000,
+        spentUsd: 0,
+        reservedUsd: 0,
+        remainingUsd: 1000,
+        accounting: "complete",
+      },
+      costs: {
+        currentProviderUsd: 0,
+        historicalReusedUsd: 0,
+        infrastructureEstimateUsd: 0,
+        infrastructureIncluded: [escaped],
+        infrastructureExcluded: [escaped],
+        attempts: { billed: 0, unresolved: 0, usageUnknown: 0, failed: 0, retries: 0, judges: 0 },
+        rateSnapshotChecksum: "x".repeat(128),
+        rateSnapshot: maxModels.map((model) => ({
+          model,
+          provider: "bedrock",
+          api: "converse",
+          region: "eu-central-1",
+          contextTier: "standard",
+          inputPer1M: 1,
+          outputPer1M: 1,
+          cachedInputPer1M: 1,
+          cacheCreationPer1M: 1,
+        })),
+        usageByProvider: maxModels.map((model) => ({
+          model,
+          provider: "bedrock",
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          estimatedUsd: 0,
+          costSource: "estimate",
+        })),
+      },
+    });
+    expect(validateSuiteResult(completed).status).toBe("completed");
+    expect(attachmentBytes(completed)).toBeLessThan(18_000_000);
   });
 
   it("requires the fixed SR six-dataset stratification for a publishable campaign", () => {

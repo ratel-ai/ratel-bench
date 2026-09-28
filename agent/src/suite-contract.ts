@@ -8,10 +8,12 @@ export const SUITE_SCHEMA_VERSION = 1;
 export const MAX_SUITE_MODELS = 16;
 export const MAX_MODEL_CONCURRENCY = 16;
 export const MAX_ATTACHMENT_BYTES = 20_000_000;
-export const MAX_REPORT_BYTES = 32_768;
+export const MAX_REPORT_BYTES = 8_192;
 export const MAX_DIAGNOSTICS_PER_GROUP = 8;
 export const MAX_DIAGNOSTIC_BYTES = 512;
 export const MAX_CONFIGURATION_BYTES = 16_384;
+export const MAX_IDENTIFIER_BYTES = 256;
+export const MAX_STAGE_WORK_UNITS = 4_000;
 export const RETRIEVERS = ["bm25", "dense", "hybrid"] as const;
 export const ARMS = ["control-baseline", "control-oracle", "ratel-full"] as const;
 export const SR_DATASETS = [
@@ -47,6 +49,126 @@ const releaseMetadataSchema = z
     sdk: z.array(releaseSchema),
     core: z.array(releaseSchema),
     compatible: z.array(z.object({ sdk: z.string(), core: z.string() }).strict()),
+  })
+  .strict();
+
+const boundedText = (max: number) =>
+  z
+    .string()
+    .min(1)
+    .refine(
+      (value) => jsonBytes(value) <= max + 2,
+      `serialized string content exceeds ${max} byte budget`,
+    );
+const canonicalModelSchema = boundedText(MAX_IDENTIFIER_BYTES).refine((value) => {
+  try {
+    return canonicalModelId(value) === value;
+  } catch {
+    return false;
+  }
+}, "canonical provider-qualified model required");
+const uniqueModelsSchema = z
+  .array(canonicalModelSchema)
+  .min(1)
+  .max(MAX_SUITE_MODELS)
+  .refine((values) => new Set(values).size === values.length, "duplicate model identities");
+const boundedModelListSchema = z
+  .array(canonicalModelSchema)
+  .max(MAX_SUITE_MODELS)
+  .refine((values) => new Set(values).size === values.length, "duplicate model identities");
+const frozenRequestSchema = z
+  .object({
+    models: uniqueModelsSchema,
+    excludedModels: boundedModelListSchema,
+    unmatchedExclusions: boundedModelListSchema,
+    modelConcurrency: z.number().int().min(1).max(MAX_MODEL_CONCURRENCY),
+    campaignBudgetUsd: z.number().positive().finite(),
+  })
+  .strict();
+const stableReleaseSchema = z
+  .object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), integrity: boundedText(256) })
+  .strict();
+const stableCoreSchema = z
+  .object({ version: z.string().regex(/^\d+\.\d+\.\d+$/), checksum: boundedText(256) })
+  .strict();
+const fixedDesignSchema = z
+  .object({
+    bfclScenarios: z.literal(599),
+    srScenarios: z.literal(600),
+    srScenariosPerDataset: z.literal(100),
+    srDatasets: z.literal(6),
+    srDatasetNames: z.tuple([
+      z.literal("bigcodebench"),
+      z.literal("champ"),
+      z.literal("logicbench"),
+      z.literal("medcalcbench"),
+      z.literal("theoremqa"),
+      z.literal("toolqa"),
+    ]),
+    seed: z.literal(42),
+    repetitions: z.literal(1),
+    llmPool: z.literal(100),
+    llmTopK: z.literal(5),
+    retrievalPools: z
+      .object({
+        bfcl: z.tuple([z.literal(30), z.literal(100)]),
+        sragents: z.tuple([z.literal(50), z.literal(100)]),
+      })
+      .strict(),
+    retrievalTopK: z.tuple([z.literal(1), z.literal(3), z.literal(5)]),
+    arms: z.tuple([
+      z.literal("control-baseline"),
+      z.literal("control-oracle"),
+      z.literal("ratel-full"),
+    ]),
+  })
+  .strict();
+const suiteManifestV1Schema = z
+  .object({
+    schemaVersion: z.literal(1),
+    publishable: z.boolean(),
+    request: frozenRequestSchema,
+    release: z.object({ sdk: stableReleaseSchema, core: stableCoreSchema }).strict(),
+    retrievers: z.tuple([z.literal("bm25"), z.literal("dense"), z.literal("hybrid")]),
+    design: fixedDesignSchema,
+    scenarioIds: z
+      .object({
+        bfcl: z
+          .array(z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/))
+          .min(1)
+          .max(599),
+        sragents: z
+          .array(z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/))
+          .min(1)
+          .max(600),
+      })
+      .strict(),
+    srDatasetByScenario: z.array(z.enum(SR_DATASETS)).max(600),
+    expectedWorkUnitKeys: z.array(boundedText(128)).min(1).max(120_000),
+    provenance: z
+      .object({
+        benchmarkSha: z.string().regex(/^[0-9a-f]{40}$/),
+        awsSha: z.string().regex(/^[0-9a-f]{40}$/),
+        imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+        corpusHashes: z.object({ bfcl: boundedText(128), sragents: boundedText(128) }).strict(),
+        catalogChecksum: boundedText(128),
+        pricingChecksum: boundedText(128),
+      })
+      .strict(),
+  })
+  .strict();
+const suiteInputsSchema = z
+  .object({
+    benchmarkSha: z.string().regex(/^[0-9a-f]{40}$/),
+    awsSha: z.string().regex(/^[0-9a-f]{40}$/),
+    imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    bfclScenarioIds: z.array(z.string()).min(1).max(599),
+    srScenarioIds: z.array(z.string()).min(1).max(600),
+    srDatasetByScenario: z.array(z.string()).max(600).optional(),
+    corpusHashes: z.object({ bfcl: boundedText(128), sragents: boundedText(128) }).strict(),
+    catalogChecksum: boundedText(128),
+    pricingChecksum: boundedText(128),
+    smoke: z.boolean().optional(),
   })
   .strict();
 
@@ -143,10 +265,15 @@ export function buildSuiteManifest(
   releases: ReleaseMetadata,
   inputs: SuiteInputs,
 ) {
-  if (!/^[0-9a-f]{40}$/.test(inputs.benchmarkSha) || !/^[0-9a-f]{40}$/.test(inputs.awsSha))
-    throw new Error("exact benchmark and AWS SHAs required");
-  if (!/^sha256:[0-9a-f]{64}$/.test(inputs.imageDigest))
-    throw new Error("worker image digest required");
+  const parsedInputs = suiteInputsSchema.parse(inputs);
+  const frozenRequest = frozenRequestSchema.parse({
+    models: request.models,
+    excludedModels: request.excludedModels,
+    unmatchedExclusions: request.unmatchedExclusions,
+    modelConcurrency: request.modelConcurrency,
+    campaignBudgetUsd: request.campaignBudgetUsd,
+  });
+  inputs = parsedInputs;
   validateScenarioIds(inputs.bfclScenarioIds, 599, Boolean(inputs.smoke), "BFCL");
   validateScenarioIds(inputs.srScenarioIds, 600, Boolean(inputs.smoke), "SR-Agents");
   validateSrStratification(
@@ -160,7 +287,7 @@ export function buildSuiteManifest(
   )
     throw new Error("provenance configuration exceeds cap");
   const expectedWorkUnitKeys = expectedWorkUnitKeysFor(
-    request.models,
+    frozenRequest.models,
     inputs.bfclScenarioIds,
     inputs.srScenarioIds,
   );
@@ -168,11 +295,11 @@ export function buildSuiteManifest(
     schemaVersion: 1 as const,
     publishable: !inputs.smoke,
     request: {
-      models: [...request.models],
-      excludedModels: [...request.excludedModels],
-      unmatchedExclusions: [...request.unmatchedExclusions],
-      modelConcurrency: request.modelConcurrency,
-      campaignBudgetUsd: request.campaignBudgetUsd,
+      models: [...frozenRequest.models],
+      excludedModels: [...frozenRequest.excludedModels],
+      unmatchedExclusions: [...frozenRequest.unmatchedExclusions],
+      modelConcurrency: frozenRequest.modelConcurrency,
+      campaignBudgetUsd: frozenRequest.campaignBudgetUsd,
     },
     release: resolveStablePair(releases),
     retrievers: [...RETRIEVERS],
@@ -205,10 +332,22 @@ export function expectedWorkUnitKeys(
 const money = z.number().finite().nonnegative();
 const nullableMoney = money.nullable();
 const coverageStatus = z.enum(["completed", "failed", "skipped", "cancelled"]);
+const benchmarkSchema = z.enum(["bfcl", "sragents"]);
+const coverageStageSchema = z
+  .object({
+    model: canonicalModelSchema.nullable(),
+    benchmark: benchmarkSchema,
+    retriever: z.enum(RETRIEVERS),
+    status: coverageStatus,
+    completed: z.number().int().nonnegative().max(MAX_STAGE_WORK_UNITS),
+    expected: z.number().int().positive().max(MAX_STAGE_WORK_UNITS),
+  })
+  .strict();
+export type SuiteCoverageStage = z.infer<typeof coverageStageSchema>;
 const reportSchema = z
   .object({
-    model: z.string().nullable(),
-    benchmark: z.enum(["bfcl", "sragents"]),
+    model: canonicalModelSchema.nullable(),
+    benchmark: benchmarkSchema,
     retriever: z.enum(RETRIEVERS),
     payload: z.record(z.unknown()),
   })
@@ -216,7 +355,7 @@ const reportSchema = z
 export const suiteResultV1Schema = z
   .object({
     schemaVersion: z.literal(1),
-    runId: z.string().min(1).max(128),
+    runId: boundedText(128),
     status: z.enum(["completed", "partial", "failed", "cancelled", "budget_limited"]),
     manifest: z.custom<SuiteManifest>((value) => {
       try {
@@ -229,13 +368,13 @@ export const suiteResultV1Schema = z
     resolvedModels: z.array(
       z
         .object({
-          id: z.string(),
-          provider: z.string(),
-          publisher: z.string(),
-          invocationId: z.string(),
-          endpoint: z.string(),
-          sourceRegion: z.string(),
-          adapter: z.string(),
+          id: canonicalModelSchema,
+          provider: boundedText(64),
+          publisher: boundedText(128),
+          invocationId: boundedText(256),
+          endpoint: boundedText(256),
+          sourceRegion: boundedText(64),
+          adapter: boundedText(128),
           outputLimit: z.number().int().positive(),
           capabilityProfile: z.record(z.unknown()),
         })
@@ -249,25 +388,20 @@ export const suiteResultV1Schema = z
         skipped: z.number().int().nonnegative(),
         cancelled: z.number().int().nonnegative(),
         completedKeys: z.array(z.string()),
-        stages: z.array(
-          z
-            .object({
-              model: z.string().nullable(),
-              benchmark: z.enum(["bfcl", "sragents"]),
-              retriever: z.enum(RETRIEVERS),
-              status: coverageStatus,
-              completed: z.number().int().nonnegative(),
-              expected: z.number().int().nonnegative(),
-            })
-            .strict(),
-        ),
+        stages: z.array(coverageStageSchema),
       })
       .strict(),
     reports: z.array(reportSchema),
     errors: z.array(
-      z.object({ stage: z.string(), model: z.string().nullable(), message: z.string() }).strict(),
+      z
+        .object({
+          stage: boundedText(256),
+          model: canonicalModelSchema.nullable(),
+          message: z.string().max(1024),
+        })
+        .strict(),
     ),
-    diagnostics: z.array(z.string()),
+    diagnostics: z.array(z.string().max(MAX_DIAGNOSTIC_BYTES)),
     timing: z
       .object({
         startedAt: z.string().datetime(),
@@ -292,8 +426,8 @@ export const suiteResultV1Schema = z
         currentProviderUsd: nullableMoney,
         historicalReusedUsd: nullableMoney,
         infrastructureEstimateUsd: nullableMoney,
-        infrastructureIncluded: z.array(z.string()),
-        infrastructureExcluded: z.array(z.string()),
+        infrastructureIncluded: z.array(boundedText(512)).max(32),
+        infrastructureExcluded: z.array(boundedText(512)).max(32),
         attempts: z
           .object({
             billed: z.number().int().nonnegative(),
@@ -304,15 +438,15 @@ export const suiteResultV1Schema = z
             judges: z.number().int().nonnegative(),
           })
           .strict(),
-        rateSnapshotChecksum: z.string(),
+        rateSnapshotChecksum: boundedText(128),
         rateSnapshot: z.array(
           z
             .object({
-              model: z.string(),
-              provider: z.string(),
-              api: z.string(),
-              region: z.string(),
-              contextTier: z.string(),
+              model: canonicalModelSchema,
+              provider: boundedText(64),
+              api: boundedText(64),
+              region: boundedText(64),
+              contextTier: boundedText(64),
               inputPer1M: money,
               outputPer1M: money,
               cachedInputPer1M: money,
@@ -323,8 +457,8 @@ export const suiteResultV1Schema = z
         usageByProvider: z.array(
           z
             .object({
-              model: z.string(),
-              provider: z.string(),
+              model: canonicalModelSchema,
+              provider: boundedText(64),
               inputTokens: z.number().int().nonnegative().nullable(),
               outputTokens: z.number().int().nonnegative().nullable(),
               cachedInputTokens: z.number().int().nonnegative().nullable(),
@@ -375,10 +509,10 @@ export function validateSuiteResult(raw: unknown): SuiteResult {
       result.coverage.expected
   )
     throw new Error("coverage does not reconcile");
+  validateCoverageStages(manifest, result.coverage, completed);
   if (
     result.status === "completed" &&
-    (!manifest.publishable ||
-      result.coverage.completed !== result.coverage.expected ||
+    (result.coverage.completed !== result.coverage.expected ||
       result.budget.accounting !== "complete")
   )
     throw new Error("completed result lacks publishable coverage/accounting");
@@ -448,7 +582,7 @@ export function validateSuiteResult(raw: unknown): SuiteResult {
   if (
     result.diagnostics.length >
       MAX_DIAGNOSTICS_PER_GROUP * (manifest.request.models.length + 1) * 2 * RETRIEVERS.length ||
-    result.diagnostics.some((value) => Buffer.byteLength(value) > MAX_DIAGNOSTIC_BYTES)
+    result.diagnostics.some((value) => jsonBytes(value) > MAX_DIAGNOSTIC_BYTES)
   )
     throw new Error("diagnostics exceed cap");
   const { checksumSha256: _checksum, ...body } = result;
@@ -478,8 +612,16 @@ export function assertAttachmentPreflight(manifest: SuiteManifest): void {
   const completedKeys = jsonBytes(manifest.expectedWorkUnitKeys);
   const configurations = manifest.request.models.length * (2 * MAX_CONFIGURATION_BYTES + 4096);
   const errors = 128 * (1024 + 100);
+  const stages = reportSlots * (MAX_IDENTIFIER_BYTES + 192);
   const body =
-    jsonBytes(manifest) + completedKeys + reports + diagnostics + configurations + errors + 81_920;
+    jsonBytes(manifest) +
+    completedKeys +
+    reports +
+    diagnostics +
+    configurations +
+    errors +
+    stages +
+    81_920;
   if (4 * Math.ceil(body / 3) + 1024 > MAX_ATTACHMENT_BYTES)
     throw new Error("suite exceeds encoded attachment budget before spend");
 }
@@ -506,54 +648,15 @@ function fixedDesign() {
   };
 }
 
-function validateManifest(manifest: SuiteManifest): void {
-  if (
-    !manifest ||
-    manifest.schemaVersion !== 1 ||
-    !manifest.request ||
-    !manifest.release ||
-    !manifest.scenarioIds ||
-    !manifest.provenance
-  )
-    throw new Error("invalid suite manifest");
-  assertOnlyKeys(manifest, [
-    "schemaVersion",
-    "publishable",
-    "request",
-    "release",
-    "retrievers",
-    "design",
-    "scenarioIds",
-    "srDatasetByScenario",
-    "expectedWorkUnitKeys",
-    "provenance",
-  ]);
-  assertOnlyKeys(manifest.request, [
-    "models",
-    "excludedModels",
-    "unmatchedExclusions",
-    "modelConcurrency",
-    "campaignBudgetUsd",
-  ]);
-  assertOnlyKeys(manifest.release, ["sdk", "core"]);
-  assertOnlyKeys(manifest.release.sdk, ["version", "integrity"]);
-  assertOnlyKeys(manifest.release.core, ["version", "checksum"]);
-  assertOnlyKeys(manifest.scenarioIds, ["bfcl", "sragents"]);
-  assertOnlyKeys(manifest.provenance, [
-    "benchmarkSha",
-    "awsSha",
-    "imageDigest",
-    "corpusHashes",
-    "catalogChecksum",
-    "pricingChecksum",
-  ]);
-  assertOnlyKeys(manifest.provenance.corpusHashes, ["bfcl", "sragents"]);
-  if (
-    manifest.request.models.length < 1 ||
-    manifest.request.models.length > MAX_SUITE_MODELS ||
-    manifest.request.models.some((model) => Buffer.byteLength(model) > 256)
-  )
-    throw new Error("manifest model configuration exceeds cap");
+function validateManifest(raw: unknown): asserts raw is SuiteManifest {
+  const manifest = suiteManifestV1Schema.parse(raw);
+  const allModels = [
+    ...manifest.request.models,
+    ...manifest.request.excludedModels,
+    ...manifest.request.unmatchedExclusions,
+  ];
+  if (new Set(allModels).size !== allModels.length)
+    throw new Error("manifest model selections and exclusions overlap");
   if (
     JSON.stringify(manifest.design) !== JSON.stringify(fixedDesign()) ||
     JSON.stringify(manifest.retrievers) !== JSON.stringify(RETRIEVERS)
@@ -580,9 +683,93 @@ function validateManifest(manifest: SuiteManifest): void {
     throw new Error("expected work-unit keys do not match frozen design");
 }
 
-function assertOnlyKeys(value: object, allowed: string[]): void {
-  const extra = Object.keys(value).find((key) => !allowed.includes(key));
-  if (extra) throw new Error(`private or unsupported suite field: ${extra}`);
+/** Build the terminal stage recap. BM25 owns the once-per-model reused controls. */
+export function suiteCoverageStages(
+  manifest: SuiteManifest,
+  completedKeys: readonly string[],
+  incompleteStatus: Exclude<SuiteCoverageStage["status"], "completed"> = "skipped",
+): SuiteCoverageStage[] {
+  validateManifest(manifest);
+  const completed = new Set(completedKeys);
+  if (completed.size !== completedKeys.length)
+    throw new Error("duplicate completed work-unit keys");
+  const expectedKeys = new Set(manifest.expectedWorkUnitKeys);
+  if ([...completed].some((key) => !expectedKeys.has(key)))
+    throw new Error("completed work-unit key is outside the manifest");
+  const stages = expectedStageKeys(manifest);
+  return [...stages.entries()].map(([dimension, keys]) => {
+    const [model, benchmark, retriever] = JSON.parse(dimension) as [
+      string | null,
+      "bfcl" | "sragents",
+      Retriever,
+    ];
+    const count = keys.reduce((sum, key) => sum + Number(completed.has(key)), 0);
+    return {
+      model,
+      benchmark,
+      retriever,
+      status: count === keys.length ? "completed" : incompleteStatus,
+      completed: count,
+      expected: keys.length,
+    };
+  });
+}
+
+function validateCoverageStages(
+  manifest: SuiteManifest,
+  coverage: SuiteResult["coverage"],
+  completedKeys: ReadonlySet<string>,
+): void {
+  const expected = expectedStageKeys(manifest);
+  const seen = new Set<string>();
+  const remainder = { failed: 0, skipped: 0, cancelled: 0 };
+  for (const stage of coverage.stages) {
+    const dimension = stageDimension(stage.model, stage.benchmark, stage.retriever);
+    const keys = expected.get(dimension);
+    if (!keys || seen.has(dimension)) throw new Error("foreign or duplicate coverage stage");
+    seen.add(dimension);
+    const completed = keys.reduce((sum, key) => sum + Number(completedKeys.has(key)), 0);
+    if (stage.expected !== keys.length || stage.completed !== completed)
+      throw new Error("coverage stage counts do not match semantic work keys");
+    if ((stage.status === "completed") !== (completed === keys.length))
+      throw new Error("coverage stage status does not match completion");
+    if (stage.status !== "completed") remainder[stage.status] += keys.length - completed;
+  }
+  if (seen.size !== expected.size) throw new Error("coverage omits requested stages");
+  if (
+    remainder.failed !== coverage.failed ||
+    remainder.skipped !== coverage.skipped ||
+    remainder.cancelled !== coverage.cancelled
+  )
+    throw new Error("terminal coverage is inconsistent with stage statuses");
+}
+
+function expectedStageKeys(manifest: SuiteManifest): Map<string, string[]> {
+  const stages = new Map<string, string[]>();
+  for (const key of manifest.expectedWorkUnitKeys) {
+    const parts = key.split("|");
+    const benchmark = parts[1] as "bfcl" | "sragents";
+    const retriever =
+      parts[0] === "R"
+        ? (parts[4] as Retriever)
+        : parts[6] === "-"
+          ? "bm25"
+          : (parts[6] as Retriever);
+    const model = parts[0] === "R" ? null : manifest.request.models[Number(parts[3])];
+    const dimension = stageDimension(model, benchmark, retriever);
+    const keys = stages.get(dimension) ?? [];
+    keys.push(key);
+    stages.set(dimension, keys);
+  }
+  return stages;
+}
+
+function stageDimension(
+  model: string | null,
+  benchmark: "bfcl" | "sragents",
+  retriever: Retriever,
+): string {
+  return JSON.stringify([model, benchmark, retriever]);
 }
 
 function stableVersion(version: string): boolean {

@@ -165,8 +165,96 @@
         "model": null,
         "benchmark": "bfcl",
         "retriever": "bm25",
-        "status": "completed",
+        "status": "skipped",
         "completed": 1,
+        "expected": 6
+      },
+      {
+        "model": null,
+        "benchmark": "bfcl",
+        "retriever": "dense",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 6
+      },
+      {
+        "model": null,
+        "benchmark": "bfcl",
+        "retriever": "hybrid",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 6
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "bfcl",
+        "retriever": "bm25",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 3
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "bfcl",
+        "retriever": "dense",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 1
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "bfcl",
+        "retriever": "hybrid",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 1
+      },
+      {
+        "model": null,
+        "benchmark": "sragents",
+        "retriever": "bm25",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 6
+      },
+      {
+        "model": null,
+        "benchmark": "sragents",
+        "retriever": "dense",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 6
+      },
+      {
+        "model": null,
+        "benchmark": "sragents",
+        "retriever": "hybrid",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 6
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "sragents",
+        "retriever": "bm25",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 3
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "sragents",
+        "retriever": "dense",
+        "status": "skipped",
+        "completed": 0,
+        "expected": 1
+      },
+      {
+        "model": "bedrock/openai.gpt-6-astra",
+        "benchmark": "sragents",
+        "retriever": "hybrid",
+        "status": "skipped",
+        "completed": 0,
         "expected": 1
       }
     ]
@@ -222,5 +310,5 @@
     "rateSnapshot": [],
     "usageByProvider": []
   },
-  "checksumSha256": "de67de8bf20b2c6c46405b70081e1b3be946195019fed7ce8c000c18b1d612dc"
+  "checksumSha256": "64412559767ecfe46527d29bc4d34da3e5cbb3ab0121721bb5b557c105241158"
 }
