@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
+import type { SuiteResult } from "./suite-contract.js";
 import {
   assertAttachmentPreflight,
   attachmentBytes,
@@ -15,6 +16,8 @@ import {
   validateSuiteResult,
 } from "./suite-contract.js";
 
+type SuiteResultBody = Omit<SuiteResult, "checksumSha256">;
+
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(resolve(REPO_ROOT, "fixtures/suite", name), "utf8"));
 
@@ -22,6 +25,20 @@ function fixtureBody(name = "result-partial.json"): Record<string, unknown> {
   const result = structuredClone(fixture(name)) as Record<string, unknown>;
   delete result.checksumSha256;
   return result;
+}
+
+function completedFixtureBody(): SuiteResultBody {
+  return fixtureBody("result-completed.json") as SuiteResultBody;
+}
+
+function first<T>(values: readonly T[]): T {
+  const value = values[0];
+  if (value === undefined) throw new Error("fixture must contain a row");
+  return value;
+}
+
+function partialFixtureBody(): SuiteResultBody {
+  return fixtureBody() as SuiteResultBody;
 }
 
 const releases = {
@@ -268,6 +285,175 @@ describe("frozen suite manifest and public result v1", () => {
     expect(result.reports).toHaveLength(12);
     expect(result.costs.rateSnapshot).toHaveLength(1);
     expect(JSON.stringify(result)).not.toContain("notifyToEmails");
+  });
+
+  it.each([
+    {
+      artifact: "resolved models",
+      mutation: "duplicate model row",
+      mutate: (body: SuiteResultBody) => {
+        body.resolvedModels.push(structuredClone(first(body.resolvedModels)));
+      },
+    },
+    {
+      artifact: "resolved models",
+      mutation: "omitted model row",
+      mutate: (body: SuiteResultBody) => {
+        body.resolvedModels = [];
+      },
+    },
+    {
+      artifact: "resolved models",
+      mutation: "foreign model row",
+      mutate: (body: SuiteResultBody) => {
+        const model = first(body.resolvedModels);
+        model.id = "openai/foreign";
+        model.provider = "openai";
+      },
+    },
+    {
+      artifact: "resolved models",
+      mutation: "provider-prefix mismatch",
+      mutate: (body: SuiteResultBody) => {
+        first(body.resolvedModels).provider = "wrong-provider";
+      },
+    },
+    {
+      artifact: "rate snapshot",
+      mutation: "duplicate model row",
+      mutate: (body: SuiteResultBody) => {
+        body.costs.rateSnapshot.push(structuredClone(first(body.costs.rateSnapshot)));
+      },
+    },
+    {
+      artifact: "rate snapshot",
+      mutation: "omitted model row",
+      mutate: (body: SuiteResultBody) => {
+        body.costs.rateSnapshot = [];
+      },
+    },
+    {
+      artifact: "rate snapshot",
+      mutation: "foreign model row",
+      mutate: (body: SuiteResultBody) => {
+        const rate = first(body.costs.rateSnapshot);
+        rate.model = "openai/foreign";
+        rate.provider = "openai";
+      },
+    },
+    {
+      artifact: "rate snapshot",
+      mutation: "provider-prefix mismatch",
+      mutate: (body: SuiteResultBody) => {
+        first(body.costs.rateSnapshot).provider = "wrong-provider";
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "duplicate model row",
+      mutate: (body: SuiteResultBody) => {
+        body.costs.usageByProvider.push(structuredClone(first(body.costs.usageByProvider)));
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "omitted model row",
+      mutate: (body: SuiteResultBody) => {
+        body.costs.usageByProvider = [];
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "foreign model row",
+      mutate: (body: SuiteResultBody) => {
+        const usage = first(body.costs.usageByProvider);
+        usage.model = "openai/foreign";
+        usage.provider = "openai";
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "provider-prefix mismatch",
+      mutate: (body: SuiteResultBody) => {
+        first(body.costs.usageByProvider).provider = "wrong-provider";
+      },
+    },
+  ])("rejects completed $artifact with a $mutation", ({ mutate }) => {
+    const body = completedFixtureBody();
+    mutate(body);
+    expect(() => sealSuiteResult(body)).toThrow();
+  });
+
+  it.each([
+    {
+      artifact: "rate snapshot",
+      mutation: "duplicate model row",
+      mutate: (body: SuiteResultBody, completed: SuiteResultBody) => {
+        const row = first(completed.costs.rateSnapshot);
+        body.costs.rateSnapshot = [row, structuredClone(row)];
+      },
+    },
+    {
+      artifact: "rate snapshot",
+      mutation: "foreign model row",
+      mutate: (body: SuiteResultBody, completed: SuiteResultBody) => {
+        body.costs.rateSnapshot = [
+          { ...first(completed.costs.rateSnapshot), model: "openai/foreign", provider: "openai" },
+        ];
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "duplicate model row",
+      mutate: (body: SuiteResultBody, completed: SuiteResultBody) => {
+        const row = first(completed.costs.usageByProvider);
+        body.costs.usageByProvider = [row, structuredClone(row)];
+      },
+    },
+    {
+      artifact: "provider usage",
+      mutation: "foreign model row",
+      mutate: (body: SuiteResultBody, completed: SuiteResultBody) => {
+        body.costs.usageByProvider = [
+          {
+            ...first(completed.costs.usageByProvider),
+            model: "openai/foreign",
+            provider: "openai",
+          },
+        ];
+      },
+    },
+  ])("rejects partial $artifact with a $mutation", ({ mutate }) => {
+    const body = partialFixtureBody();
+    mutate(body, completedFixtureBody());
+    expect(() => sealSuiteResult(body)).toThrow();
+  });
+
+  it("allows partial results to omit rate and usage rows", () => {
+    const body = partialFixtureBody();
+    body.costs.rateSnapshot = [];
+    body.costs.usageByProvider = [];
+    expect(() => sealSuiteResult(body)).not.toThrow();
+  });
+
+  it.each([
+    {
+      condition: "missing current-provider cost",
+      mutate: (body: SuiteResultBody) => {
+        body.costs.currentProviderUsd = null;
+      },
+    },
+    {
+      condition: "provider cost conflicting with budget spend",
+      mutate: (body: SuiteResultBody) => {
+        body.budget.spentUsd = 123;
+        body.budget.remainingUsd = 877;
+      },
+    },
+  ])("rejects complete accounting with $condition", ({ mutate }) => {
+    const body = completedFixtureBody();
+    mutate(body);
+    expect(() => sealSuiteResult(body)).toThrow();
   });
 
   it("checks encoded attachment size before spend and rejects oversized diagnostics", () => {

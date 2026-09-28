@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { DEFAULT_BFCL_MODELS } from "./model-defaults.js";
-import { canonicalModelId } from "./model-identity.js";
+import { canonicalModelId, parseModelIdentity } from "./model-identity.js";
 
 export const SUITE_SCHEMA_VERSION = 1;
 export const MAX_SUITE_MODELS = 16;
@@ -474,6 +474,7 @@ export const suiteResultV1Schema = z
   })
   .strict();
 export type SuiteResult = z.infer<typeof suiteResultV1Schema>;
+type ModelProviderRow = { model: string; provider: string };
 
 /** Validate the exact public envelope consumed by finalizer, mailer and website importer. */
 export function validateSuiteResult(raw: unknown): SuiteResult {
@@ -482,11 +483,12 @@ export function validateSuiteResult(raw: unknown): SuiteResult {
   validateManifest(manifest);
   if (JSON.stringify(manifest).includes("notifyToEmails"))
     throw new Error("private recipients in public manifest");
-  if (
-    result.resolvedModels.length !== manifest.request.models.length ||
-    result.resolvedModels.some((model, index) => model.id !== manifest.request.models[index])
-  )
-    throw new Error("resolved models do not match request");
+  validateModelProviderMap(
+    manifest.request.models,
+    result.resolvedModels.map(({ id, provider }) => ({ model: id, provider })),
+    "resolved models",
+    true,
+  );
   if (result.resolvedModels.some((model) => jsonBytes(model) > MAX_CONFIGURATION_BYTES))
     throw new Error("model capability configuration exceeds cap");
   if (result.coverage.expected !== manifest.expectedWorkUnitKeys.length)
@@ -519,36 +521,39 @@ export function validateSuiteResult(raw: unknown): SuiteResult {
   if (result.budget.ceilingUsd !== manifest.request.campaignBudgetUsd)
     throw new Error("campaign budget differs from frozen request");
   if (result.budget.accounting === "complete") {
+    const { spentUsd, remainingUsd } = result.budget;
+    const { currentProviderUsd } = result.costs;
     if (
-      result.budget.spentUsd === null ||
-      result.budget.remainingUsd === null ||
+      spentUsd === null ||
+      remainingUsd === null ||
+      currentProviderUsd === null ||
       result.costs.attempts.unresolved > 0 ||
       result.costs.attempts.usageUnknown > 0
     )
       throw new Error("complete budget accounting has unresolved spend");
     if (
-      Math.abs(
-        result.budget.ceilingUsd -
-          result.budget.spentUsd -
-          result.budget.reservedUsd -
-          result.budget.remainingUsd,
-      ) > 0.000001
+      Math.abs(result.budget.ceilingUsd - spentUsd - result.budget.reservedUsd - remainingUsd) >
+      0.000001
     )
       throw new Error("campaign budget does not reconcile");
+    if (Math.abs(spentUsd - currentProviderUsd) > 0.000001)
+      throw new Error("provider cost does not reconcile with campaign spend");
   }
   const elapsed = Date.parse(result.timing.endedAt) - Date.parse(result.timing.startedAt);
   if (elapsed < 0 || elapsed !== result.timing.wallMs)
     throw new Error("campaign wall time does not reconcile");
-  if (
-    result.costs.rateSnapshot.length > manifest.request.models.length ||
-    result.costs.usageByProvider.length > manifest.request.models.length
-  )
-    throw new Error("cost snapshot exceeds selected models");
-  if (
-    result.status === "completed" &&
-    result.costs.rateSnapshot.length !== manifest.request.models.length
-  )
-    throw new Error("publishable result needs selected-model price snapshots");
+  validateModelProviderMap(
+    manifest.request.models,
+    result.costs.rateSnapshot,
+    "rate snapshot",
+    result.status === "completed",
+  );
+  validateModelProviderMap(
+    manifest.request.models,
+    result.costs.usageByProvider,
+    "provider usage",
+    result.status === "completed",
+  );
   if (
     result.costs.rateSnapshot.some((rate) => jsonBytes(rate) > MAX_CONFIGURATION_BYTES) ||
     result.costs.usageByProvider.some((usage) => jsonBytes(usage) > 4096)
@@ -629,6 +634,27 @@ export function assertAttachmentPreflight(manifest: SuiteManifest): void {
 function parseModels(raw: string[] | string): string[] {
   const values = typeof raw === "string" ? raw.split(",") : raw;
   return [...new Set(values.map((value) => canonicalModelId(value.trim())))];
+}
+
+function validateModelProviderMap(
+  selectedModels: readonly string[],
+  rows: readonly ModelProviderRow[],
+  artifact: string,
+  requireExact: boolean,
+): void {
+  for (const row of rows) {
+    const identity = parseModelIdentity(row.model);
+    if (identity.kind === "provider" && row.provider !== identity.provider)
+      throw new Error(`${artifact} provider does not match model identity`);
+  }
+  const selected = new Set(selectedModels);
+  const found = new Set(rows.map((row) => row.model));
+  if (
+    found.size !== rows.length ||
+    [...found].some((model) => !selected.has(model)) ||
+    (requireExact && found.size !== selected.size)
+  )
+    throw new Error(`${artifact} does not uniquely match selected models`);
 }
 
 function fixedDesign() {
