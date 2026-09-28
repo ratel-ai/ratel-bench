@@ -1,7 +1,27 @@
 # Ratel Benchmark — Experiment Design & Commands
 
-**This is fixed. It does not change between versions.** Only the retriever (the Ratel
-version) changes; the pools, k-values, arms, scenarios, and LLM-eval setup are constant.
+**The publishable suite design is fixed.** The pools, k-values, arms, scenarios,
+seed, and LLM-eval setup do not change between campaigns. A campaign freezes one
+latest stable compatible SDK/core release pair at submission and runs BM25
+(`sparse`), dense (`semantic`), and hybrid against that pair. Historical labels
+and commands below remain available for comparison; they are not additional
+versions in a full campaign.
+
+The v1 suite contract lives in `agent/src/suite-contract.ts`, with shared JSON
+fixtures in `fixtures/suite/`. `models.json` `run[]` is the ordered 16-model
+Bedrock default. The request's `runOnlyModels` replaces it; `excludeModels`
+then removes canonical IDs. The default model concurrency is one and the
+aggregate model/API budget is $1,000. Notification recipients are private
+request data and never enter the public manifest or result.
+
+The fixed work plan has 599 BFCL and a seed-42, six-dataset stratified 600
+SR-Agents scenarios (100 per dataset), one repetition, LLM pool 100, top-k 5,
+and baseline/oracle/Ratel arms. Controls run once per model/scenario and are
+reused across retrievers; Ratel cells run once per retriever. The 16-model
+default has 95,920 distinct LLM cells and 21,582 model-free retrieval cells
+(pools BFCL 30/100, SR-Agents 50/100; k 1/3/5). The manifest freezes semantic
+work-unit keys over the version pair, benchmark, scenario, model, arm, method,
+pool and k. A smoke scenario cap makes the manifest non-publishable.
 
 ## ⚠️ RULES — always apply (these cost real money / comparability if forgotten)
 1. **`control-baseline` and `control-oracle` are reused from cache automatically — never re-run.**

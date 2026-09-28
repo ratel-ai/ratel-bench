@@ -61,6 +61,11 @@ CLAUDE.local.md
 /results/reports/mcpatlas/*
 !/results/reports/mcpatlas/report.json
 fixtures/*
+# Versioned suite contracts are shared with the producer and website importer.
+!fixtures/suite/
+fixtures/suite/*
+!fixtures/suite/request-default.json
+!fixtures/suite/result-partial.json
 # The mcpatlas experiment DEFINITION is version-controlled: the pinned task list
 # and the catalog manifests are what make a run reproducible. The raw dataset
 # rows they are derived from are not (56MB, and re-downloadable).
