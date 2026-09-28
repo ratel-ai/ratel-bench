@@ -218,7 +218,14 @@ export const suiteResultV1Schema = z
     schemaVersion: z.literal(1),
     runId: z.string().min(1).max(128),
     status: z.enum(["completed", "partial", "failed", "cancelled", "budget_limited"]),
-    manifest: z.custom<SuiteManifest>((value) => typeof value === "object" && value !== null),
+    manifest: z.custom<SuiteManifest>((value) => {
+      try {
+        validateManifest(value as SuiteManifest);
+        return true;
+      } catch {
+        return false;
+      }
+    }),
     resolvedModels: z.array(
       z
         .object({

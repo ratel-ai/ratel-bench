@@ -10,6 +10,7 @@ import {
   normalizeSuiteRequest,
   resolveStablePair,
   sealSuiteResult,
+  suiteResultV1Schema,
   validateSuiteResult,
 } from "./suite-contract.js";
 
@@ -261,6 +262,9 @@ describe("frozen suite manifest and public result v1", () => {
         request: { ...result.manifest.request, secretReferences: { mail: "private" } },
       },
     };
+    expect(
+      suiteResultV1Schema.safeParse({ ...leaked, checksumSha256: result.checksumSha256 }).success,
+    ).toBe(false);
     expect(() => sealSuiteResult(leaked)).toThrow();
   });
 
