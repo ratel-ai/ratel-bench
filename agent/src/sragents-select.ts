@@ -21,8 +21,6 @@
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, type LanguageModelUsage, NoObjectGeneratedError, RetryError } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
@@ -62,8 +60,9 @@ import { loadModelPricing } from "./pricing.js";
 const PRICING = loadModelPricing();
 
 import { DEFAULT_SRAGENTS_MODEL } from "./model-defaults.js";
-import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
-import { canonicalModelList, parseModelIdentity } from "./model-identity.js";
+import { warmUpModels } from "./model-endpoint.js";
+import { resolveModel } from "./model-factory.js";
+import { canonicalModelList } from "./model-identity.js";
 import { resolveRepoPath } from "./paths.js";
 import { parseTimerMs } from "./positive-int.js";
 import {
@@ -90,7 +89,7 @@ import {
   tallyRow,
 } from "./rerun.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
-import type { ResolvedModel, RunnerModel } from "./types.js";
+import type { RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
@@ -114,37 +113,6 @@ const SR_RERUN_FLAGS: typeof RERUN_FLAGS = [
 /** Control arms don't use Ratel retrieval, so their cells are version-independent
  *  and reusable across ratel versions (re-stamped to the current version). */
 const CACHEABLE_ARMS = new Set<SragentsArm>(["control-baseline", "control-oracle"]);
-
-// ── Model resolution (mirrors cli.ts:resolveModel, kept local to avoid importing
-//    the campaign CLI). Output caps are attached afterwards (`buildRunnerModels`). ──
-
-function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): ResolvedModel {
-  const identity = parseModelIdentity(modelId);
-  // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
-  const ep = parseCustomEndpoint(modelId);
-  if (ep) {
-    const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
-    return { id: modelId, model: provider.chat(ep.modelName) };
-  }
-  if (identity.kind === "ollama") {
-    const provider = createOpenAI({ baseURL: ollamaBaseURL, apiKey: "ollama" });
-    return { id: identity.canonicalId, model: provider.chat(identity.model) };
-  }
-  if (identity.kind === "provider" && identity.provider === "anthropic") {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY`);
-    }
-    return { id: identity.canonicalId, model: anthropic(identity.model) };
-  }
-  if (identity.kind === "provider" && identity.provider === "openai") {
-    if (!process.env.OPENAI_API_KEY) throw new Error(`model ${modelId} requires OPENAI_API_KEY`);
-    return { id: identity.canonicalId, model: openai(identity.model) };
-  }
-  throw new Error(
-    `model ${identity.canonicalId} needs a ${identity.kind === "provider" ? identity.provider : "hosted"} adapter; ` +
-      "native provider resolution is required before inference",
-  );
-}
 
 // ── Deterministic shuffle (so the baseline's neutral order doesn't leak BM25 rank) ──
 
@@ -934,10 +902,14 @@ async function main(): Promise<void> {
   }
 
   // Caps are attached after resolution, so no resolver branch can skip them.
-  const resolved = buildRunnerModels(models, (m) => resolveModel(m, ollamaBaseURL, modelApiKey), {
-    catalog: loadModelCatalog(),
-    override: caps.override,
-  });
+  const resolved = buildRunnerModels(
+    models,
+    (m) => resolveModel(m, { ollamaBaseURL, modelApiKey }),
+    {
+      catalog: loadModelCatalog(),
+      override: caps.override,
+    },
+  );
   console.log(capsLine(resolved, caps.override));
   console.log(retrySettingsLine(retry, timeoutMs));
   console.log(breakerLine(abortAfterConsecutiveErrors));

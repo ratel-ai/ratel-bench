@@ -17,8 +17,6 @@
 //   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
 import { existsSync } from "node:fs";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
 import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
@@ -30,8 +28,8 @@ import {
   retrySettingsLine,
 } from "./llm-retry.js";
 import { DEFAULT_JUDGE_MODEL } from "./model-defaults.js";
-import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
-import { parseModelIdentity } from "./model-identity.js";
+import { warmUpModels } from "./model-endpoint.js";
+import { resolveModel } from "./model-factory.js";
 import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
@@ -39,80 +37,13 @@ import { rejudge } from "./rejudge.js";
 import { doneLines, rerunSettingsLine, runExitCode } from "./rerun.js";
 import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
 import { selectVersion, validateSdk } from "./sdk/resolve.js";
-import type { ResolvedModel } from "./types.js";
 
 loadEnv();
-
-const OLLAMA_PREFIX = "ollama:";
 
 interface ResolveOpts {
   ollamaBaseURL: string;
   /** Bearer token for user-hosted `<url>#<model>` endpoints (optional). */
   modelApiKey?: string;
-}
-
-/**
- * Resolve an Ollama model id (e.g. `ollama:qwen3.5`) into a Vercel AI SDK
- * `LanguageModel` that talks to the local Ollama server via its OpenAI-
- * compatible endpoint. The model id stored on the cell row keeps the
- * `ollama:` prefix so reports clearly distinguish local vs cloud models.
- *
- * Tool calling depends on the underlying model's native function-calling
- * support — Qwen / Llama families work well; Gemma is hit-or-miss. If a
- * local-model cell consistently logs zero tool calls, the model likely
- * isn't function-calling and the run is mainly measuring "did the model
- * write a coherent answer." That's still informative — just call it out
- * when reading the report.
- */
-function resolveOllama(modelTag: string, baseURL: string): ResolvedModel {
-  // `.chat(...)` forces the legacy `/v1/chat/completions` wire format. The
-  // default factory call uses OpenAI's newer Responses API (typed items like
-  // `item_reference`), which Ollama's OpenAI-compat endpoint doesn't speak.
-  const provider = createOpenAI({ baseURL, apiKey: "ollama" });
-  return { id: `${OLLAMA_PREFIX}${modelTag}`, model: provider.chat(modelTag) };
-}
-
-/**
- * Resolve a user-hosted model addressed as `<baseURL>#<model-name>` (e.g. a
- * vLLM/TGI/LM Studio server on EC2). Reuses the OpenAI-compatible SDK client
- * pointed at the caller's URL, exactly like {@link resolveOllama}, with
- * `.chat(...)` to force the legacy `/v1/chat/completions` wire format that
- * self-hosted servers implement (they rarely speak OpenAI's Responses API).
- *
- * The full `<url>#<model>` string is kept as the id so report rows are
- * unambiguous. Auth is optional: a bearer token from --model-api-key /
- * AWS_BEDROCK_BEARER when set, else a dummy key (unauthenticated endpoints).
- */
-function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): ResolvedModel {
-  const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: opts.modelApiKey ?? "none" });
-  return { id: raw, model: provider.chat(ep.modelName) };
-}
-
-function resolveModel(modelId: string, opts: ResolveOpts): ResolvedModel {
-  const identity = parseModelIdentity(modelId);
-  const ep = parseCustomEndpoint(modelId);
-  if (ep) {
-    return resolveCustomEndpoint(modelId, ep, opts);
-  }
-  if (identity.kind === "ollama") {
-    return resolveOllama(identity.model, opts.ollamaBaseURL);
-  }
-  if (identity.kind === "provider" && identity.provider === "anthropic") {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY (set in .env or shell)`);
-    }
-    return { id: identity.canonicalId, model: anthropic(identity.model) };
-  }
-  if (identity.kind === "provider" && identity.provider === "openai") {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error(`model ${modelId} requires OPENAI_API_KEY`);
-    }
-    return { id: identity.canonicalId, model: openai(identity.model) };
-  }
-  throw new Error(
-    `model ${identity.canonicalId} needs a ${identity.kind === "provider" ? identity.provider : "hosted"} adapter; ` +
-      "native provider resolution is required before inference",
-  );
 }
 
 /**
