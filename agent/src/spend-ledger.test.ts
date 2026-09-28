@@ -19,6 +19,43 @@ function path(): string {
 }
 
 describe("durable live spend", () => {
+  it("isolates a current version from historical comparison attempts in one journal", () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 1,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "old",
+      runId: "historical",
+      kind: "bfcl",
+      scope: "bfcl/old",
+      cellKey: "old-cell",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("old", { status: "completed", usage: { inputTokens: 100, outputTokens: 0 } });
+    ledger.dispatch({
+      id: "current",
+      runId: "current",
+      kind: "bfcl",
+      scope: "bfcl/new",
+      cellKey: "new-cell",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("current", { status: "completed", usage: { inputTokens: 20, outputTokens: 0 } });
+    expect(ledger.summary("bfcl/new")).toMatchObject({ attempts: 1, knownUsd: 0.00002 });
+    expect(ledger.hasRun("historical", "bfcl/new")).toBe(false);
+    expect(ledger.summary()).toMatchObject({ attempts: 2, knownUsd: 0.00012 });
+    expect(openSpendLedger(file).summary("bfcl/new")).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.00002,
+    });
+  });
   it("keeps a dispatched request unresolved across a crash and counts a retry separately", () => {
     const file = path();
     const ledger = openSpendLedger(file);

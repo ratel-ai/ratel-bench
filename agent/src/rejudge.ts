@@ -118,6 +118,7 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
         attempt: spendLedger
           ? spendRecorder(spendLedger, {
               runId: spendRunId,
+              scope: `bfcl/${cell.ratel_version}`,
               kind: "judge",
               cellKey: cellKeyOf(cell),
               model:

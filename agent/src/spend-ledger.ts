@@ -17,7 +17,9 @@ export interface SpendDispatch {
   id: string;
   /** Invocation whose output row can later be matched to this journal. */
   runId?: string;
-  kind: "bfcl" | "judge";
+  /** Benchmark/version whose live spend this attempt belongs to. */
+  scope?: string;
+  kind: "bfcl" | "sragents" | "judge";
   cellKey: string;
   model: string;
   servingProvider?: string;
@@ -61,6 +63,13 @@ interface Attempt {
   settlement?: SpendSettlement;
 }
 
+interface Totals {
+  attempts: number;
+  unresolved: number;
+  unknown: number;
+  knownTicks: number;
+}
+
 type Event =
   | { type: "dispatch"; value: SpendDispatch }
   | { type: "settle"; id: string; value: SpendSettlement };
@@ -69,9 +78,17 @@ type Event =
 export function openSpendLedger(path: string) {
   const attempts = new Map<string, Attempt>();
   const runIds = new Set<string>();
-  let unresolved = 0;
-  let unknown = 0;
-  let knownTicks = 0;
+  const scopedRunIds = new Map<string, Set<string>>();
+  const totals: Totals = { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+  const scoped = new Map<string, Totals>();
+  const forScope = (scope: string): Totals => {
+    let value = scoped.get(scope);
+    if (!value) {
+      value = { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+      scoped.set(scope, value);
+    }
+    return value;
+  };
   if (existsSync(path)) {
     const contents = readFileSync(path, "utf8");
     const end = contents.lastIndexOf("\n") + 1;
@@ -89,9 +106,22 @@ export function openSpendLedger(path: string) {
         throw new Error(`conflicting spend attempt ${event.value.id}`);
       if (!old) {
         attempts.set(event.value.id, { dispatch: event.value });
-        unresolved++;
+        for (const current of [
+          totals,
+          ...(event.value.scope ? [forScope(event.value.scope)] : []),
+        ]) {
+          current.attempts++;
+          current.unresolved++;
+        }
       }
-      if (event.value.runId) runIds.add(event.value.runId);
+      if (event.value.runId) {
+        runIds.add(event.value.runId);
+        if (event.value.scope) {
+          const scopedIds = scopedRunIds.get(event.value.scope) ?? new Set<string>();
+          scopedIds.add(event.value.runId);
+          scopedRunIds.set(event.value.scope, scopedIds);
+        }
+      }
     } else {
       const attempt = attempts.get(event.id);
       if (!attempt) throw new Error(`settlement without dispatch: ${event.id}`);
@@ -99,10 +129,15 @@ export function openSpendLedger(path: string) {
         throw new Error(`conflicting spend settlement ${event.id}`);
       if (!attempt.settlement) {
         attempt.settlement = event.value;
-        unresolved--;
         const ticks = costTicks(attempt.dispatch.model, attempt.dispatch.price, event.value);
-        if (ticks === null) unknown++;
-        else knownTicks += ticks;
+        for (const current of [
+          totals,
+          ...(attempt.dispatch.scope ? [forScope(attempt.dispatch.scope)] : []),
+        ]) {
+          current.unresolved--;
+          if (ticks === null) current.unknown++;
+          else current.knownTicks += ticks;
+        }
       }
     }
   }
@@ -120,8 +155,10 @@ export function openSpendLedger(path: string) {
   }
 
   return {
-    hasRun(runId: string): boolean {
-      return runIds.has(runId);
+    hasRun(runId: string, scope?: string): boolean {
+      return scope === undefined
+        ? runIds.has(runId)
+        : (scopedRunIds.get(scope)?.has(runId) ?? false);
     },
     dispatch(value: SpendDispatch): void {
       if (attempts.has(value.id)) {
@@ -140,13 +177,22 @@ export function openSpendLedger(path: string) {
       }
       append({ type: "settle", id, value });
     },
-    summary(): SpendSummary {
+    summary(scope?: string): SpendSummary {
+      const value =
+        scope === undefined
+          ? totals
+          : (scoped.get(scope) ?? {
+              attempts: 0,
+              unresolved: 0,
+              unknown: 0,
+              knownTicks: 0,
+            });
       return {
-        attempts: attempts.size,
-        unresolved,
-        unknown,
-        knownUsd: knownTicks / 10_000_000_000,
-        completeness: unresolved || unknown ? "partial" : "complete",
+        attempts: value.attempts,
+        unresolved: value.unresolved,
+        unknown: value.unknown,
+        knownUsd: value.knownTicks / 10_000_000_000,
+        completeness: value.unresolved || value.unknown ? "partial" : "complete",
       };
     },
   };

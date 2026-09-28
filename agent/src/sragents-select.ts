@@ -18,6 +18,7 @@
 // agent.jsonl. Resume, retry rounds, the breaker and the final `done:` line work as
 // in `pnpm start` (see `rerun.ts`, `createBreaker`).
 
+import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -39,11 +40,13 @@ import {
   breakerThresholdFromEnv,
   cellRetry,
   createBreaker,
+  DEFAULT_RETRY_SETTINGS,
   type RetrySettings,
   retrySettingsFromEnv,
   retrySettingsLine,
+  SpendJournalError,
 } from "./llm-retry.js";
-import { dollarCost, providerOf, xaiCostTicks } from "./metering.js";
+import { dollarCost, type PricingTable, providerOf, xaiCostTicks } from "./metering.js";
 import {
   buildRunnerModels,
   cacheTier,
@@ -57,8 +60,8 @@ import {
 } from "./output-limits.js";
 import { loadModelPricing } from "./pricing.js";
 
-// Per-model rates from models.json (backend-aware, read once). Empty when
-// unpriced → $0 cells and the dollar cap simply doesn't bound the run.
+// Per-model rates from models.json (backend-aware, read once). Unpriced calls
+// remain unknown in the journal; the legacy dollar cap cannot bound them.
 const PRICING = loadModelPricing();
 
 import { DEFAULT_SRAGENTS_MODELS } from "./model-defaults.js";
@@ -88,8 +91,15 @@ import {
   resumeLine,
   runExitCode,
   runRounds,
+  summarizeRunCoverage,
   tallyRow,
 } from "./rerun.js";
+import {
+  openSpendLedger,
+  type SpendLedger,
+  type SpendSummary,
+  spendRecorder,
+} from "./spend-ledger.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -100,6 +110,7 @@ const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
 /** `--timeout-ms` default: active time per selection call (retry sleeps don't count). */
 const DEFAULT_TIMEOUT_MS = 300_000;
+const SR_SPEND_SCOPE = `sragents/${RATEL_AI_CORE_VERSION}`;
 /**
  * `RERUN_FLAGS`, spelled out (the type keeps them in sync): ratel-bench-aws
  * `bench-flags.mjs` passes a flag to SR only when this file holds it as a quoted
@@ -309,6 +320,9 @@ export interface SelectArgs {
   timeoutMs: number;
   /** Retry policy + backstop grace; defaults to `DEFAULT_RETRY_SETTINGS`. */
   retry?: RetrySettings;
+  spendLedger?: SpendLedger;
+  spendRunId?: string;
+  pricing?: PricingTable;
 }
 
 /**
@@ -356,10 +370,27 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     max_output_tokens: args.model.maxOutputTokens,
   };
 
+  const retrySettings: RetrySettings = { ...(args.retry ?? DEFAULT_RETRY_SETTINGS) };
+  if (args.spendLedger) {
+    retrySettings.attempt = spendRecorder(args.spendLedger, {
+      runId: args.spendRunId,
+      scope: SR_SPEND_SCOPE,
+      kind: "sragents",
+      cellKey: taskKey(args),
+      model: args.model.id,
+      servingProvider: args.model.servingProvider,
+      publisher: args.model.publisher,
+      resolvedModel: args.model.resolvedModel,
+      vertexLocation: args.model.vertexLocation,
+      adapterProvider: typeof args.model.model === "string" ? undefined : args.model.model.provider,
+      adapterModel: typeof args.model.model === "string" ? undefined : args.model.model.modelId,
+      price: (args.pricing ?? PRICING)[args.model.id] ?? null,
+    });
+  }
   const retry = cellRetry(
     args.model.model,
     args.timeoutMs,
-    args.retry,
+    args.spendLedger ? retrySettings : args.retry,
     `${args.sc.scenarioId} · ${args.arm} · ${args.model.id} · #${args.runIndex}`,
   );
   const startedAt = Date.now();
@@ -385,6 +416,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       wall_ms: Date.now() - startedAt,
     };
   } catch (err) {
+    if (err instanceof SpendJournalError) throw err;
     // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
     // carries its usage and finish reason (`length` = truncated at the output cap:
     // an `outcome` error, final — never re-run or excluded). generateObject raises
@@ -485,6 +517,10 @@ export interface CampaignOptions {
   rerun: RerunSettings;
   /** The breaker's streak (`RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`; 0 = off). */
   abortAfterConsecutiveErrors: number;
+  spendLedger?: SpendLedger;
+  spendRunId?: string;
+  pricing?: PricingTable;
+  signal?: AbortSignal;
 }
 
 /** The campaign's share of the `done:` counts (the cache and resume add the rest). */
@@ -503,22 +539,28 @@ type QueuedTask = Task & { attempt: number };
 export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise<CampaignSummary> {
   const breaker = createBreaker(opts.abortAfterConsecutiveErrors);
   const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
+  const runId = opts.spendRunId ?? randomUUID();
   const tally = newRunTally();
-  let dollars = 0;
+  let dollars = opts.spendLedger?.summary(SR_SPEND_SCOPE).knownUsd ?? 0;
   let unknownCostCells = 0;
   let capHit = false;
   let done = 0;
   let total = tasks.length;
+  const emitted: SragentsSelectCell[] = [];
 
   const spend = (dollarCost: number): void => {
-    dollars += dollarCost;
+    dollars = opts.spendLedger
+      ? opts.spendLedger.summary(SR_SPEND_SCOPE).knownUsd
+      : dollars + dollarCost;
     if (dollars >= opts.dollarCap) capHit = true;
   };
 
   const runPass = async (queue: QueuedTask[]): Promise<QueuedTask[]> => {
     const retryable: QueuedTask[] = [];
     let i = 0;
+    let dispatchStopped = false;
     const pick = (): QueuedTask | null => {
+      if (dispatchStopped || opts.signal?.aborted) return null;
       if (dollars >= opts.dollarCap) {
         capHit = true;
         return null;
@@ -531,59 +573,73 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     };
 
     async function worker(): Promise<void> {
-      while (true) {
-        const t = pick();
-        if (!t) return;
-        let cell: SragentsSelectCell;
-        try {
-          cell = await selectForCell({
-            ...t,
-            seed: opts.seed,
-            catalog: opts.catalog,
-            timeoutMs: opts.timeoutMs,
-            retry,
-          });
-        } catch (err) {
-          if (!(err instanceof FatalProviderError)) throw err;
-          breaker.fatal(t.model.id, err);
-          if (err.unknownCost) unknownCostCells++;
-          spend(err.dollarCost);
-          if (!opts.quiet) {
-            console.log(
-              `${t.sc.scenarioId} ${t.arm}/${t.model.id} → FATAL ${err.message} (no row; model aborted)`,
-            );
+      try {
+        while (true) {
+          const t = pick();
+          if (!t) return;
+          let cell: SragentsSelectCell;
+          try {
+            cell = await selectForCell({
+              ...t,
+              seed: opts.seed,
+              catalog: opts.catalog,
+              timeoutMs: opts.timeoutMs,
+              retry,
+              spendLedger: opts.spendLedger,
+              spendRunId: runId,
+              pricing: opts.pricing,
+            });
+          } catch (err) {
+            if (!(err instanceof FatalProviderError)) throw err;
+            breaker.fatal(t.model.id, err);
+            if (err.unknownCost) unknownCostCells++;
+            spend(err.dollarCost);
+            if (!opts.quiet) {
+              console.log(
+                `${t.sc.scenarioId} ${t.arm}/${t.model.id} → FATAL ${err.message} (no row; model aborted)`,
+              );
+            }
+            continue;
           }
-          continue;
-        }
-        // A peer cell may have aborted this model while this call was in flight.
-        // Charge its spend, but leave the aborted model's output untouched.
-        if (breaker.isAborted(t.model.id)) {
+          // A peer cell may have aborted this model while this call was in flight.
+          // Charge its spend, but leave the aborted model's output untouched.
+          if (breaker.isAborted(t.model.id)) {
+            if (cell.dollar_cost === null) unknownCostCells++;
+            spend(cell.dollar_cost ?? 0);
+            continue;
+          }
+          cell.attempt = t.attempt;
+          cell.run_id = runId;
           if (cell.dollar_cost === null) unknownCostCells++;
           spend(cell.dollar_cost ?? 0);
-          continue;
+          opts.onCell(cell);
+          emitted.push(cell);
+          done++;
+          tallyRow(tally, cell);
+          breaker.record(t.model.id, cell);
+          const outcome = rerunOutcome(cell, t.attempt, opts.rerun);
+          if (outcome === "retry") retryable.push(t);
+          else if (outcome === "exhausted") tally.exhausted++;
+          if (!opts.quiet) {
+            const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
+            console.log(
+              `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
+                `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
+                `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
+            );
+          }
         }
-        cell.attempt = t.attempt;
-        if (cell.dollar_cost === null) unknownCostCells++;
-        spend(cell.dollar_cost ?? 0);
-        opts.onCell(cell);
-        done++;
-        tallyRow(tally, cell);
-        breaker.record(t.model.id, cell);
-        const outcome = rerunOutcome(cell, t.attempt, opts.rerun);
-        if (outcome === "retry") retryable.push(t);
-        else if (outcome === "exhausted") tally.exhausted++;
-        if (!opts.quiet) {
-          const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
-          console.log(
-            `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
-              `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
-              `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
-          );
-        }
+      } catch (error) {
+        dispatchStopped = true;
+        throw error;
       }
     }
 
-    await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()));
+    const workers = await Promise.allSettled(
+      Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()),
+    );
+    const failed = workers.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
     return retryable;
   };
 
@@ -594,14 +650,26 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
       total += queue.length;
       return runPass(queue);
     },
-    (t) => !capHit && !breaker.isAborted(t.model.id),
+    (t) => !capHit && !opts.signal?.aborted && !breaker.isAborted(t.model.id),
   );
 
+  const spendSummary = opts.spendLedger?.summary(SR_SPEND_SCOPE);
+  const stoppedReason = opts.signal?.aborted
+    ? "interrupted"
+    : (breaker.stopped() ?? (capHit ? "global_cap" : "completed"));
   return {
     cells_run: done,
     total_dollars: dollars,
+    ...(spendSummary ? { spend: spendSummary } : {}),
+    coverage: summarizeRunCoverage(
+      tasks.map(taskKey),
+      emitted,
+      rowKey,
+      stoppedReason,
+      spendSummary,
+    ),
     unknown_cost_cells: unknownCostCells,
-    stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
+    stopped_reason: stoppedReason,
     cap_hit: capHit,
     ...tally,
     aborted: breaker.aborted(),
@@ -614,10 +682,30 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
  */
 export function campaignDoneSummary(
   result: CampaignSummary,
-  drained: { reused: number; skipped: number; resume: ResumeCounts },
+  drained: {
+    reused: number;
+    skipped: number;
+    resume: ResumeCounts;
+    requestedTasks?: readonly Task[];
+    rows?: readonly SragentsSelectCell[];
+    spend?: SpendSummary;
+  },
 ): DoneSummary {
+  const spend = drained.spend ?? result.spend;
   return {
     ...result,
+    ...(spend ? { spend } : {}),
+    ...(drained.requestedTasks && drained.rows
+      ? {
+          coverage: summarizeRunCoverage(
+            drained.requestedTasks.map(taskKey),
+            drained.rows,
+            rowKey,
+            result.stopped_reason,
+            spend,
+          ),
+        }
+      : {}),
     cells_cached: drained.reused,
     cells_skipped: drained.skipped,
     requeued: result.requeued + requeuedTotal(drained.resume),
@@ -753,6 +841,7 @@ export function drainControlCache(
     force: boolean;
     allowLegacyCache: boolean;
     rerun?: Pick<RerunSettings, "policy" | "maxAttempts">;
+    runId?: string;
   },
 ): { liveTasks: Task[]; reused: number; legacy: number; skipped: number; resume: ResumeCounts } {
   if (opts.force) {
@@ -794,6 +883,7 @@ export function drainControlCache(
           ratel_ai_core_version: RATEL_AI_CORE_VERSION,
           ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
           generated_at: new Date().toISOString(),
+          ...(opts.runId ? { run_id: opts.runId } : {}),
           cache_source: "reused",
         });
         reused++;
@@ -908,6 +998,7 @@ async function main(): Promise<void> {
   );
   const catalogPath = resolveRepoPath(arg("--catalog", "test-data/sragents-skills.jsonl"));
   const outputPath = resolveRepoPath(arg("--output", "results/raw/sragents/agent.jsonl"));
+  const spendLedger = openSpendLedger(`${outputPath}.spend.jsonl`);
   const arms = arg("--arms", ALL_ARMS.join(",")).split(",") as SragentsArm[];
   const models = sragentsModels(process.argv);
   const poolSize = Number(arg("--pool-size", "50"));
@@ -992,6 +1083,7 @@ async function main(): Promise<void> {
   // results); `--cache-source a,b,…` overrides them. `--force`/`--fresh` truncates the
   // output, disables reuse and re-runs everything.
   const force = process.argv.includes("--force") || process.argv.includes("--fresh");
+  const runId = randomUUID();
   const cachePaths = sragentsCachePaths(
     process.argv.includes("--cache-source") ? arg("--cache-source", "") : undefined,
     outputPath,
@@ -1002,6 +1094,7 @@ async function main(): Promise<void> {
     force,
     allowLegacyCache: caps.allowLegacyCache,
     rerun,
+    runId,
   });
 
   console.log(
@@ -1017,19 +1110,32 @@ async function main(): Promise<void> {
   const resumed = resumeLine(resume);
   if (resumed) console.log(resumed);
 
-  const result = await runCampaign(liveTasks, {
-    concurrency,
-    dollarCap,
-    seed,
-    quiet,
-    catalog,
-    timeoutMs,
-    // One line per retry, unless --quiet.
-    retry: quiet ? retry : { ...retry, log: console.log },
-    rerun,
-    abortAfterConsecutiveErrors,
-    onCell: (c) => appendJsonl(outputPath, c),
-  });
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  let result: CampaignSummary;
+  try {
+    result = await runCampaign(liveTasks, {
+      concurrency,
+      dollarCap,
+      seed,
+      quiet,
+      catalog,
+      timeoutMs,
+      // One line per retry, unless --quiet.
+      retry: quiet ? retry : { ...retry, log: console.log },
+      rerun,
+      abortAfterConsecutiveErrors,
+      onCell: (c) => appendJsonl(outputPath, c),
+      spendLedger,
+      spendRunId: runId,
+      signal: controller.signal,
+    });
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+  }
 
   const capped = result.cap_hit;
   console.log(
@@ -1038,7 +1144,33 @@ async function main(): Promise<void> {
       `($${result.total_dollars.toFixed(3)}${capped ? `, STOPPED at $${dollarCap} cap` : ""})`,
   );
   // The same `done:` line (and `aborted:` lines) as `pnpm start`, for the AWS runner.
-  const summary = campaignDoneSummary(result, { reused, skipped, resume });
+  const outputRows = readJsonl<SragentsSelectCell>(outputPath).filter(
+    (row) => row.ratel_ai_core_version === RATEL_AI_CORE_VERSION,
+  );
+  const requestedKeys = new Set(tasks.map(taskKey));
+  const untrackedRows = outputRows.filter(
+    (row) =>
+      requestedKeys.has(rowKey(row)) &&
+      row.cache_source !== "reused" &&
+      (!row.run_id || !spendLedger.hasRun(row.run_id, SR_SPEND_SCOPE)),
+  ).length;
+  const ledgerSummary = spendLedger.summary(SR_SPEND_SCOPE);
+  const spend = {
+    ...ledgerSummary,
+    untrackedRows,
+    completeness:
+      ledgerSummary.completeness === "partial" || untrackedRows > 0
+        ? ("partial" as const)
+        : ("complete" as const),
+  };
+  const summary = campaignDoneSummary(result, {
+    reused,
+    skipped,
+    resume,
+    requestedTasks: tasks,
+    rows: outputRows,
+    spend,
+  });
   for (const line of doneLines(summary)) console.log(line);
   // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
   const exitCode = runExitCode(summary);

@@ -37,7 +37,7 @@ import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
 import { doneLines, rerunSettingsLine, runExitCode } from "./rerun.js";
-import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
+import { loadAgentRegistry, type RunnerConfig, type RunnerSummary, run } from "./runner.js";
 import { selectVersion, validateSdk } from "./sdk/resolve.js";
 
 loadEnv();
@@ -221,7 +221,17 @@ async function runMain(): Promise<void> {
   if (judgeModel && parsed.judgeMaxOutputTokens !== undefined) {
     console.log(`caps: judge=${parsed.judgeMaxOutputTokens}`);
   }
-  const summary = await run(cfg);
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  let summary: RunnerSummary;
+  try {
+    summary = await run({ ...cfg, signal: controller.signal });
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+  }
   for (const line of doneLines(summary)) console.log(line);
   // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
   const exitCode = runExitCode(summary);

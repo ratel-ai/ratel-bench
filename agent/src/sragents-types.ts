@@ -65,6 +65,8 @@ export type SragentsArm = "control-baseline" | "ratel-full" | "control-oracle";
  */
 export interface SragentsSelectCell {
   run_type: "skill_selection";
+  /** Run whose provider attempts produced this live cell; absent on historical rows. */
+  run_id?: string;
   generated_at: string;
   ratel_ai_core_version: string;
   /** Exact crate release, independent of the method-specific report label. */
