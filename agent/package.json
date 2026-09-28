@@ -22,6 +22,7 @@
     "version-set": "tsx src/version-set.ts",
     "version-reset": "tsx src/version-reset.ts",
     "prune-prerelease-reports": "tsx src/prune-prerelease-reports.ts",
+    "workflow-dispatch": "tsx src/workflow-dispatch-cli.ts",
     "run-all": "tsx src/run-all.ts"
   },
   "dependencies": {

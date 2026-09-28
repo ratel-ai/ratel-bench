@@ -52,6 +52,32 @@ dense and hybrid stages own their Ratel cells. Attachment sizing uses serialized
 JSON bytes plus base64 encoding and is checked before spend and on the final JSON.
 See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact work matrix.
 
+### Launch from GitHub Actions
+
+The manual **Run benchmark campaign** Action submits the same selection contract as the
+campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`, `modelConcurrency` and
+`campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted selection uses the 16
+Bedrock defaults; exclusions win, concurrency defaults to one, the aggregate model/API
+budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL, SR-Agents and all
+three retrievers remain fixed parts of a full campaign.
+
+At submission the Action freezes its own commit, the deployed `ratel-bench-aws` commit from
+the request template, and the highest stable compatible SDK/core pair recorded in
+`.github/benchmark-release-metadata.json`. Inputs are validated and written as JSON rather
+than evaluated by a shell. The job assumes the repository-scoped OIDC launch role, calls
+`StartExecution`, prints the durable run ID plus workflow/execution/result links, and exits;
+it never waits for benchmark workers.
+
+Repository variables must provide `BENCHMARK_CAMPAIGN_TEMPLATE_JSON` (the deployed,
+versioned request template), `BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN`, `BENCHMARK_AWS_REGION`,
+`BENCHMARK_RESULTS_BUCKET`, `BENCHMARK_CAMPAIGN_STATE_MACHINE_ARN`,
+`BENCHMARK_CAMPAIGN_RUN_TABLE`, and the model/preparation/CodeBuild concurrency limits.
+Update release metadata only after the pair passes compatibility review. A failed launch
+reports a configuration/coordinator error without starting a watcher.
+
+Results are not deployed from this repository. After completion, use the separate manual
+website import flow to open and review a results PR; only merging that PR publishes data.
+
 ## Corpora
 
 Three datasets the arms run against:
