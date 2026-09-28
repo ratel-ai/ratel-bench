@@ -28,6 +28,7 @@ export interface GoldSimilarity {
 export interface BfclRetrievalRow {
   generated_at: string;
   ratel_ai_core_version?: string;
+  ratel_ai_core_resolved_version?: string;
   scenario_id: string;
   category?: string;
   query: string;
@@ -54,6 +55,7 @@ export interface BfclRetrievalRow {
 export interface RetrievalSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "retriever_evaluation";
   type: BfclType;
   pool_size: number;
@@ -75,6 +77,7 @@ export interface RetrievalSummaryRow {
 /** Task-completion per-row record (`results/raw/bfcl/task-completion-rows.jsonl`). */
 export interface TaskRow {
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   generated_at: string;
   type: BfclType;
   model: string; // LLM name
@@ -128,6 +131,7 @@ export interface TaskRow {
 export interface TaskSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string; // LLM name
   arm: string; // control-baseline | control-oracle | ratel-full | …

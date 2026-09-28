@@ -54,6 +54,21 @@ function retrievalRow(over: Partial<SragentsRetrievalRow>): SragentsRetrievalRow
 }
 
 describe("summarizeSragents — retrieval summary", () => {
+  it("keeps the resolved core release alongside a method report label", () => {
+    const label = "0.11.0-hybrid";
+    const result = summarizeSragents({
+      retrievalRows: [
+        retrievalRow({
+          ratel_ai_core_version: label,
+          ratel_ai_core_resolved_version: "0.11.0",
+        }),
+      ],
+      cells: [cell({ ratel_ai_core_version: label, ratel_ai_core_resolved_version: "0.11.0" })],
+    });
+    expect(result.retrievalSummary[0]?.ratel_ai_core_resolved_version).toBe("0.11.0");
+    expect(result.taskSummary[0]?.ratel_ai_core_resolved_version).toBe("0.11.0");
+  });
+
   it("buckets per dataset and emits a cross-dataset `all` aggregate", () => {
     const rows = [
       retrievalRow({ scenario_id: "sragents-bigcodebench_0", category: "sragents-bigcodebench" }),

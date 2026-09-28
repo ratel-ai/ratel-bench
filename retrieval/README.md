@@ -19,6 +19,7 @@ src/
     sragents.rs     SR-Agents → skill catalog + instances JSONL adapter
   main.rs           CLI: `retrieval` + `skill-retrieval` + `ingest <source>`
 tests/
+  core_compatibility.rs deterministic tool + skill retrieval under latest/legacy cores
   metatool_ingest.rs end-to-end ingest → retrieval round-trip
 ```
 

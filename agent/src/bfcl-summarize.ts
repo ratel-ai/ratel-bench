@@ -140,6 +140,9 @@ function summarizeRetrieval(rows: BfclRetrievalRow[]): RetrievalSummaryRow[] {
     out.push({
       timestamp,
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "retriever_evaluation",
       type: type as BfclType,
       pool_size: Number(poolStr),
@@ -177,6 +180,7 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[]): TaskRow[] {
     const scenario = byId.get(c.scenario_id);
     out.push({
       ratel_ai_core_version: c.ratel_ai_core_version ?? "unknown",
+      ratel_ai_core_resolved_version: c.ratel_ai_core_resolved_version ?? null,
       generated_at: c.generated_at ?? "",
       type,
       model: c.model,
@@ -226,6 +230,9 @@ function summarizeTask(rows: TaskRow[], timestamps: Map<string, string>): TaskSu
     out.push({
       timestamp: timestamps.get(key) ?? "",
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "task_completion",
       model,
       arm,

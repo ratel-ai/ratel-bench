@@ -144,6 +144,9 @@ function summarizeRetrieval(rows: SragentsRetrievalRow[]): SragentsRetrievalSumm
     out.push({
       timestamp,
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "retriever_evaluation",
       dataset,
       pool_size: Number(poolStr),
@@ -197,6 +200,7 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
     const hits = [...gold].filter((g) => selected.has(g)).length;
     out.push({
       ratel_ai_core_version: c.ratel_ai_core_version ?? "unknown",
+      ratel_ai_core_resolved_version: c.ratel_ai_core_resolved_version ?? null,
       generated_at: c.generated_at ?? "",
       dataset,
       model: c.model,
@@ -243,6 +247,9 @@ function summarizeTask(
     out.push({
       timestamp: timestamps.get(key) ?? "",
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "task_completion",
       model,
       arm,

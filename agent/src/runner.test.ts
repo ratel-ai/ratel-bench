@@ -17,6 +17,7 @@ import {
   run,
 } from "./runner.js";
 import type { AgentDescriptor, CellResult, Scenario } from "./types.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 /** Stub descriptor — `runCell` is what the runner actually invokes; this only carries flags (e.g. `poolSizeAgnostic`). */
 function stubDescriptor(over: Partial<AgentDescriptor> & { id: string }): AgentDescriptor {
@@ -188,6 +189,8 @@ describe("runner", () => {
 
     const cell = JSON.parse(readFileSync(output, "utf-8").trim()) as CellResult;
     expect(cell.ratel_version).toBe("9.9.9");
+    expect(cell.ratel_ai_core_version).toBe(RATEL_AI_CORE_VERSION);
+    expect(cell.ratel_ai_core_resolved_version).toBe(RATEL_AI_CORE_RESOLVED_VERSION);
     expect(cell.cache_source).toBe("live");
 
     // The stamped version is the resume key: a re-run at "9.9.9" skips the cell.
