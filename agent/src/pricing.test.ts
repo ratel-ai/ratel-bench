@@ -10,18 +10,38 @@ const CATALOG = {
       id: "claude-haiku-4-5",
       bedrockProfile: "eu.anthropic.claude-haiku-4-5",
       pricing: {
-        bedrock: { inputPer1M: 1.0, outputPer1M: 5.0, cachedInputPer1M: 0.1, cacheCreationPer1M: 1.25 },
-        anthropic: { inputPer1M: 2.0, outputPer1M: 9.0, cachedInputPer1M: 0.2, cacheCreationPer1M: 2.5 },
+        bedrock: {
+          inputPer1M: 1.0,
+          outputPer1M: 5.0,
+          cachedInputPer1M: 0.1,
+          cacheCreationPer1M: 1.25,
+        },
+        anthropic: {
+          inputPer1M: 2.0,
+          outputPer1M: 9.0,
+          cachedInputPer1M: 0.2,
+          cacheCreationPer1M: 2.5,
+        },
       },
     },
     {
       id: "gpt-5.4-mini",
-      pricing: { openai: { inputPer1M: 0.75, outputPer1M: 4.5, cachedInputPer1M: 0.075, cacheCreationPer1M: 0 } },
+      pricing: {
+        openai: {
+          inputPer1M: 0.75,
+          outputPer1M: 4.5,
+          cachedInputPer1M: 0.075,
+          cacheCreationPer1M: 0,
+        },
+      },
     },
     // Self-hosted, no pricing → absent from the table.
     { id: "qwen3-4b", endpoint: "https://host/v1#qwen3-4b" },
     // Flat ModelPrice (no backend key) → applies to any backend.
-    { id: "claude-flat-test", pricing: { inputPer1M: 7, outputPer1M: 8, cachedInputPer1M: 0, cacheCreationPer1M: 0 } },
+    {
+      id: "claude-flat-test",
+      pricing: { inputPer1M: 7, outputPer1M: 8, cachedInputPer1M: 0, cacheCreationPer1M: 0 },
+    },
   ],
 };
 
