@@ -80,6 +80,8 @@ export class RetriesExhaustedError extends Error {
 export class FatalProviderError extends Error {
   /** What the cell had already spent (set after metering); still counts toward the dollar cap. */
   dollarCost = 0;
+  /** The call may have incurred a bill, but no route rate or provider bill is known. */
+  unknownCost = false;
 
   constructor(cause: unknown) {
     super(messageOf(cause), { cause });

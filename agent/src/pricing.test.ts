@@ -38,7 +38,7 @@ const CATALOG = {
     },
     // Self-hosted, no pricing → absent from the table.
     { id: "https://host/v1#qwen3-4b", endpoint: "https://host/v1#qwen3-4b" },
-    // Flat ModelPrice (no backend key) → applies to any backend.
+    // Flat ModelPrice (no backend key) → applies to this route.
     {
       id: "bedrock/claude-flat-test",
       pricing: { inputPer1M: 7, outputPer1M: 8, cachedInputPer1M: 0, cacheCreationPer1M: 0 },
@@ -56,10 +56,26 @@ describe("loadModelPricing", () => {
           run: [
             {
               id: "bedrock/claude-haiku-4-5",
-              aliases: ["anthropic/claude-haiku-4-5"],
+              aliases: ["anthropic/claude-haiku-4-5", "gcp/claude-haiku-4-5"],
               pricing: {
-                bedrock: { inputPer1M: 1, outputPer1M: 2 },
-                anthropic: { inputPer1M: 3, outputPer1M: 4 },
+                bedrock: {
+                  inputPer1M: 1,
+                  outputPer1M: 2,
+                  cachedInputPer1M: 0.1,
+                  cacheCreationPer1M: 1.25,
+                },
+                anthropic: {
+                  inputPer1M: 3,
+                  outputPer1M: 4,
+                  cachedInputPer1M: 0.3,
+                  cacheCreationPer1M: 3.75,
+                },
+                gcp: {
+                  inputPer1M: 5,
+                  outputPer1M: 6,
+                  cachedInputPer1M: 0.5,
+                  cacheCreationPer1M: 6.25,
+                },
               },
             },
           ],
@@ -68,6 +84,7 @@ describe("loadModelPricing", () => {
       const rates = loadModelPricing(file);
       expect(rates["bedrock/claude-haiku-4-5"].inputPer1M).toBe(1);
       expect(rates["anthropic/claude-haiku-4-5"].inputPer1M).toBe(3);
+      expect(rates["gcp/claude-haiku-4-5"].inputPer1M).toBe(5);
     } finally {
       rmSync(file, { force: true });
     }
@@ -104,7 +121,12 @@ describe("loadModelPricing", () => {
           {
             id: "openai/gpt-5.4-mini",
             pricing: {
-              openai: { inputPer1M: 0.75, outputPer1M: 4.5 },
+              openai: {
+                inputPer1M: 0.75,
+                outputPer1M: 4.5,
+                cachedInputPer1M: 0.075,
+                cacheCreationPer1M: 0,
+              },
             },
           },
         ],
@@ -124,13 +146,51 @@ describe("loadModelPricing", () => {
     expect(t["https://host/v1#qwen3-4b"]).toBeUndefined();
   });
 
-  it("accepts a flat ModelPrice for any backend", () => {
+  it("accepts a flat ModelPrice for the entry's own route", () => {
     const t = loadModelPricing(path);
     expect(t["bedrock/claude-flat-test"].inputPer1M).toBe(7);
   });
 
+  it("does not copy an unqualified flat rate onto a different serving route", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        run: [
+          {
+            id: "bedrock/claude-test",
+            aliases: ["anthropic/claude-test"],
+            pricing: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 0, cacheCreationPer1M: 0 },
+          },
+        ],
+      }),
+    );
+    const rates = loadModelPricing(path);
+    expect(rates["bedrock/claude-test"].inputPer1M).toBe(1);
+    expect(rates["anthropic/claude-test"]).toBeUndefined();
+  });
+
+  it("leaves incomplete cache rates unknown rather than treating them as free", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        run: [
+          {
+            id: "gcp/claude-test",
+            pricing: { gcp: { inputPer1M: 1, outputPer1M: 2 } },
+          },
+        ],
+      }),
+    );
+    expect(loadModelPricing(path)["gcp/claude-test"]).toBeUndefined();
+  });
+
   it("returns an empty table (never throws) when the catalog is missing", () => {
     expect(loadModelPricing(join(dir, "nope.json"))).toEqual({});
+  });
+
+  it("rejects malformed catalog JSON instead of treating every price as unknown", () => {
+    writeFileSync(path, "{broken");
+    expect(() => loadModelPricing(path)).toThrow(/not valid JSON/);
   });
 });
 

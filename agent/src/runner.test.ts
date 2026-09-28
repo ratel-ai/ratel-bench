@@ -873,6 +873,44 @@ describe("control cache", () => {
     return { summary, called };
   }
 
+  it("serves only matching Claude provider routes, including evidenced historical rows", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const source = join(tempDir, "cache.jsonl");
+    writeRows(source, [
+      cachedRow({
+        model: "bedrock/claude-sonnet-5",
+        provider: "amazon-bedrock",
+        max_output_tokens: null,
+        final_text: "bedrock",
+      }),
+      cachedRow({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        max_output_tokens: null,
+        final_text: "direct",
+      }),
+      cachedRow({
+        model: "gcp/claude-sonnet-5",
+        provider: "vertex.anthropic.messages",
+        max_output_tokens: null,
+        final_text: "vertex",
+      }),
+      cachedRow({ model: "claude-sonnet-5", final_text: "ambiguous" }),
+    ]);
+    const models = [
+      ["bedrock/claude-sonnet-5", "amazon-bedrock"],
+      ["anthropic/claude-sonnet-5", "anthropic.messages"],
+      ["gcp/claude-sonnet-5", "vertex.anthropic.messages"],
+    ].map(([id, provider]) => ({ id, model: { provider } as never, maxOutputTokens: null }));
+    const { summary } = await runBaseline(output, { models, cacheSourcePaths: [source] });
+    expect(summary.cells_cached).toBe(3);
+    expect(readRows(output).map((r) => [r.model, r.final_text])).toEqual([
+      ["bedrock/claude-sonnet-5", "bedrock"],
+      ["anthropic/claude-sonnet-5", "direct"],
+      ["gcp/claude-sonnet-5", "vertex"],
+    ]);
+  });
+
   it("skips a transient-error control row and serves a later good row", async () => {
     const canonical = join(tempDir, "canonical.jsonl");
     writeRows(canonical, [
@@ -1747,6 +1785,21 @@ describe("breaker, resume re-queue and retry rounds", () => {
   }
 
   const noRounds = { ...DEFAULT_RERUN_SETTINGS, rounds: 0 };
+
+  it("reports unknown cost from a fatal call that wrote no row", async () => {
+    const output = join(tempDir, "fatal-unknown.jsonl");
+    const err = Object.assign(fatal(0), { unknownCost: true });
+    const summary = await run({
+      ...baseConfig(corpusOf(1), output),
+      arms: ["ratel-full"],
+      models: [model("B")],
+      runCell: async () => {
+        throw err;
+      },
+    });
+    expect(summary.unknown_cost_cells).toBe(1);
+    expect(summary.cells_run).toBe(0);
+  });
 
   it.each([
     1, 4,

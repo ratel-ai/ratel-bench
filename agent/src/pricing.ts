@@ -1,7 +1,7 @@
 // Builds the runtime pricing table from models.json, so per-model rates live in
 // one place (the model definition) instead of a hardcoded table. Pricing is
 // OPTIONAL: a model with no `pricing` — or one whose active backend has no rate —
-// simply prices at $0, exactly as before. When present, the rate feeds the
+// has unknown cost. When present, the rate feeds the
 // `dollar_cost` on every row and the `--dollar-global` cap.
 //
 // `pricing` on an entry is keyed by serving provider, because the same model can be served
@@ -10,8 +10,7 @@
 //   { "openai": {…} }                        (gpt-*)
 // The serving provider is derived from the qualified identity, so a Bedrock
 // route reads `pricing.bedrock` and an Anthropic route reads `pricing.anthropic`.
-// A flat ModelPrice (no provider key)
-// is also accepted and applies to every backend.
+// A flat ModelPrice (no provider key) applies only to the entry's own route.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -29,16 +28,20 @@ interface ModelEntry {
 
 /** Build route-keyed prices from the shared model catalog. */
 export function loadModelPricing(path: string = modelsJsonPath()): PricingTable {
-  let entries: ModelEntry[] = [];
+  let raw: string;
   try {
-    const catalog = JSON.parse(readFileSync(path, "utf8")) as {
-      run?: ModelEntry[];
-      historical?: ModelEntry[];
-    };
-    entries = [...(catalog.run ?? []), ...(catalog.historical ?? [])];
-  } catch {
-    return {}; // no catalog → no prices → $0 rows (unchanged behavior)
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
+  let catalog: { run?: ModelEntry[]; historical?: ModelEntry[] };
+  try {
+    catalog = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`models.json at ${path} is not valid JSON: ${(error as Error).message}`);
+  }
+  const entries = [...(catalog.run ?? []), ...(catalog.historical ?? [])];
   const table: PricingTable = {};
   for (const entry of entries) {
     if (!entry?.id) continue;
@@ -67,7 +70,9 @@ export function activeBackend(modelId: string): string | null {
 function priceForEntry(entry: ModelEntry, route: string): ModelPrice | null {
   const p = entry.pricing;
   if (!p) return null;
-  if (isModelPrice(p)) return p; // flat: applies to any backend
+  if (isModelPrice(p)) {
+    return activeBackend(route) === activeBackend(entry.id) ? p : null;
+  }
   const backend = activeBackend(route);
   if (backend && isModelPrice(p[backend])) return p[backend] as ModelPrice;
   return null;
@@ -75,5 +80,12 @@ function priceForEntry(entry: ModelEntry, route: string): ModelPrice | null {
 
 /** True when `p` is a flat ModelPrice rather than a backend→ModelPrice map. */
 function isModelPrice(p: unknown): p is ModelPrice {
-  return typeof p === "object" && p !== null && typeof (p as ModelPrice).inputPer1M === "number";
+  if (typeof p !== "object" || p === null) return false;
+  const price = p as Partial<ModelPrice>;
+  return [
+    price.inputPer1M,
+    price.outputPer1M,
+    price.cachedInputPer1M,
+    price.cacheCreationPer1M,
+  ].every((rate) => typeof rate === "number" && Number.isFinite(rate) && rate >= 0);
 }

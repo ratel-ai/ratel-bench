@@ -76,6 +76,10 @@ export interface SragentsSelectCell {
   model: string;
   /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
   provider?: string;
+  serving_provider?: string;
+  publisher?: string;
+  resolved_model?: string;
+  vertex_location?: string;
   run_index: number;
   /** Candidate-pool size the arm drew from; `null` for the pool-agnostic oracle arm. */
   pool_size: number | null;
@@ -89,7 +93,7 @@ export interface SragentsSelectCell {
   /** Provider-reported cache read/write tokens; absent on historical rows. */
   cached_input_tokens?: number;
   cache_creation_tokens?: number;
-  dollar_cost: number;
+  dollar_cost: number | null;
   provider_cost_ticks?: number;
   cost_source?: "provider" | "partial" | "estimate" | "unknown";
   wall_ms: number;
@@ -137,6 +141,10 @@ export interface SragentsTaskRow {
   generated_at: string;
   dataset: string;
   model: string;
+  serving_provider?: string | null;
+  publisher?: string | null;
+  resolved_model?: string | null;
+  vertex_location?: string | null;
   arm: string;
   scenario_id: string;
   gold_skill_ids: string[];
@@ -185,6 +193,10 @@ export interface SragentsTaskSummaryRow {
   ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string;
+  serving_provider?: string | "mixed" | null;
+  publisher?: string | "mixed" | null;
+  resolved_model?: string | "mixed" | null;
+  vertex_location?: string | "mixed" | null;
   arm: string;
   dataset: string;
   /** Kept rows (the denominator); excluded ones not counted. */

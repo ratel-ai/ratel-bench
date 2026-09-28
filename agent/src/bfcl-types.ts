@@ -81,6 +81,11 @@ export interface TaskRow {
   generated_at: string;
   type: BfclType;
   model: string; // LLM name
+  serving_provider?: string | null;
+  publisher?: string | null;
+  resolved_model?: string | null;
+  vertex_location?: string | null;
+  cost_source?: "provider" | "partial" | "estimate" | "unknown";
   arm: string;
   scenario_id: string;
   query: string;
@@ -94,7 +99,7 @@ export interface TaskRow {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  dollar_cost: number;
+  dollar_cost: number | null;
   wall_ms: number;
   turns: number;
   /**
@@ -134,6 +139,10 @@ export interface TaskSummaryRow {
   ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string; // LLM name
+  serving_provider?: string | "mixed" | null;
+  publisher?: string | "mixed" | null;
+  resolved_model?: string | "mixed" | null;
+  vertex_location?: string | "mixed" | null;
   arm: string; // control-baseline | control-oracle | ratel-full | …
   type: BfclType;
   scenarios: number; // n (denominator): kept rows, excluded ones not counted

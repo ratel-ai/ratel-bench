@@ -9,9 +9,9 @@
 // rerunnable cells in-process (see `rerun.ts`). A per-model breaker
 // (`createBreaker`) aborts a gated or failing model: a fatal provider error
 // writes no row. A global dollar cap (`dollarGlobalCap`) bounds total spend using
-// per-model rates from models.json (via `config.pricing`); a model left unpriced
-// reports `dollar_cost=0` and simply isn't bounded by the cap — scenario count
-// still bounds it.
+// per-model rates from models.json (via `config.pricing`); an unpriced model
+// reports `dollar_cost=null` and `cost_source=unknown`. This legacy command's
+// best-effort cap cannot bound unknown costs.
 //
 // Each arm is an `AgentDescriptor` defined in its own file under `agents/`;
 // the runner doesn't know how to build tools — it only knows how to schedule
@@ -36,7 +36,7 @@ import type { LanguageModel } from "ai";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { descriptor as controlOracle } from "./agents/control-oracle.js";
 import { errorClassOf, FatalProviderError, isRerunnable, type RerunPolicy } from "./cell-errors.js";
-import { cellKeyOf, cellKeyString, controlKeyOf, controlKeyString } from "./cell-key.js";
+import { cellKeyOf, cellKeyString, controlKeyString, modelRouteOfRow } from "./cell-key.js";
 import { loadScenarios } from "./corpus.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM } from "./judges/llm.js";
@@ -298,8 +298,15 @@ function readControlCacheIndex(
         if (typeof cell.ratel_version !== "string") continue;
         if (!CACHEABLE_ARMS.has(cell.arm)) continue;
         if (isRerunnable(cell) || isRerunnable(cell, policy)) continue;
-        const key = controlKeyOf(cell);
-        const best = preferCacheRow(out.get(key), cell, harness.get(cell.model), allowLegacy);
+        const route = harness.has(cell.model) ? cell.model : modelRouteOfRow(cell);
+        const key = controlKeyString({
+          scenarioId: cell.scenario_id,
+          arm: cell.arm,
+          model: route,
+          runIndex: cell.run_index,
+          poolSize: cell.pool_size,
+        });
+        const best = preferCacheRow(out.get(key), cell, harness.get(route), allowLegacy);
         if (best) out.set(key, best);
       } catch {
         // Ignore malformed rows.
@@ -352,7 +359,7 @@ function logCell(
   const calls = `${cell.tool_calls_total} calls (${cell.gateway_calls} gw)`;
   const turns = `${cell.turns}t`;
   const finish = cell.finish_reason;
-  const cost = `$${cell.dollar_cost.toFixed(4)}`;
+  const cost = cell.dollar_cost === null ? "unknown cost" : `$${cell.dollar_cost.toFixed(4)}`;
   console.log(`${tag} ${verdict.padEnd(5)} ${tokens} ${calls} ${turns} ${finish} ${cost}`);
   if (cell.error != null) {
     console.log(`  ↳ error: ${cell.error}`);
@@ -457,7 +464,7 @@ export function makeRegistryRunCell(
       scenario,
       pool,
       poolSize,
-      model: { id: model.id, model: model.model, maxOutputTokens: model.maxOutputTokens },
+      model,
       runIndex,
       topK: config.topK,
       retriever: config.retriever,
@@ -746,6 +753,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
       // Reuse the version-independent control result, re-stamped to this run.
       appendRow(config.outputPath, {
         ...cached,
+        model: task.model.id,
         ratel_version: ratelVersion,
         ratel_ai_core_version: RATEL_AI_CORE_VERSION,
         ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
@@ -816,6 +824,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   tally.exhausted = resume.exhausted;
   let cellsRun = 0;
   let totalDollars = 0;
+  let unknownCostCells = 0;
   let capHit = false;
   let totalToRun = liveTasks.length;
 
@@ -867,13 +876,15 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
           // in-flight cells that meet it), and the model is aborted.
           if (!(err instanceof FatalProviderError)) throw err;
           breaker.fatal(task.model.id, err);
+          if (err.unknownCost) unknownCostCells++;
           spend(err.dollarCost);
           continue;
         }
         // Another in-flight cell may have aborted this model while this one ran.
         // Its spend still counts, but an aborted model writes no further rows.
         if (breaker.isAborted(task.model.id)) {
-          spend(cell.dollar_cost);
+          if (cell.dollar_cost === null) unknownCostCells++;
+          spend(cell.dollar_cost ?? 0);
           continue;
         }
         // Tag with this run's identity before persisting (single write path, so
@@ -886,13 +897,18 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         cell.ratel_version = ratelVersion;
         cell.ratel_ai_core_version = RATEL_AI_CORE_VERSION;
         cell.ratel_ai_core_resolved_version = RATEL_AI_CORE_RESOLVED_VERSION;
+        cell.serving_provider = task.model.servingProvider;
+        cell.publisher = task.model.publisher;
+        cell.resolved_model = task.model.resolvedModel;
+        cell.vertex_location = task.model.vertexLocation;
         cell.cache_source = "live";
         cell.attempt = task.attempt;
+        if (cell.dollar_cost === null) unknownCostCells++;
         // Synchronous tail: append + counters happen without yielding, so two
         // workers cannot interleave their writes or accumulator updates.
         appendRow(config.outputPath, cell);
         cellsRun++;
-        spend(cell.dollar_cost);
+        spend(cell.dollar_cost ?? 0);
         tallyRow(tally, cell);
         breaker.record(task.model.id, cell);
         logCell(cell, logLevel, cellsRun, totalToRun);
@@ -926,6 +942,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     cells_cached: cellsCached,
     scenarios: scenarios.length,
     total_dollars: totalDollars,
+    unknown_cost_cells: unknownCostCells,
     stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
     cap_hit: capHit,
     ...tally,

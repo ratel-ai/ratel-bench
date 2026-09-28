@@ -92,6 +92,8 @@ export interface DoneSummary {
   /** Control cells served from the cache (re-stamped) instead of running live. */
   cells_cached: number;
   total_dollars: number;
+  /** Live cells whose provider cost and route estimate were both unavailable. */
+  unknown_cost_cells?: number;
   stopped_reason: StopReason;
   /** Spend reached the dollar cap (whatever `stopped_reason` ranks first). */
   cap_hit: boolean;
@@ -277,7 +279,9 @@ export function tallyRow(
 export function formatDoneLine(s: DoneSummary): string {
   return (
     `done: ${s.cells_run} cells run, ${s.cells_cached} cached, ${s.cells_skipped} skipped, ` +
-    `$${s.total_dollars.toFixed(4)} spent, stopped=${stoppedLabel(s)}, ` +
+    `$${s.total_dollars.toFixed(4)} spent, ` +
+    ((s.unknown_cost_cells ?? 0) > 0 ? `${s.unknown_cost_cells} unknown-cost cells, ` : "") +
+    `stopped=${stoppedLabel(s)}, ` +
     `${s.retries} retries (${s.throttled_retries} throttled), ${s.errors} errors, ` +
     `${s.requeued} re-queued, ${s.exhausted} exhausted`
   );

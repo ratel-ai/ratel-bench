@@ -37,6 +37,11 @@ const summary = (over: Partial<DoneSummary> = {}): DoneSummary => ({
 });
 
 describe("formatDoneLine", () => {
+  it("labels a known subtotal when some cells have unknown cost", () => {
+    expect(formatDoneLine(summary({ unknown_cost_cells: 2 }))).toContain(
+      "$1.2346 spent, 2 unknown-cost cells, stopped=completed",
+    );
+  });
   it("matches /^done: \\d+ cells run/ and /, \\$([0-9.]+) spent/ and appends counts", () => {
     const line = formatDoneLine(summary());
     // The bench-run.sh contract: its grep and its sed on the spend.

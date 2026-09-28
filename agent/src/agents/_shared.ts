@@ -209,6 +209,10 @@ export async function runMeteredLoop(
       seed: input.seed,
       nameToId: bundle.nameToId,
       provider: providerOf(input.model.model),
+      servingProvider: input.model.servingProvider,
+      publisher: input.model.publisher,
+      resolvedModel: input.model.resolvedModel,
+      vertexLocation: input.model.vertexLocation,
       retryStats: retry.stats,
     },
     generate,
@@ -217,7 +221,8 @@ export async function runMeteredLoop(
   );
   if (retry.stats.fatal) {
     const fatal = thrown instanceof FatalProviderError ? thrown : new FatalProviderError(thrown);
-    fatal.dollarCost = cell.dollar_cost;
+    fatal.dollarCost = cell.dollar_cost ?? 0;
+    fatal.unknownCost = cell.dollar_cost === null;
     throw fatal;
   }
   cell.max_output_tokens = input.model.maxOutputTokens;

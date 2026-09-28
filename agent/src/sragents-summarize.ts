@@ -16,9 +16,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
+import { modelRouteOfRow } from "./cell-key.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import {
+  assertSingleModelProvenance,
   corpusOf,
   isTruncated,
   mean,
@@ -96,9 +98,9 @@ export function summarizeSragents(args: {
 }): SummarizeResult {
   const { label } = args;
   const inLabel = (version: string | undefined) => !label || (version ?? "unknown") === label;
-  const cells = (args.cells ?? []).filter(
-    (c) => datasetOfCell(c) !== null && inLabel(c.ratel_ai_core_version),
-  );
+  const cells = (args.cells ?? [])
+    .filter((c) => datasetOfCell(c) !== null && inLabel(c.ratel_ai_core_version))
+    .map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
   const taskRows = buildTaskRows(supersede(cells, sragentsCellKeyOf));
   return {
     retrievalSummary: summarizeRetrieval(
@@ -204,6 +206,10 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
       generated_at: c.generated_at ?? "",
       dataset,
       model: c.model,
+      ...(c.serving_provider ? { serving_provider: c.serving_provider } : {}),
+      ...(c.publisher ? { publisher: c.publisher } : {}),
+      ...(c.resolved_model ? { resolved_model: c.resolved_model } : {}),
+      ...(c.vertex_location ? { vertex_location: c.vertex_location } : {}),
       arm: c.arm,
       scenario_id: c.scenario_id,
       gold_skill_ids: c.gold_skill_ids,
@@ -242,6 +248,7 @@ function summarizeTask(
   const out: SragentsTaskSummaryRow[] = [];
   for (const [key, arr] of groups) {
     const [version, dataset, model, arm] = key.split("::");
+    assertSingleModelProvenance(arr, model);
     const kept = arr.filter((r) => !r.excluded);
     const clean = kept.filter((r) => r.error_class === null);
     out.push({
@@ -252,6 +259,18 @@ function summarizeTask(
       ),
       source: "task_completion",
       model,
+      ...(arr.some((r) => r.serving_provider)
+        ? { serving_provider: provenance(arr.map((r) => r.serving_provider ?? null)) }
+        : {}),
+      ...(arr.some((r) => r.publisher)
+        ? { publisher: provenance(arr.map((r) => r.publisher ?? null)) }
+        : {}),
+      ...(arr.some((r) => r.resolved_model)
+        ? { resolved_model: provenance(arr.map((r) => r.resolved_model ?? null)) }
+        : {}),
+      ...(arr.some((r) => r.vertex_location)
+        ? { vertex_location: provenance(arr.map((r) => r.vertex_location ?? null)) }
+        : {}),
       arm,
       dataset,
       scenarios: kept.length,

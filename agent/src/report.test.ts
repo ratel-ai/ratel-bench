@@ -103,6 +103,32 @@ describe("statistics helpers", () => {
 });
 
 describe("statsByArmModel", () => {
+  it("separates routes, migrates evidenced historical names, and leaves unknown cost blank", () => {
+    const rows = [
+      cell({ model: "bedrock/claude-sonnet-5", dollar_cost: 0.01 }),
+      cell({ model: "gcp/claude-sonnet-5", dollar_cost: null, cost_source: "unknown" }),
+      cell({ model: "claude-sonnet-5", provider: "anthropic.messages", dollar_cost: 0.02 }),
+    ];
+    const stats = statsByArmModel(rows);
+    expect(stats.map((s) => s.model).sort()).toEqual([
+      "anthropic/claude-sonnet-5",
+      "bedrock/claude-sonnet-5",
+      "gcp/claude-sonnet-5",
+    ]);
+    expect(stats.find((s) => s.model === "gcp/claude-sonnet-5")?.mean_dollar_cost).toBeNull();
+    expect(stats.find((s) => s.model === "gcp/claude-sonnet-5")?.unknown_cost_cells).toBe(1);
+    expect(renderReport({ cells: rows, retrieval: [] })).toContain(
+      "Cost unknown for non-errored cells:",
+    );
+  });
+  it("refuses to blend a GCP alias after its resolved model changes", () => {
+    expect(() =>
+      statsByArmModel([
+        cell({ model: "gcp/gemini-alias", resolved_model: "gemini-2.5-pro" }),
+        cell({ model: "gcp/gemini-alias", resolved_model: "gemini-3-pro", scenario_id: "s2" }),
+      ]),
+    ).toThrow(/resolved_model/);
+  });
   it("groups by (arm, model) and reports per-scenario averaged success + means", () => {
     // Single-scenario case: per-scenario mean equals the run-level mean,
     // so the headline numbers are direct averages of the input cells.
