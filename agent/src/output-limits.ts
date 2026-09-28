@@ -23,11 +23,16 @@ import type { ResolvedModel, RunnerModel } from "./types.js";
 /** The models.json fields caps read (the file carries more, e.g. pricing). */
 export interface ModelCatalogEntry {
   id: string;
+  displayName?: string;
+  publisher?: string;
   /** Alternate route IDs retained for historical callers. */
   aliases?: string[];
   /** `<baseURL>#<model-name>` for self-hosted models; matched against the run's id. */
   endpoint?: string;
   bedrockProfile?: string;
+  bedrockRegion?: string;
+  bedrockApi?: "converse" | "responses" | "chat";
+  bedrockEndpoint?: "bedrock-runtime" | "bedrock-mantle";
   /** Positive integer; absent = no cap sent. */
   maxOutputTokens?: number;
 }
@@ -87,12 +92,14 @@ export function findModelCatalogEntry(
 }
 
 /**
- * models.json `run[]` entries. A missing catalog is empty (every id → no cap);
+ * models.json `run[]` plus `historical[]` entries. Only `run[]` is the default campaign;
+ * historical routes remain available for explicit overrides and old results.
+ * A missing catalog is empty (every id → no cap);
  * an unparseable one throws, since it would otherwise drop every cap silently.
  */
 export function loadModelCatalog(path: string = modelsJsonPath()): ModelCatalogEntry[] {
   if (!existsSync(path)) return [];
-  let catalog: { run?: ModelCatalogEntry[] };
+  let catalog: { run?: ModelCatalogEntry[]; historical?: ModelCatalogEntry[] };
   try {
     catalog = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
@@ -102,8 +109,12 @@ export function loadModelCatalog(path: string = modelsJsonPath()): ModelCatalogE
     if (catalog.run === undefined) return [];
     throw new Error(`models.json at ${path}: run must be an array`);
   }
+  if (catalog.historical !== undefined && !Array.isArray(catalog.historical)) {
+    throw new Error(`models.json at ${path}: historical must be an array`);
+  }
+  const entries = [...catalog.run, ...(catalog.historical ?? [])];
   const owners = new Map<string, number>();
-  for (const [index, entry] of catalog.run.entries()) {
+  for (const [index, entry] of entries.entries()) {
     if (!entry || typeof entry.id !== "string") {
       throw new Error(`models.json at ${path}: every run entry needs a model id`);
     }
@@ -124,7 +135,7 @@ export function loadModelCatalog(path: string = modelsJsonPath()): ModelCatalogE
       owners.set(canonical, index);
     }
   }
-  return catalog.run;
+  return entries;
 }
 
 /**

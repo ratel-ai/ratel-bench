@@ -33,7 +33,9 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 describe("sragentsModels", () => {
   it("defaults to Bedrock and keeps explicit historical direct routes", () => {
-    expect(sragentsModels([])).toEqual(["bedrock/claude-sonnet-5"]);
+    expect(sragentsModels([])).toHaveLength(16);
+    expect(sragentsModels([])[0]).toBe("bedrock/openai.gpt-6-astra");
+    expect(sragentsModels([]).at(-1)).toBe("bedrock/nvidia.nemotron-super-3-120b");
     expect(sragentsModels(["--models", "gpt-5.4-mini,openai/gpt-5.4-mini"])).toEqual([
       "bedrock/gpt-5.4-mini",
       "openai/gpt-5.4-mini",
@@ -42,7 +44,8 @@ describe("sragentsModels", () => {
 });
 
 // Fixed price so cost assertions don't depend on models.json / MODELS_JSON.
-vi.mock("./pricing.js", () => ({
+vi.mock("./pricing.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./pricing.js")>()),
   loadModelPricing: () => ({
     "claude-haiku-4-5": {
       inputPer1M: 1,

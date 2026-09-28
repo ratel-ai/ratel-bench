@@ -31,8 +31,11 @@ interface ModelEntry {
 export function loadModelPricing(path: string = modelsJsonPath()): PricingTable {
   let entries: ModelEntry[] = [];
   try {
-    const catalog = JSON.parse(readFileSync(path, "utf8")) as { run?: ModelEntry[] };
-    entries = catalog.run ?? [];
+    const catalog = JSON.parse(readFileSync(path, "utf8")) as {
+      run?: ModelEntry[];
+      historical?: ModelEntry[];
+    };
+    entries = [...(catalog.run ?? []), ...(catalog.historical ?? [])];
   } catch {
     return {}; // no catalog → no prices → $0 rows (unchanged behavior)
   }

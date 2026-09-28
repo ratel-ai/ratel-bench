@@ -24,6 +24,7 @@ import { createInterface } from "node:readline";
 import { generateObject, type LanguageModelUsage, NoObjectGeneratedError, RetryError } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
+import { preflightBedrockModels } from "./bedrock-preflight.js";
 import {
   classifyError,
   FatalProviderError,
@@ -59,10 +60,10 @@ import { loadModelPricing } from "./pricing.js";
 // unpriced → $0 cells and the dollar cap simply doesn't bound the run.
 const PRICING = loadModelPricing();
 
-import { DEFAULT_SRAGENTS_MODEL } from "./model-defaults.js";
+import { DEFAULT_SRAGENTS_MODELS } from "./model-defaults.js";
 import { warmUpModels } from "./model-endpoint.js";
 import { resolveModel } from "./model-factory.js";
-import { canonicalModelList } from "./model-identity.js";
+import { canonicalModelList, parseModelIdentity } from "./model-identity.js";
 import { resolveRepoPath } from "./paths.js";
 import { parseTimerMs } from "./positive-int.js";
 import {
@@ -593,7 +594,7 @@ function arg(name: string, fallback: string): string {
 
 export function sragentsModels(argv: readonly string[]): string[] {
   const index = argv.indexOf("--models");
-  if (index < 0) return [DEFAULT_SRAGENTS_MODEL];
+  if (index < 0) return [...DEFAULT_SRAGENTS_MODELS];
   const raw = argv[index + 1];
   if (raw === undefined || raw.startsWith("--")) throw new Error("--models requires model IDs");
   return canonicalModelList(raw);
@@ -910,6 +911,11 @@ async function main(): Promise<void> {
       override: caps.override,
     },
   );
+  const bedrockIds = models.filter((id) => {
+    const identity = parseModelIdentity(id);
+    return identity.kind === "provider" && identity.provider === "bedrock";
+  });
+  if (bedrockIds.length) await preflightBedrockModels(bedrockIds, { requirePricing: true });
   console.log(capsLine(resolved, caps.override));
   console.log(retrySettingsLine(retry, timeoutMs));
   console.log(breakerLine(abortAfterConsecutiveErrors));

@@ -14,11 +14,7 @@ import {
 } from "./output-limits.js";
 import type { ResolvedModel } from "./types.js";
 
-export interface ModelFactoryCatalogEntry extends ModelCatalogEntry {
-  bedrockRegion?: string;
-  bedrockApi?: "converse" | "responses" | "chat";
-  bedrockEndpoint?: "bedrock-runtime" | "bedrock-mantle";
-}
+export type ModelFactoryCatalogEntry = ModelCatalogEntry;
 
 export interface ResolveModelOptions {
   catalog?: readonly ModelFactoryCatalogEntry[];
@@ -102,6 +98,9 @@ function resolveBedrock(
   }
   if (/(?:^|\.)openai\.gpt-6/.test(entry.bedrockProfile) && api !== "responses") {
     throw new Error(`model ${id} requires the Bedrock Responses API for reasoning and tool calls`);
+  }
+  if (entry.bedrockProfile.startsWith("google.gemma-4") && endpoint !== "bedrock-mantle") {
+    throw new Error(`model ${id} requires the Bedrock Mantle endpoint`);
   }
   const apiKey = env.AWS_BEARER_TOKEN_BEDROCK;
   const credentials = opts.awsCredentials ?? fromNodeProviderChain();

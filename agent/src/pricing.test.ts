@@ -95,6 +95,24 @@ describe("loadModelPricing", () => {
     expect(t["openai/gpt-5.4-mini"].outputPer1M).toBe(4.5);
   });
 
+  it("keeps historical direct rates after they leave the default roster", () => {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        run: [{ id: "bedrock/openai.gpt-6-sol" }],
+        historical: [
+          {
+            id: "openai/gpt-5.4-mini",
+            pricing: {
+              openai: { inputPer1M: 0.75, outputPer1M: 4.5 },
+            },
+          },
+        ],
+      }),
+    );
+    expect(loadModelPricing(path)["openai/gpt-5.4-mini"].inputPer1M).toBe(0.75);
+  });
+
   it("ignores the legacy global backend setting for explicit routes", () => {
     process.env.RATEL_LLM_BACKEND = "bedrock";
     const t = loadModelPricing(path);

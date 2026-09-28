@@ -2,8 +2,149 @@ import { generateObject, generateText, stepCountIs, tool } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { resolveModel } from "./model-factory.js";
+import { loadModelCatalog } from "./output-limits.js";
 
 describe("native model resolution", () => {
+  it("routes the selected Bedrock families to their configured source regions and APIs", async () => {
+    const catalog = loadModelCatalog();
+    const selected = catalog.slice(0, 16);
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url, body });
+      const json = '{"selected_skill_ids":["skill_1"]}';
+      if (url.endsWith("/responses"))
+        return Response.json({
+          id: "resp_1",
+          object: "response",
+          created_at: 1,
+          model: body.model,
+          status: "completed",
+          output: [
+            {
+              id: "msg_1",
+              type: "message",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: json, annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 4, output_tokens: 3, total_tokens: 7 },
+        });
+      if (url.endsWith("/chat/completions"))
+        return Response.json({
+          id: "chatcmpl_1",
+          object: "chat.completion",
+          created: 1,
+          model: body.model,
+          choices: [
+            { index: 0, finish_reason: "stop", message: { role: "assistant", content: json } },
+          ],
+          usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+        });
+      return Response.json({
+        output: { message: { role: "assistant", content: [{ text: json }] } },
+        stopReason: "end_turn",
+        usage: { inputTokens: 4, outputTokens: 3, totalTokens: 7 },
+        metrics: { latencyMs: 1 },
+      });
+    };
+    for (const entry of selected) {
+      const { model } = resolveModel(entry.id, {
+        catalog,
+        env: { AWS_BEARER_TOKEN_BEDROCK: "fake" },
+        fetch,
+      });
+      const result = await generateObject({
+        model,
+        prompt: "select",
+        maxRetries: 0,
+        schema: z.object({ selected_skill_ids: z.array(z.string()) }),
+      });
+      expect(result.object).toEqual({ selected_skill_ids: ["skill_1"] });
+      const { url, body } = requests.at(-1) ?? { url: "", body: {} };
+      expect(url).toContain(`.${entry.bedrockRegion}.`);
+      expect(url).toContain(
+        entry.bedrockEndpoint === "bedrock-mantle"
+          ? "/openai/v1/chat/completions"
+          : entry.bedrockApi === "responses"
+            ? "/openai/v1/responses"
+            : "/converse",
+      );
+      if (body.model) expect(body.model).toBe(entry.bedrockProfile);
+      else expect(decodeURIComponent(url)).toContain(String(entry.bedrockProfile));
+    }
+  });
+
+  it.each([
+    "bedrock/openai.gpt-oss-120b-1:0",
+    "bedrock/google.gemma-4-31b",
+  ])("preserves BFCL tool state for selected %s", async (id) => {
+    const bodies: Record<string, unknown>[] = [];
+    const { model } = resolveModel(id, {
+      env: { AWS_BEARER_TOKEN_BEDROCK: "fake" },
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        const first = bodies.length === 1;
+        if (id.includes("gemma"))
+          return Response.json({
+            id: `chatcmpl_${bodies.length}`,
+            object: "chat.completion",
+            created: 1,
+            model: "google.gemma-4-31b",
+            choices: [
+              {
+                index: 0,
+                finish_reason: first ? "tool_calls" : "stop",
+                message: first
+                  ? {
+                      role: "assistant",
+                      content: null,
+                      tool_calls: [
+                        {
+                          id: "call_1",
+                          type: "function",
+                          function: { name: "lookup", arguments: '{"city":"Rome"}' },
+                        },
+                      ],
+                    }
+                  : { role: "assistant", content: "Rome" },
+              },
+            ],
+            usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          });
+        return Response.json({
+          output: {
+            message: {
+              role: "assistant",
+              content: first
+                ? [{ toolUse: { toolUseId: "call_1", name: "lookup", input: { city: "Rome" } } }]
+                : [{ text: "Rome" }],
+            },
+          },
+          stopReason: first ? "tool_use" : "end_turn",
+          usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+          metrics: { latencyMs: 1 },
+        });
+      },
+    });
+    const result = await generateText({
+      model,
+      prompt: "Find Rome",
+      maxRetries: 0,
+      stopWhen: stepCountIs(2),
+      tools: {
+        lookup: tool({
+          inputSchema: z.object({ city: z.string() }),
+          execute: async ({ city }) => ({ city }),
+        }),
+      },
+    });
+    expect(result.text).toBe("Rome");
+    expect(result.steps[0].toolCalls).toMatchObject([{ toolCallId: "call_1", toolName: "lookup" }]);
+    expect(JSON.stringify(bodies[1])).toContain("call_1");
+  });
   it("routes Bedrock through its own profile and source region without global state", () => {
     const before = process.env.RATEL_LLM_BACKEND;
     const catalog = [
@@ -372,6 +513,22 @@ describe("native model resolution", () => {
         catalog: [{ id: "bedrock/openai.gpt-6-sol", bedrockProfile: "global.openai.gpt-6-sol" }],
       }),
     ).toThrow(/Responses API/);
+  });
+
+  it("rejects a Gemma 4 route that would silently use runtime", () => {
+    expect(() =>
+      resolveModel("bedrock/google.gemma-4-31b", {
+        catalog: [
+          {
+            id: "bedrock/google.gemma-4-31b",
+            bedrockProfile: "google.gemma-4-31b",
+            bedrockRegion: "eu-central-1",
+            bedrockEndpoint: "bedrock-runtime",
+            bedrockApi: "converse",
+          },
+        ],
+      }),
+    ).toThrow(/Mantle/);
   });
 
   it("uses the configured Mantle Chat endpoint for a Bedrock-only model", async () => {

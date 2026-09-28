@@ -1,6 +1,168 @@
 {
   "run": [
     {
+      "id": "bedrock/openai.gpt-6-astra",
+      "displayName": "GPT-6 Astra",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.openai.gpt-6-astra",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "responses"
+    },
+    {
+      "id": "bedrock/openai.gpt-6-sol",
+      "displayName": "GPT-6 Sol",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.openai.gpt-6-sol",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "responses"
+    },
+    {
+      "id": "bedrock/openai.gpt-6-luna",
+      "displayName": "GPT-6 Luna",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.openai.gpt-6-luna",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "responses"
+    },
+    {
+      "id": "bedrock/anthropic.claude-fable-5-1",
+      "displayName": "Claude Fable 5.1",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-fable-5-1",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/anthropic.claude-opus-5-5",
+      "displayName": "Claude Opus 5.5",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-opus-5-5",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/anthropic.claude-sonnet-5",
+      "displayName": "Claude Sonnet 5",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-sonnet-5",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/anthropic.claude-haiku-4-5",
+      "displayName": "Claude Haiku 4.5",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/moonshotai.kimi-k3",
+      "displayName": "Kimi K3",
+      "publisher": "Moonshot AI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.moonshotai.kimi-k3",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/qwen.qwen3-coder-next",
+      "displayName": "Qwen3 Coder Next",
+      "publisher": "Qwen",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "qwen.qwen3-coder-next",
+      "bedrockRegion": "us-east-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/openai.gpt-oss-120b-1:0",
+      "displayName": "gpt-oss-120b",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "openai.gpt-oss-120b-1:0",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/openai.gpt-oss-20b-1:0",
+      "displayName": "gpt-oss-20b",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "openai.gpt-oss-20b-1:0",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/google.gemma-4-31b",
+      "displayName": "Gemma 4 31B",
+      "publisher": "Google",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "google.gemma-4-31b",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-mantle",
+      "bedrockApi": "chat"
+    },
+    {
+      "id": "bedrock/google.gemma-4-26b-a4b",
+      "displayName": "Gemma 4 26B-A4B",
+      "publisher": "Google",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "google.gemma-4-26b-a4b",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-mantle",
+      "bedrockApi": "chat"
+    },
+    {
+      "id": "bedrock/mistral.mistral-large-3-675b-instruct",
+      "displayName": "Mistral Large 3",
+      "publisher": "Mistral AI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "mistral.mistral-large-3-675b-instruct",
+      "bedrockRegion": "us-east-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/meta.llama4-scout-17b-instruct-v1:0",
+      "displayName": "Llama 4 Scout 17B Instruct",
+      "publisher": "Meta",
+      "maxOutputTokens": 8192,
+      "bedrockProfile": "us.meta.llama4-scout-17b-instruct-v1:0",
+      "bedrockRegion": "us-east-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    },
+    {
+      "id": "bedrock/nvidia.nemotron-super-3-120b",
+      "displayName": "Nemotron 3 Super 120B",
+      "publisher": "NVIDIA",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "nvidia.nemotron-super-3-120b",
+      "bedrockRegion": "eu-west-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
+    }
+  ],
+  "historical": [
+    {
       "id": "bedrock/claude-sonnet-5",
       "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-sonnet-5",
@@ -20,7 +182,10 @@
       },
       "aliases": [
         "anthropic/claude-sonnet-5"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "bedrock/claude-sonnet-4-6",
@@ -42,7 +207,10 @@
       },
       "aliases": [
         "anthropic/claude-sonnet-4-6"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "bedrock/claude-haiku-4-5",
@@ -64,7 +232,10 @@
       },
       "aliases": [
         "anthropic/claude-haiku-4-5"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "bedrock/claude-opus-4-8",
@@ -87,7 +258,10 @@
       },
       "aliases": [
         "anthropic/claude-opus-4-8"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "bedrock/claude-opus-4-5",
@@ -109,7 +283,10 @@
       },
       "aliases": [
         "anthropic/claude-opus-4-5"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "bedrock/claude-fable-5",
@@ -132,7 +309,10 @@
       },
       "aliases": [
         "anthropic/claude-fable-5"
-      ]
+      ],
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse"
     },
     {
       "id": "openai/gpt-5.4-mini",
