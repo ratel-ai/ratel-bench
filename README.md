@@ -52,6 +52,39 @@ dense and hybrid stages own their Ratel cells. Attachment sizing uses serialized
 JSON bytes plus base64 encoding and is checked before spend and on the final JSON.
 See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact work matrix.
 
+Run the credential-free compatibility gate with:
+
+```bash
+pnpm test:provider-compatibility
+```
+
+It validates the shared synthetic fixture across `bedrock`, `anthropic`, `openai`, `gcp`
+(Gemini and Claude on Vertex), and direct `xai`; route-specific prices; provider-scoped
+cache keys; campaign admission; canonical work-unit coverage; provenance; and the sealed
+result checksum consumed by the website importer. It also pins the default to exactly 16
+Bedrock routes spanning Converse, Responses, and Mantle chat APIs. No provider credentials,
+Google ADC, or network access are read by this gate.
+
+Emit the deterministic, importer-ready public result JSON to standard output with
+`pnpm --silent provider-compatibility-fixture`. Its committed expected checksum makes fixture drift
+explicit; the artifact remains synthetic and non-publishable.
+
+The bounded live checks below are opt-in and were not executed by the offline gate:
+
+```bash
+# Bedrock: one model from each selected API family (Converse, Responses, Mantle chat)
+pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-sonnet-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+
+# Vertex: Gemini plus Claude, using GOOGLE_VERTEX_PROJECT/LOCATION and ADC
+pnpm -F @ratel-ai/benchmark start --models gcp/gemini-2.5-pro,gcp/claude-sonnet-4-5@20250929 --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+
+# Direct xAI, using XAI_API_KEY
+pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+```
+
+Credentialed Bedrock availability and the GCP/xAI live commands remain deferred; do not
+treat the synthetic result as measured benchmark evidence.
+
 ### Launch from GitHub Actions
 
 The manual **Run benchmark campaign** Action submits the same selection contract as the

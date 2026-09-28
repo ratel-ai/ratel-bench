@@ -68,6 +68,7 @@ fixtures/suite/*
 !fixtures/suite/request-default.json
 !fixtures/suite/result-partial.json
 !fixtures/suite/result-completed.json
+!fixtures/suite/provider-compatibility.json
 # The mcpatlas experiment DEFINITION is version-controlled: the pinned task list
 # and the catalog manifests are what make a run reproducible. The raw dataset
 # rows they are derived from are not (56MB, and re-downloadable).
