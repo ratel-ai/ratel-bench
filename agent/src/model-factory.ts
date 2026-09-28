@@ -205,16 +205,30 @@ function resolveGcp(
 ): ResolvedModel {
   const entry = findModelCatalogEntry(id, opts.catalog ?? loadModelCatalog());
   const vertexModelId = entry?.vertexModelId ?? model;
-  if (
-    !/^gemini-[\w.-]+$/.test(vertexModelId) ||
-    (entry?.publisher && entry.publisher !== "Google")
-  ) {
+  const gemini =
+    /^gemini-[\w.-]+$/.test(vertexModelId) && (!entry?.publisher || entry.publisher === "Google");
+  const claude =
+    /^claude-[\w.-]+(?:@[\w.-]+)?$/.test(vertexModelId) &&
+    (!entry?.publisher || entry.publisher === "Anthropic");
+  if (!gemini && !claude) {
     throw new Error(`model ${id}: unsupported Vertex model family ${vertexModelId}`);
   }
   const project = opts.gcpProject ?? env.GOOGLE_VERTEX_PROJECT;
   const location = entry?.vertexLocation ?? opts.gcpLocation ?? env.GOOGLE_VERTEX_LOCATION;
   if (!project) throw new Error(`model ${id} requires GOOGLE_VERTEX_PROJECT`);
   if (!location) throw new Error(`model ${id} requires GOOGLE_VERTEX_LOCATION`);
+  if (claude) {
+    const { createVertexAnthropic } = createRequire(import.meta.url)(
+      "@ai-sdk/google-vertex/anthropic",
+    ) as typeof import("@ai-sdk/google-vertex/anthropic");
+    const provider = createVertexAnthropic({
+      project,
+      location,
+      generateAuthToken: opts.gcpAccessToken,
+      fetch: opts.fetch,
+    });
+    return { id, model: provider(vertexModelId) };
+  }
   const { createVertex } = createRequire(import.meta.url)(
     "@ai-sdk/google-vertex",
   ) as typeof import("@ai-sdk/google-vertex");

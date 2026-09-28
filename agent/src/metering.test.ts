@@ -65,6 +65,26 @@ describe("summarize", () => {
     expect(summarize(noTotal).totalTokens).toBe(150);
   });
 
+  it("does not count cached prompt tokens twice when totalTokens is absent", () => {
+    const noTotal: AgentLikeResult = {
+      steps: [
+        {
+          usage: {
+            inputTokens: 10,
+            outputTokens: 4,
+            inputTokenDetails: { cacheReadTokens: 3, cacheWriteTokens: 2 },
+          },
+        },
+      ],
+    };
+    expect(summarize(noTotal)).toMatchObject({
+      inputTokens: 10,
+      cachedInputTokens: 3,
+      cacheCreationTokens: 2,
+      totalTokens: 14,
+    });
+  });
+
   it("handles a null result gracefully", () => {
     const s = summarize(null);
     expect(s.inputTokens).toBe(0);

@@ -106,7 +106,7 @@ it("maps a catalog alias to its exact Gemini API ID and model-specific location"
     /unsupported Vertex model family mystery-model/,
   );
   expect(() => resolveModel("gcp/claude-sonnet-4-5@20250929", { env: {} })).toThrow(
-    /unsupported Vertex model family claude-sonnet-4-5@20250929/,
+    /GOOGLE_VERTEX_PROJECT/,
   );
 });
 

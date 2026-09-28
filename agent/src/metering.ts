@@ -30,6 +30,7 @@ export interface AgentStep {
     outputTokens?: number;
     cachedInputTokens?: number;
     cacheCreationInputTokens?: number;
+    inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
     totalTokens?: number;
   };
 }
@@ -334,8 +335,8 @@ export function summarize(
       maxStepOutput = Math.max(maxStepOutput, u.outputTokens ?? 0);
       input += u.inputTokens ?? 0;
       output += u.outputTokens ?? 0;
-      cached += u.cachedInputTokens ?? 0;
-      cacheCreation += u.cacheCreationInputTokens ?? 0;
+      cached += u.inputTokenDetails?.cacheReadTokens ?? u.cachedInputTokens ?? 0;
+      cacheCreation += u.inputTokenDetails?.cacheWriteTokens ?? u.cacheCreationInputTokens ?? 0;
       total += u.totalTokens ?? 0;
     }
     for (const call of step.toolCalls ?? []) {
@@ -352,7 +353,7 @@ export function summarize(
     }
   }
   // Some providers don't surface `totalTokens`; fall back to input + output.
-  if (total === 0) total = input + output + cached;
+  if (total === 0) total = input + output;
   const unique = new Set(calls.map((c) => c.toolId)).size;
   return {
     inputTokens: input,
