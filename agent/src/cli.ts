@@ -37,6 +37,7 @@ import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
 import { doneLines, rerunSettingsLine, runExitCode } from "./rerun.js";
 import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
+import { selectVersion, validateSdk } from "./sdk/resolve.js";
 import type { ResolvedModel } from "./types.js";
 
 loadEnv();
@@ -189,6 +190,8 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
+  selectVersion(parsed.sdkVersion ?? "");
+  await validateSdk();
   // Output path, control-cache sources and tiers (reuse is ON by default),
   // --ratel-version and the judge cap.
   const target = resolveRunTarget(parsed, {

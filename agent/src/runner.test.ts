@@ -631,6 +631,7 @@ describe("runner", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].ratel_version).toBe("9.9.9");
     expect(rows[0].cache_source).toBe("reused");
+    expect(readFileSync(canonical, "utf-8")).toContain('"ratel_version":"test"');
   });
 
   it("appendRow writes one valid JSON line per call without quadratic rewrites", () => {
