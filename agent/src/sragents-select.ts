@@ -606,7 +606,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     let i = 0;
     let dispatchStopped = false;
     const pick = (): QueuedTask | null => {
-      if (dispatchStopped || opts.signal?.aborted) return null;
+      if (dispatchStopped || capHit || opts.signal?.aborted) return null;
       if (dollars >= effectiveDollarCap) {
         capHit = true;
         return null;

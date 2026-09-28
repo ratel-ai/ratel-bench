@@ -1775,6 +1775,65 @@ describe("runCampaign: breaker, rounds and cap", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("stops picking cheaper SR work after confirmed budget exhaustion", async () => {
+    const calls = [0, 0, 0];
+    const models = calls.map(
+      (_, i) =>
+        new MockLanguageModelV3({
+          doGenerate: async () => {
+            calls[i]++;
+            return answer;
+          },
+        }),
+    );
+    const tasks = [
+      taskOf("bedrock/first", models[0], 0),
+      taskOf("bedrock/expensive", models[1], 1),
+      taskOf("bedrock/cheap", models[2], 2),
+    ];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const standard = {
+      inputPer1M: 1,
+      outputPer1M: 2,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    const cheap = {
+      inputPer1M: 0.1,
+      outputPer1M: 0.1,
+      cachedInputPer1M: 0.1,
+      cacheCreationPer1M: 0.1,
+    };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-stop-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: {
+          "bedrock/first": standard,
+          "bedrock/expensive": standard,
+          "bedrock/cheap": cheap,
+        },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/first": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/expensive": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/cheap": { price: cheap, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+
+      expect(calls).toEqual([1, 0, 0]);
+      expect(result.coverage).toMatchObject({
+        requested: 3,
+        completed: 1,
+        skipped: 2,
+        status: "budget_limited",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const sc = (i: number) => ({
     scenarioId: `sragents-toolqa_${i}`,
     category: "sragents-toolqa",

@@ -71,7 +71,7 @@ campaign-scoped `BudgetStore`. Construct it with pinned route prices and
 provider-enforced input/output (including reasoning) token bounds; preflight
 rejects missing prices, uncapped output and mismatched rate snapshots before
 inference. Each BFCL, SR and judge physical call reserves its worst-case cost,
-fsyncs the attempt, claims its stable dispatch ID, then calls the provider.
+claims its stable dispatch ID, fsyncs the attempt journal, then calls the provider.
 Wrapper retries use fresh IDs; AI SDK retries are disabled. Missing usage and
 crashed dispatches keep their reservations, and journaled settlements replay on
 resume. Temporary contention waits for settlement; a drained, unaffordable
