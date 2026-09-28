@@ -27,6 +27,7 @@ export type SragentsRetrievalRow = BfclRetrievalRow;
 export interface SragentsRetrievalSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "retriever_evaluation";
   dataset: string;
   pool_size: number;
@@ -66,6 +67,8 @@ export interface SragentsSelectCell {
   run_type: "skill_selection";
   generated_at: string;
   ratel_ai_core_version: string;
+  /** Exact crate release, independent of the method-specific report label. */
+  ratel_ai_core_resolved_version?: string;
   scenario_id: string;
   /** `sragents-<dataset>` — the bucketing key. */
   category: string;
@@ -125,6 +128,7 @@ export interface SragentsSelectCell {
 /** Per-row skill-selection record (`results/raw/sragents/task-completion-rows.jsonl`). */
 export interface SragentsTaskRow {
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   generated_at: string;
   dataset: string;
   model: string;
@@ -173,6 +177,7 @@ export interface SragentsTaskRow {
 export interface SragentsTaskSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string;
   arm: string;

@@ -87,6 +87,22 @@ const scenarios: Scenario[] = [
 ];
 
 describe("summarizeBfcl — retrieval summary", () => {
+  it("keeps the resolved core release alongside a method report label", () => {
+    const label = "0.11.0-hybrid";
+    const result = summarizeBfcl({
+      retrievalRows: [
+        retrievalRow({
+          ratel_ai_core_version: label,
+          ratel_ai_core_resolved_version: "0.11.0",
+        }),
+      ],
+      cells: [cell({ ratel_ai_core_version: label, ratel_ai_core_resolved_version: "0.11.0" })],
+      scenarios,
+    });
+    expect(result.retrievalSummary[0]?.ratel_ai_core_resolved_version).toBe("0.11.0");
+    expect(result.taskSummary[0]?.ratel_ai_core_resolved_version).toBe("0.11.0");
+  });
+
   it("emits one flat row per (type, pool_size, k) with gold-similarity stats", () => {
     const rows = [
       retrievalRow({ scenario_id: "bfcl-simple-0", category: "bfcl-simple", gold_score: 4 }),
@@ -204,7 +220,7 @@ describe("summarizeBfcl — task completion", () => {
     const s = taskSummary[0];
     expect(s.recall).toBe(0.5);
     expect(s.latency_p50_ms).toBe(700);
-    // exactly the five metrics (+ identity/dims + n + error counters + cap/retry provenance), nothing extra
+    // exactly the five metrics (+ identity/dims + n + error and provenance fields)
     expect(Object.keys(s).sort()).toEqual(
       [
         "arm",
@@ -218,6 +234,7 @@ describe("summarizeBfcl — task completion", () => {
         "throttled_retries",
         "mean_total_tokens",
         "model",
+        "ratel_ai_core_resolved_version",
         "ratel_ai_core_version",
         "recall",
         "scenarios",

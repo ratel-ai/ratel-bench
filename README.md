@@ -86,7 +86,7 @@ Every retrieval row and agent cell is **stamped with the Ratel version it was pr
 
 There are **two version knobs**, and which one matters depends on the eval:
 
-- **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). Swap it with the `version-set` / `version-reset` bookends below.
+- **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). The committed dependency pins `0.11.0`; swap it with the `version-set` / `version-reset` bookends below. The Rust corpus conversion selects the compatible Tool/Skill shape from the resolved crate version, so older core fixtures remain buildable.
 - **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it. Select an installed exact release with `--sdk-version` (for example `0.12.0`); the default dependency remains `0.4.0` for historical runs. The SDK and core have independent release numbers (current stable pair: SDK `0.12.0`, core `0.11.0`).
 
 > **Pre-0.4.0 versions all run the identical experiment above — the commands don't change between them.** 0.4.0 is the first version that lets you **choose the retriever**, so its runs differ only slightly: pin the 0.4.0 SDK, tag the run with a method-suffixed label (`RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`), and add `--retriever bm25|semantic|hybrid`. Everything else — pools, top-k, arms, scenario counts — is unchanged. `control-baseline` and `control-oracle` are retriever-independent, so they're **reused from the canonical 0.2.0 cache** rather than re-run — but purge any stale/pre-fix cached cells (`--force` on the *first* method) so a gold-incomplete or poisoned 0.2.0 pool can't skew the 0.4.0 numbers. See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact per-method commands.
@@ -103,6 +103,7 @@ pnpm version-reset                                               # restore the c
 - `version-set` snapshots `retrieval/Cargo.toml` + `Cargo.lock`, swaps the `ratel-ai-core` dependency to the requested source, then **asserts** the resolved version equals `--expect` — aborting and restoring if not, so a force-moved tag can't silently benchmark the wrong build. It refuses to run twice without a reset.
 - `version-reset` restores the snapshot and deletes it. **Always run it when done** so the tree builds against the released version again.
 - `--expect` is the version string Cargo resolves (the git tag `v0.3.0-rc.1` resolves to crate version `0.3.0-rc.1`).
+- Verify both supported core paths with `pnpm version-set --crate 0.2.0 --expect 0.2.0 && cargo test --manifest-path retrieval/Cargo.toml`, then `pnpm version-reset && cargo test --manifest-path retrieval/Cargo.toml` for the committed `0.11.0` pin. The `core_compatibility` fixtures rank a known tool and skill on both versions. The Rust retrieval rows stamp the actual crate release as `ratel_ai_core_version`; TypeScript rows additionally stamp `ratel_ai_core_resolved_version` from `Cargo.lock`, separate from the method-specific `ratel_ai_core_version` report label and SDK `ratel_version`.
 
 Each scenario below is self-contained: **reset → set → run → summarize → report → compare → reset**. The `v0.3.0-rc.1` pin is an example — substitute the version you're testing.
 
@@ -239,7 +240,7 @@ pnpm version-reset
 
 ### Scenario 4 — LLM eval · BFCL
 
-> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` sets the `ratel_ai_core_version` label; `--sdk-version` selects the actual SDK. Record and verify both versions independently. **Needs an API key.**
+> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` changes the actual core dependency and default `ratel_ai_core_version` label; `RATEL_VERSION_LABEL` can override the label without changing the dependency. `ratel_ai_core_resolved_version` records the actual crate release. `--sdk-version` selects the SDK independently. **Needs an API key.**
 
 ```bash
 # 1. pin the core (sets the ratel_ai_core_version label)

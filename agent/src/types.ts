@@ -198,11 +198,12 @@ export interface CellResult {
    */
   ratel_version: string;
   /**
-   * `ratel-ai-core` version resolved from the repo-root `Cargo.lock` — the same
-   * authoritative value the retrieval layer stamps. The cross-layer alignment key
-   * `create-report` verifies. Optional: older rows predate it.
+   * Report grouping label. May include a retrieval-method suffix and differ
+   * from both the resolved core crate and the selected SDK.
    */
   ratel_ai_core_version?: string;
+  /** Exact `ratel-ai-core` release resolved in Cargo.lock. Older rows lack it. */
+  ratel_ai_core_resolved_version?: string;
   /** Tools the model directly sees this run (= what its context pays for). */
   catalog_size: number;
   /**

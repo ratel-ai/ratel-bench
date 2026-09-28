@@ -89,7 +89,7 @@ import {
 } from "./rerun.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
 
@@ -358,6 +358,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     run_type: "skill_selection",
     generated_at: new Date().toISOString(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+    ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
     scenario_id: args.sc.scenarioId,
     category: args.sc.category,
     arm: args.arm,
@@ -769,6 +770,7 @@ export function drainControlCache(
         appendJsonl(opts.outputPath, {
           ...prior,
           ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
           generated_at: new Date().toISOString(),
           cache_source: "reused",
         });

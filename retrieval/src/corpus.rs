@@ -29,6 +29,8 @@ impl From<ToolSpec> for ratel_ai_core::Tool {
             id: spec.id,
             name: spec.name,
             description: spec.description,
+            #[cfg(core_searchable_description)]
+            experimental_searchable_description: None,
             input_schema: spec.input_schema,
             output_schema: spec.output_schema,
         }
@@ -41,6 +43,8 @@ impl From<&ToolSpec> for ratel_ai_core::Tool {
             id: spec.id.clone(),
             name: spec.name.clone(),
             description: spec.description.clone(),
+            #[cfg(core_searchable_description)]
+            experimental_searchable_description: None,
             input_schema: spec.input_schema.clone(),
             output_schema: spec.output_schema.clone(),
         }
@@ -84,6 +88,8 @@ impl From<&SkillSpec> for ratel_ai_core::Skill {
             id: spec.id.clone(),
             name: spec.name.clone(),
             description: spec.description.clone(),
+            #[cfg(core_searchable_description)]
+            experimental_searchable_description: None,
             tags: spec.tags.clone(),
             tools: spec.tools.clone(),
             metadata: std::collections::HashMap::new(),

@@ -234,6 +234,7 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
                     actual_pool_size: *actual_pool_size,
                     pool_ids: pool_ids.clone(),
                     ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
+                    ratel_ai_core_resolved_version: env!("RATEL_AI_CORE_VERSION").to_string(),
                     metrics: metrics.clone(),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&row)?)?;
@@ -262,6 +263,7 @@ pub fn run_skill_retrieval(config: &SkillRunConfig) -> anyhow::Result<RunSummary
         run_id: run_id.clone(),
         generated_at: generated_at.clone(),
         ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
+        ratel_ai_core_resolved_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.instances_path.display().to_string(),
         output: config.output_path.display().to_string(),
         scenarios: instances.len(),
@@ -381,6 +383,10 @@ mod tests {
         let rows = std::fs::read_to_string(&cfg.output_path).unwrap();
         let r: serde_json::Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
         assert_eq!(r["category"], "sragents-champ");
+        assert_eq!(
+            r["ratel_ai_core_resolved_version"],
+            env!("RATEL_AI_CORE_VERSION")
+        );
         assert_eq!(r["hit_at_k"], true);
         assert_eq!(r["recall_at_k"], 1.0);
     }

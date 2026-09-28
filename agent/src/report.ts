@@ -21,6 +21,7 @@ export interface RetrievalRow {
   actual_pool_size: number;
   /** BM25 engine version (= `ratel-ai-core` crate) this row was scored with. */
   ratel_ai_core_version?: string;
+  ratel_ai_core_resolved_version?: string;
   k: number;
   pool_size: number;
   gold_count: number;

@@ -120,6 +120,8 @@ pub struct RetrievalRow {
     /// markdown report (which reads per-row JSONL, not the summary) can surface
     /// it. Mirrors the agent layer's per-cell `ratel_version`.
     pub ratel_ai_core_version: String,
+    /// Exact crate release; kept separate from report labels in downstream rows.
+    pub ratel_ai_core_resolved_version: String,
     #[serde(flatten)]
     pub metrics: RetrievalMetrics,
 }
@@ -299,6 +301,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
                     actual_pool_size: *actual_pool_size,
                     pool_ids: pool_ids.clone(),
                     ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
+                    ratel_ai_core_resolved_version: env!("RATEL_AI_CORE_VERSION").to_string(),
                     metrics: metrics.clone(),
                 };
                 writeln!(writer, "{}", serde_json::to_string(&row)?)?;
@@ -337,6 +340,7 @@ pub fn run_retrieval(config: &RunConfig) -> anyhow::Result<RunSummary> {
         run_id: run_id.clone(),
         generated_at: generated_at.clone(),
         ratel_ai_core_version: env!("RATEL_AI_CORE_VERSION").to_string(),
+        ratel_ai_core_resolved_version: env!("RATEL_AI_CORE_VERSION").to_string(),
         corpus: config.corpus_path.display().to_string(),
         output: config.output_path.display().to_string(),
         scenarios: scenarios.len(),
@@ -546,6 +550,7 @@ pub struct OverallSummary {
     /// from Cargo.lock at build time). Lets the append-only summary track how
     /// retrieval/skill metrics shift across engine updates.
     pub ratel_ai_core_version: String,
+    pub ratel_ai_core_resolved_version: String,
     pub corpus: String,
     pub output: String,
     pub scenarios: usize,
@@ -705,6 +710,10 @@ mod tests {
         let mut ks_seen = std::collections::HashSet::new();
         for line in lines {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                v["ratel_ai_core_resolved_version"],
+                env!("RATEL_AI_CORE_VERSION")
+            );
             ks_seen.insert(v["k"].as_u64().unwrap() as usize);
         }
         assert_eq!(ks_seen, std::collections::HashSet::from([1, 3]));

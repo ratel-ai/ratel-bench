@@ -7,7 +7,7 @@ import { classifyError, type ErrorClass } from "./cell-errors.js";
 import type { RetryStats } from "./llm-retry.js";
 import { GATEWAY_INVOKE_ID, GATEWAY_SEARCH_ID, sdkVersion } from "./sdk/resolve.js";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 // Historical default for callers that report it directly. Rows resolve the
 // selected package at measurement time, after --sdk-version is parsed.
@@ -178,6 +178,7 @@ export async function meter(
     run_index: ctx.runIndex,
     ratel_version: sdkVersion(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+    ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
     seed: ctx.seed,

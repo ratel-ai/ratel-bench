@@ -82,7 +82,7 @@ import type {
   Scenario,
   ToolSpec,
 } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 /**
  * Arms whose cell results don't depend on the ratel-specific code path being
@@ -748,6 +748,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         ...cached,
         ratel_version: ratelVersion,
         ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+        ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
         run_id: runId,
         generated_at: runTimestamp,
         cache_source: "reused",
@@ -883,6 +884,8 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
         cell.run_id = runId;
         cell.generated_at = runTimestamp;
         cell.ratel_version = ratelVersion;
+        cell.ratel_ai_core_version = RATEL_AI_CORE_VERSION;
+        cell.ratel_ai_core_resolved_version = RATEL_AI_CORE_RESOLVED_VERSION;
         cell.cache_source = "live";
         cell.attempt = task.attempt;
         // Synchronous tail: append + counters happen without yielding, so two
