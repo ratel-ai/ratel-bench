@@ -11,15 +11,18 @@
 // no answer to judge (the runner never judges them either). Errors out fast when a
 // scenario_id is missing from the corpus rather than silently emitting `n/a`.
 
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { LanguageModel } from "ai";
 import { errorClassOf } from "./cell-errors.js";
+import { cellKeyOf } from "./cell-key.js";
 import { loadScenarios } from "./corpus.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM as defaultJudgeLLM, type JudgePromptVariant } from "./judges/llm.js";
-import { effectiveCalls } from "./metering.js";
+import { effectiveCalls, type PricingTable } from "./metering.js";
+import { openSpendLedger, spendRecorder } from "./spend-ledger.js";
 import type { CellResult, Scenario } from "./types.js";
 
 export interface RejudgeArgs {
@@ -28,6 +31,8 @@ export interface RejudgeArgs {
   corpusPath: string;
   /** Optional — when omitted, only the (LLM-free) AST verdict is recomputed. */
   judgeModel?: LanguageModel;
+  judgeModelId?: string;
+  pricing?: PricingTable;
   /** Defaults to `"strict"` — same as the runner's default. */
   promptVariant?: JudgePromptVariant;
   /** `--judge-max-output-tokens`: cap on each judge call. Unset = no cap sent. */
@@ -65,6 +70,10 @@ export interface RejudgeSummary {
  */
 export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
   const judge = args.judge ?? defaultJudgeLLM;
+  const spendLedger = args.judgeModel
+    ? openSpendLedger(`${args.outputPath}.spend.jsonl`)
+    : undefined;
+  const spendRunId = randomUUID();
   const variant = args.promptVariant ?? "strict";
   const recomputeAst = args.recomputeAst ?? true;
 
@@ -106,6 +115,23 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
         model: args.judgeModel,
         promptVariant: variant,
         maxOutputTokens: args.judgeMaxOutputTokens,
+        attempt: spendLedger
+          ? spendRecorder(spendLedger, {
+              runId: spendRunId,
+              kind: "judge",
+              cellKey: cellKeyOf(cell),
+              model:
+                args.judgeModelId ??
+                (typeof args.judgeModel === "string"
+                  ? args.judgeModel
+                  : `${args.judgeModel.provider}/${args.judgeModel.modelId}`),
+              adapterProvider:
+                typeof args.judgeModel === "string" ? undefined : args.judgeModel.provider,
+              adapterModel:
+                typeof args.judgeModel === "string" ? undefined : args.judgeModel.modelId,
+              price: args.judgeModelId ? (args.pricing?.[args.judgeModelId] ?? null) : null,
+            })
+          : undefined,
       });
       cell.judge_verdict = judged.verdict;
       cell.judge_explanation = judged.explanation;

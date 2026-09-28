@@ -20,6 +20,7 @@ import {
 } from "./cell-errors.js";
 import { type AbortReason, type ModelAbort, type SleepFn, sleep } from "./llm-retry.js";
 import { MAX_TIMER_MS, parseNonNegativeInt } from "./positive-int.js";
+import type { SpendSummary } from "./spend-ledger.js";
 
 export interface RerunSettings {
   /** `--retry-errors`: which errored rows resume and retry rounds re-run. */
@@ -92,6 +93,8 @@ export interface DoneSummary {
   /** Control cells served from the cache (re-stamped) instead of running live. */
   cells_cached: number;
   total_dollars: number;
+  /** Durable provider attempts; absent from legacy SR-Agents summaries. */
+  spend?: SpendSummary;
   /** Live cells whose provider cost and route estimate were both unavailable. */
   unknown_cost_cells?: number;
   stopped_reason: StopReason;
@@ -277,9 +280,13 @@ export function tallyRow(
  * `, \$([0-9.]+) spent`, and takes the error counts from here: keep both.
  */
 export function formatDoneLine(s: DoneSummary): string {
+  const accounting =
+    s.spend?.completeness === "partial"
+      ? ` (known lower bound; ${s.spend.unresolved} unresolved, ${s.spend.unknown} unknown, ${s.spend.untrackedRows ?? 0} untracked rows)`
+      : "";
   return (
     `done: ${s.cells_run} cells run, ${s.cells_cached} cached, ${s.cells_skipped} skipped, ` +
-    `$${s.total_dollars.toFixed(4)} spent, ` +
+    `$${s.total_dollars.toFixed(4)} spent${accounting}, ` +
     ((s.unknown_cost_cells ?? 0) > 0 ? `${s.unknown_cost_cells} unknown-cost cells, ` : "") +
     `stopped=${stoppedLabel(s)}, ` +
     `${s.retries} retries (${s.throttled_retries} throttled), ${s.errors} errors, ` +

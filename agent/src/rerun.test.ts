@@ -37,6 +37,21 @@ const summary = (over: Partial<DoneSummary> = {}): DoneSummary => ({
 });
 
 describe("formatDoneLine", () => {
+  it("labels known spend as a lower bound when attempt accounting is incomplete", () => {
+    const line = formatDoneLine(
+      summary({
+        spend: {
+          attempts: 3,
+          unresolved: 1,
+          unknown: 1,
+          untrackedRows: 0,
+          knownUsd: 0.5,
+          completeness: "partial",
+        },
+      }),
+    );
+    expect(line).toContain("spent (known lower bound; 1 unresolved, 1 unknown");
+  });
   it("labels a known subtotal when some cells have unknown cost", () => {
     expect(formatDoneLine(summary({ unknown_cost_cells: 2 }))).toContain(
       "$1.2346 spent, 2 unknown-cost cells, stopped=completed",

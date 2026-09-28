@@ -13,12 +13,19 @@
 
 import { generateObject, type LanguageModel, NoObjectGeneratedError, RetryError } from "ai";
 import { z } from "zod";
+import {
+  type AttemptRecorder,
+  DEFAULT_RETRY_SETTINGS,
+  newRetryStats,
+  SpendJournalError,
+  withRetry,
+} from "../llm-retry.js";
 import type { JudgeVerdict } from "../types.js";
 
 /**
- * SDK retries for a judge call (ai@6's default is 2). Judges are not wrapped by
- * the agent's retry policy (`llm-retry.ts`) and never feed its row counters: a
- * judge outage is an `n/a` verdict, not an agent error.
+ * Maximum judge retries. With a spend journal, physical attempts use
+ * `withRetry` and SDK retries are off. Otherwise the SDK applies this limit.
+ * Judge outages remain `n/a` and do not feed agent-row retry counters.
  */
 export const JUDGE_MAX_RETRIES = 6;
 
@@ -53,6 +60,8 @@ export interface LLMJudgeArgs {
   promptVariant?: JudgePromptVariant;
   /** `--judge-max-output-tokens`: cap on the judge call. Unset = no cap sent. */
   maxOutputTokens?: number;
+  /** When supplied, each physical judge request is journaled before dispatch. */
+  attempt?: AttemptRecorder;
 }
 
 export interface LLMJudgeResult {
@@ -124,15 +133,22 @@ export async function judgeLLM(args: LLMJudgeArgs): Promise<LLMJudgeResult> {
 
   try {
     const { object } = await generateObject({
-      model: args.model,
+      model: args.attempt
+        ? withRetry(args.model, {
+            policy: { ...DEFAULT_RETRY_SETTINGS.policy, maxAttempts: JUDGE_MAX_RETRIES + 1 },
+            stats: newRetryStats(),
+            attempt: args.attempt,
+          })
+        : args.model,
       schema: VerdictSchema,
       system,
       prompt: userPrompt,
       maxOutputTokens: args.maxOutputTokens,
-      maxRetries: JUDGE_MAX_RETRIES,
+      maxRetries: args.attempt ? 0 : JUDGE_MAX_RETRIES,
     });
     return { verdict: object.verdict, explanation: object.explanation };
   } catch (err) {
+    if (err instanceof SpendJournalError) throw err;
     // A verdict cut off by the output cap is no verdict: n/a, labelled so a
     // too-tight `--judge-max-output-tokens` is visible (not a judge outage).
     const cause = RetryError.isInstance(err) ? err.lastError : err;

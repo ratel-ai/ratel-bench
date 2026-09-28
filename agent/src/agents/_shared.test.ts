@@ -3,7 +3,7 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { FatalProviderError } from "../cell-errors.js";
-import { type RetrySettings, sleep as realSleep } from "../llm-retry.js";
+import { type RetrySettings, sleep as realSleep, SpendJournalError } from "../llm-retry.js";
 import type { AgentRunInput, ToolSpec } from "../types.js";
 import {
   buildToolBundle,
@@ -168,6 +168,61 @@ describe("registerGateway", () => {
 });
 
 describe("runMeteredLoop", () => {
+  it("stops the cell when its dispatch cannot be journaled", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const retry: RetrySettings = {
+      policy: { maxAttempts: 1, baseMs: 1, maxDelayMs: 1, maxTotalWaitMs: 1 },
+      graceMs: 1,
+      attempt: {
+        start: () => {
+          throw new SpendJournalError(new Error("disk full"));
+        },
+        finish: () => {},
+      },
+    };
+    await expect(
+      runMeteredLoop("control-baseline", input(model, null, { retry }), buildToolBundle([spec])),
+    ).rejects.toThrow(SpendJournalError);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it("stops after a provider response when settlement cannot be journaled", async () => {
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "ok" }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const retry: RetrySettings = {
+      policy: { maxAttempts: 2, baseMs: 1, maxDelayMs: 1, maxTotalWaitMs: 1 },
+      graceMs: 1,
+      attempt: {
+        start: () => "dispatched",
+        finish: () => {
+          throw new SpendJournalError(new Error("disk full"));
+        },
+      },
+    };
+    await expect(
+      runMeteredLoop("control-baseline", input(model, null, { retry }), buildToolBundle([spec])),
+    ).rejects.toThrow(SpendJournalError);
+    expect(model.doGenerateCalls).toHaveLength(1);
+  });
   const spec: ToolSpec = {
     id: "fs.read_file",
     name: "read_file",
