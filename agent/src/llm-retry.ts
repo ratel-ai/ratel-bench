@@ -15,8 +15,8 @@
 //     grace for layers that ignore the abort;
 //   - with a `log`, each retry prints one line (attempt, status, wait).
 //
-// Retries change a cell's completion probability, not its answer. Judges are not
-// wrapped (they pass `maxRetries` to the SDK) and never feed these stats.
+// Retries change a cell's completion probability, not its answer. Paid judges
+// use the same wrapper when an attempt journal is present; SDK retries are then off.
 //
 // Across cells, a per-model `createBreaker` stops a gated or daily-capped model
 // from writing rows: a `FatalProviderError` aborts it at once (the cell writes no
@@ -74,6 +74,21 @@ export interface WithRetryOptions {
   random?: () => number;
   /** Receives one line per retry; unset = silent. */
   log?: (line: string) => void;
+  /** Durable seam around each physical provider call, including retries. */
+  attempt?: AttemptRecorder;
+}
+
+export interface AttemptRecorder {
+  start(): string;
+  finish(id: string, result: unknown, error: unknown, aborted: boolean): void;
+}
+
+/** Storage failed at the paid-call boundary; callers must stop new inference. */
+export class SpendJournalError extends Error {
+  constructor(cause: unknown) {
+    super(`spend journal failed: ${(cause as Error)?.message ?? String(cause)}`, { cause });
+    this.name = "SpendJournalError";
+  }
 }
 
 /** The one call option the wrapper reads. */
@@ -94,6 +109,7 @@ export interface RetrySettings {
   log?: (line: string) => void;
   /** The run's rerun policy (`rerunLabel`), appended to `retry_policy` as `;rerun=…`. */
   rerunLabel?: string;
+  attempt?: AttemptRecorder;
 }
 
 /** The retry fields stamped on a row (BFCL `CellResult`, SR `SragentsSelectCell`). */
@@ -216,6 +232,7 @@ export function cellRetry<M extends LanguageModel>(
       deadline,
       sleep: settings.sleep,
       random: settings.random,
+      attempt: settings.attempt,
       log: log && label !== undefined ? (line) => log(`[${label}] ${line}`) : log,
     }),
     signal: deadline.signal,
@@ -449,35 +466,52 @@ async function generateWithRetry<T>(
   const { policy, stats, deadline } = opts;
   const sleepFn = opts.sleep ?? sleep;
   for (let attempt = 1; ; attempt++) {
+    // A journal failure must stop inference. A response-journal failure must
+    // leave the dispatch unresolved, never trigger another hidden retry.
+    const attemptId = opts.attempt?.start();
+    let result: T | undefined;
+    let error: unknown;
+    let failed = false;
     try {
-      return await call();
+      result = await call();
     } catch (err) {
-      // The deadline (or a caller) aborted: never retry, report as-is.
-      if (signal?.aborted) throw err;
-      const cls = classifyError(err);
-      if (cls === "access") {
-        stats.fatal = true;
-        throw new FatalProviderError(err);
-      }
-      if (cls !== "transient") throw err;
-      const { delay, byHeader } = nextDelay(err, attempt, opts);
-      const status = statusOf(err);
-      stats.retries++;
-      if (THROTTLE_STATUSES.has(status ?? 0)) stats.throttledRetries++;
-      opts.log?.(
-        `retry: ${name} attempt ${attempt}/${policy.maxAttempts} failed ` +
-          `(${status ?? (err as Error)?.name ?? "error"}); waiting ${Math.round(delay)}ms` +
-          `${byHeader ? " (Retry-After)" : ""}, ` +
-          `${Math.round(stats.waitMs + delay)}/${policy.maxTotalWaitMs}ms of wait budget used`,
-      );
-      deadline?.pause();
-      try {
-        await sleepFn(delay, signal);
-      } finally {
-        deadline?.resume();
-      }
-      stats.waitMs += delay;
+      error = err;
+      failed = true;
     }
+    if (attemptId !== undefined)
+      opts.attempt?.finish(
+        attemptId,
+        result,
+        failed ? error : undefined,
+        failed && (signal?.aborted ?? false),
+      );
+    if (!failed) return result as T;
+    const err = error;
+    // The deadline (or a caller) aborted: never retry, report as-is.
+    if (signal?.aborted) throw err;
+    const cls = classifyError(err);
+    if (cls === "access") {
+      stats.fatal = true;
+      throw new FatalProviderError(err);
+    }
+    if (cls !== "transient") throw err;
+    const { delay, byHeader } = nextDelay(err, attempt, opts);
+    const status = statusOf(err);
+    stats.retries++;
+    if (THROTTLE_STATUSES.has(status ?? 0)) stats.throttledRetries++;
+    opts.log?.(
+      `retry: ${name} attempt ${attempt}/${policy.maxAttempts} failed ` +
+        `(${status ?? (err as Error)?.name ?? "error"}); waiting ${Math.round(delay)}ms` +
+        `${byHeader ? " (Retry-After)" : ""}, ` +
+        `${Math.round(stats.waitMs + delay)}/${policy.maxTotalWaitMs}ms of wait budget used`,
+    );
+    deadline?.pause();
+    try {
+      await sleepFn(delay, signal);
+    } finally {
+      deadline?.resume();
+    }
+    stats.waitMs += delay;
   }
 }
 

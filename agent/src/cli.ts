@@ -119,6 +119,8 @@ async function rejudgeMain(argv: string[]): Promise<void> {
     outputPath,
     corpusPath,
     judgeModel,
+    judgeModelId,
+    pricing: loadModelPricing(),
     promptVariant: parsed.promptVariant,
     judgeMaxOutputTokens: parsed.judgeMaxOutputTokens,
   });
@@ -199,6 +201,7 @@ async function runMain(): Promise<void> {
     pricing: loadModelPricing(),
     force: parsed.force,
     judgeModel,
+    judgeModelId: judgeModel ? (parsed.judgeModelId ?? DEFAULT_JUDGE_MODEL) : undefined,
     noAst: parsed.noAst,
     seed: parsed.seed,
     concurrency: parsed.concurrency,

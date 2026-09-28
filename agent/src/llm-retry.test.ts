@@ -78,7 +78,7 @@ function failingV2(failures: unknown[]) {
     modelId: "m2",
     supportedUrls: {},
     calls: 0,
-    async doGenerate() {
+    async doGenerate(_options?: unknown) {
       this.calls++;
       const err = failures[call++];
       if (err !== undefined) throw err;
@@ -124,6 +124,27 @@ describe("retryDelayMs", () => {
 });
 
 describe("withRetry", () => {
+  it("records each physical retry before dispatch and after its response", async () => {
+    const events: string[] = [];
+    const model = failingV2([apiError(503)]);
+    const wrapped = withRetry(model, {
+      policy: POLICY,
+      stats: newRetryStats(),
+      sleep: async () => {},
+      attempt: {
+        start: () => {
+          const id = String(events.length);
+          events.push(`start:${id}`);
+          return id;
+        },
+        finish: (id, result, error) =>
+          events.push(`${id}:${error ? "failed" : result ? "completed" : "missing"}`),
+      },
+    });
+    await wrapped.doGenerate({ prompt: [] });
+    expect(events).toEqual(["start:0", "0:failed", "start:2", "2:completed"]);
+  });
+
   it("retries transient errors and counts retries / throttled / wait (V3)", async () => {
     const model = failingV3([apiError(429), apiError(500), apiError(503)]);
     const stats = newRetryStats();

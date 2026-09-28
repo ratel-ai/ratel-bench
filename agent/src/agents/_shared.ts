@@ -7,7 +7,7 @@
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { type Tool as AISDKTool, jsonSchema, stepCountIs, ToolLoopAgent, tool } from "ai";
 import { FatalProviderError } from "../cell-errors.js";
-import { cellRetry } from "../llm-retry.js";
+import { cellRetry, SpendJournalError } from "../llm-retry.js";
 import {
   type AgentLikeResult,
   meter,
@@ -219,6 +219,7 @@ export async function runMeteredLoop(
     input.pricing as PricingTable | undefined,
     recorder,
   );
+  if (thrown instanceof SpendJournalError) throw thrown;
   if (retry.stats.fatal) {
     const fatal = thrown instanceof FatalProviderError ? thrown : new FatalProviderError(thrown);
     fatal.dollarCost = cell.dollar_cost ?? 0;

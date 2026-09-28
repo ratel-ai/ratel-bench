@@ -157,6 +157,41 @@ describe("dollarCost", () => {
   });
 });
 
+it("does not price a completed step whose provider omitted token usage", async () => {
+  const { cell } = await meter(
+    {
+      scenarioId: "s",
+      arm: "control-baseline",
+      model: "bedrock/m",
+      runIndex: 0,
+      catalogSize: 0,
+      poolSize: 0,
+      seed: 0,
+    },
+    async () => ({ steps: [{ toolCalls: [] }] }),
+    { "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 } },
+  );
+  expect(cell.dollar_cost).toBeNull();
+  expect(cell.cost_source).toBe("unknown");
+});
+
+it("does not price malformed negative token usage", async () => {
+  const { cell } = await meter(
+    {
+      scenarioId: "s",
+      arm: "control-baseline",
+      model: "bedrock/m",
+      runIndex: 0,
+      catalogSize: 0,
+      poolSize: 0,
+      seed: 0,
+    },
+    async () => ({ steps: [{ usage: { inputTokens: -1, outputTokens: 2 } }] }),
+    { "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 } },
+  );
+  expect(cell.dollar_cost).toBeNull();
+});
+
 describe("summarize with nameToId remap", () => {
   it("rewrites sanitized function names back to canonical ids in the trace", () => {
     const result: AgentLikeResult = {

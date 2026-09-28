@@ -166,17 +166,29 @@ export async function meter(
   // scores on its partial trace. `usage` meters what the cell spent either way.
   const trace = summarize(raw, ctx.nameToId);
   const usage = raw || !recorder ? trace : summarize({ steps: recorder.steps }, ctx.nameToId);
-  const estimatedDollars = dollarCost(
-    ctx.model,
-    {
-      input: usage.inputTokens,
-      output: usage.outputTokens,
-      cachedInput: usage.cachedInputTokens,
-      cacheCreation: usage.cacheCreationTokens,
-    },
-    pricing,
-  );
   const meteredSteps = raw?.steps ?? recorder?.steps ?? [];
+  const completeUsage =
+    meteredSteps.length > 0 &&
+    meteredSteps.every(
+      (step) =>
+        Number.isSafeInteger(step.usage?.inputTokens) &&
+        Number.isSafeInteger(step.usage?.outputTokens) &&
+        (step.usage?.inputTokens ?? -1) >= 0 &&
+        (step.usage?.outputTokens ?? -1) >= 0,
+    );
+  const estimatedDollars =
+    completeUsage || ctx.model.startsWith("ollama:")
+      ? dollarCost(
+          ctx.model,
+          {
+            input: usage.inputTokens,
+            output: usage.outputTokens,
+            cachedInput: usage.cachedInputTokens,
+            cacheCreation: usage.cacheCreationTokens,
+          },
+          pricing,
+        )
+      : null;
   const providerTicks =
     ctx.provider === "xai.responses" && meteredSteps.length > 0
       ? meteredSteps.map((step) => xaiCostTicks(step.providerMetadata, step.usage))

@@ -6,7 +6,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { FatalProviderError } from "./cell-errors.js";
-import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
+import { DEFAULT_RETRY_SETTINGS, type RetrySettings, SpendJournalError } from "./llm-retry.js";
 import { resolveModel } from "./model-factory.js";
 import { buildRunnerModels } from "./output-limits.js";
 import { DEFAULT_RERUN_SETTINGS } from "./rerun.js";
@@ -128,6 +128,208 @@ function readRows(path: string): CellResult[] {
 }
 
 describe("runner", () => {
+  it("drains in-flight cells and starts no more after a journal failure", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      Array.from({ length: 5 }, (_, i) => JSON.stringify({ ...scenario, id: `s-${i}` })).join("\n"),
+    );
+    const called: string[] = [];
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      concurrency: 2,
+      runCell: async ({ scenario: current }) => {
+        called.push(current.id);
+        if (current.id === "s-0") throw new SpendJournalError(new Error("disk full"));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return makeFakeRunCell(
+          0.01,
+          [],
+        )({
+          scenario: current,
+          arm: "control-baseline",
+          model: config.models[0],
+          runIndex: 0,
+          pool: current.candidate_pool,
+          poolSize: 1,
+          config,
+        });
+      },
+    };
+    await expect(run(config)).rejects.toThrow(SpendJournalError);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(called).toEqual(["s-0", "s-1"]);
+  });
+
+  it("retains billed usage when a fatal BFCL request aborts without a cell row", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw Object.assign(
+          new APICallError({
+            message: "denied",
+            url: "https://example.test",
+            requestBodyValues: {},
+            statusCode: 403,
+          }),
+          {
+            usage: { inputTokens: 12, outputTokens: 2 },
+          },
+        );
+      },
+    });
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.cells_run).toBe(0);
+    expect(summary.spend).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.000016,
+      completeness: "complete",
+    });
+  });
+
+  it("marks resumed live rows without an attempt journal as incomplete accounting", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const previous = await makeFakeRunCell(
+      0.01,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: { id: "fake-model", model: {} as never, maxOutputTokens: null },
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config: baseConfig(corpus, output),
+    });
+    writeRows(output, [{ ...previous, run_id: "before-journal", cache_source: "live" }]);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.spend).toMatchObject({ untrackedRows: 1, completeness: "partial" });
+  });
+
+  it("persists agent and judge attempts and reuses them on resume without new spend", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "I cannot read files." }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const judge = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [
+          { type: "text", text: JSON.stringify({ verdict: "fail", explanation: "no answer" }) },
+        ],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 8, noCache: 8, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 4, text: 4, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [
+        {
+          id: "bedrock/m",
+          model,
+          maxOutputTokens: null,
+          servingProvider: "bedrock",
+          publisher: "example",
+          resolvedModel: "global.example.m",
+        },
+      ],
+      judgeModel: judge,
+      judgeModelId: "bedrock/j",
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+        "bedrock/j": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    };
+    const first = await run(config);
+    expect(first.spend).toMatchObject({ attempts: 2, unresolved: 0, completeness: "complete" });
+    const dispatch = readFileSync(`${output}.spend.jsonl`, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find((event) => event.type === "dispatch" && event.value.kind === "bfcl");
+    expect(dispatch.value).toMatchObject({
+      model: "bedrock/m",
+      servingProvider: "bedrock",
+      publisher: "example",
+      resolvedModel: "global.example.m",
+      adapterProvider: model.provider,
+    });
+    const second = await run(config);
+    expect(second.spend).toEqual(first.spend);
+    expect(model.doGenerateCalls).toHaveLength(1);
+    expect(judge.doGenerateCalls).toHaveLength(1);
+  });
+
+  it("keeps historical control-cache cost separate from current live spend", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const canonical = join(tempDir, "canonical.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new Error("cache should serve this cell");
+      },
+    });
+    const historical = await makeFakeRunCell(
+      0.5,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: { id: "bedrock/m", model, maxOutputTokens: null },
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config: baseConfig(corpus, canonical),
+    });
+    writeRows(canonical, [historical]);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      ratelVersion: "next",
+      cacheSourcePaths: [canonical],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.cells_cached).toBe(1);
+    expect(summary.spend).toMatchObject({ attempts: 0, knownUsd: 0, completeness: "complete" });
+    expect(readRows(output)[0].dollar_cost).toBe(0.5);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
   it("runs every (arm, model, run) cell for each scenario", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
