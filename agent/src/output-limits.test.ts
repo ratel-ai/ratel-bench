@@ -112,6 +112,21 @@ describe("loadModelCatalog", () => {
     expect(loadModelCatalog(path)).toEqual(CATALOG);
   });
 
+  it("keeps historical overrides addressable outside the campaign default", () => {
+    const path = join(dir, "models.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        run: [{ id: "bedrock/openai.gpt-6-sol", maxOutputTokens: 16 }],
+        historical: [{ id: "openai/gpt-5.4-mini", maxOutputTokens: 8 }],
+      }),
+    );
+    expect(loadModelCatalog(path).map(({ id }) => id)).toEqual([
+      "bedrock/openai.gpt-6-sol",
+      "openai/gpt-5.4-mini",
+    ]);
+  });
+
   it("missing catalog → empty (every id resolves to null)", () => {
     const catalog = loadModelCatalog(join(dir, "absent.json"));
     expect(catalog).toEqual([]);

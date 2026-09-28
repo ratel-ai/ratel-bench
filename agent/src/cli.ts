@@ -19,6 +19,7 @@
 import { existsSync } from "node:fs";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
+import { preflightBedrockModels } from "./bedrock-preflight.js";
 import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import {
@@ -30,6 +31,7 @@ import {
 import { DEFAULT_JUDGE_MODEL } from "./model-defaults.js";
 import { warmUpModels } from "./model-endpoint.js";
 import { resolveModel } from "./model-factory.js";
+import { parseModelIdentity } from "./model-identity.js";
 import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
@@ -103,6 +105,10 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   );
   const corpusPath = resolveRepoPath(parsed.corpus);
 
+  if (judgeModelId && isBedrock(judgeModelId)) {
+    await preflightBedrockModels([judgeModelId], { requirePricing: true });
+  }
+
   console.log(
     judgeModelId
       ? `rejudging ${inputPath} with ${judgeModelId} (${parsed.promptVariant}) + AST → ${outputPath}`
@@ -157,6 +163,13 @@ async function runMain(): Promise<void> {
   // a cold start (no-op for cloud/ollama model ids).
   await warmUpModels(parsed.models, parsed.modelApiKey);
   const judgeModel = resolveJudge(parsed);
+  const bedrockIds = [
+    ...parsed.models,
+    ...(judgeModel ? [parsed.judgeModelId ?? DEFAULT_JUDGE_MODEL] : []),
+  ].filter(isBedrock);
+  if (bedrockIds.length) {
+    await preflightBedrockModels([...new Set(bedrockIds)], { requirePricing: true });
+  }
 
   if (!parsed.noJudge && !judgeModel) {
     console.warn(
@@ -225,3 +238,8 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+function isBedrock(modelId: string): boolean {
+  const identity = parseModelIdentity(modelId);
+  return identity.kind === "provider" && identity.provider === "bedrock";
+}
