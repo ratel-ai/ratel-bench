@@ -33,6 +33,10 @@ export interface ModelCatalogEntry {
   bedrockRegion?: string;
   bedrockApi?: "converse" | "responses" | "chat";
   bedrockEndpoint?: "bedrock-runtime" | "bedrock-mantle";
+  /** Exact Vertex API model ID; the serving identity remains gcp/<model>. */
+  vertexModelId?: string;
+  /** Optional model-specific Vertex location override. */
+  vertexLocation?: string;
   /** Positive integer; absent = no cap sent. */
   maxOutputTokens?: number;
 }

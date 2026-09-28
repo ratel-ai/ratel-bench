@@ -1,3 +1,6 @@
+import { execFileSync } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateObject, generateText, stepCountIs, tool } from "ai";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -5,6 +8,16 @@ import { resolveModel } from "./model-factory.js";
 import { loadModelCatalog } from "./output-limits.js";
 
 describe("native model resolution", () => {
+  it("imports for Bedrock-only runs without reading Vertex credentials", () => {
+    const factoryUrl = new URL("./model-factory.ts", import.meta.url).href;
+    const script = `const env = process.env; process.env = new Proxy(env, { get(target, key) { if (key === "GOOGLE_VERTEX_API_KEY") throw new Error("Vertex key read at import"); return Reflect.get(target, key); } }); await import(${JSON.stringify(factoryUrl)});`;
+    expect(() =>
+      execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+        stdio: "pipe",
+      }),
+    ).not.toThrow();
+  });
   it("routes the selected Bedrock families to their configured source regions and APIs", async () => {
     const catalog = loadModelCatalog();
     const selected = catalog.slice(0, 16);
@@ -173,7 +186,10 @@ describe("native model resolution", () => {
       modelId: "claude-sonnet-5",
     });
     expect(openai.model).toMatchObject({ provider: "openai.responses", modelId: "gpt-6-sol" });
-    expect(() => resolveModel("gcp/gemini-2.5-pro", { env })).toThrow(/gcp.*adapter/i);
+    expect(() => resolveModel("gcp/gemini-2.5-pro", { env })).toThrow(/GOOGLE_VERTEX_PROJECT/);
+    expect(() =>
+      resolveModel("gcp/gemini-3-pro-preview", { env: { GOOGLE_VERTEX_PROJECT: "test" } }),
+    ).toThrow(/GOOGLE_VERTEX_LOCATION/);
     expect(() => resolveModel("anthropic/claude-sonnet-5", { env: {} })).toThrow(
       /ANTHROPIC_API_KEY/,
     );

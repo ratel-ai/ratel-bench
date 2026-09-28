@@ -86,6 +86,9 @@ export interface SragentsSelectCell {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  /** Provider-reported cache read/write tokens; absent on historical rows. */
+  cached_input_tokens?: number;
+  cache_creation_tokens?: number;
   dollar_cost: number;
   wall_ms: number;
   error: string | null;

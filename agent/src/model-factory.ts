@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
 import { createBedrockMantle } from "@ai-sdk/amazon-bedrock/mantle";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -27,6 +28,10 @@ export interface ResolveModelOptions {
     secretAccessKey: string;
     sessionToken?: string;
   }>;
+  gcpProject?: string;
+  gcpLocation?: string;
+  /** Inject an ADC token source for offline contract tests. */
+  gcpAccessToken?: () => Promise<string>;
 }
 
 type ProviderResolver = (
@@ -40,6 +45,7 @@ const providerResolvers: Partial<Record<string, ProviderResolver>> = {
   bedrock: resolveBedrock,
   anthropic: resolveAnthropic,
   openai: resolveOpenAI,
+  gcp: resolveGcp,
 };
 
 /** Resolve one serving identity to one native AI SDK model. */
@@ -189,6 +195,58 @@ function resolveOpenAI(
       ? withModelIdentityAndReasoning(direct, "responses", model, true, "openai.responses")
       : direct,
   };
+}
+
+function resolveGcp(
+  id: string,
+  model: string,
+  opts: ResolveModelOptions,
+  env: Record<string, string | undefined>,
+): ResolvedModel {
+  const entry = findModelCatalogEntry(id, opts.catalog ?? loadModelCatalog());
+  const vertexModelId = entry?.vertexModelId ?? model;
+  if (
+    !/^gemini-[\w.-]+$/.test(vertexModelId) ||
+    (entry?.publisher && entry.publisher !== "Google")
+  ) {
+    throw new Error(`model ${id}: unsupported Vertex model family ${vertexModelId}`);
+  }
+  const project = opts.gcpProject ?? env.GOOGLE_VERTEX_PROJECT;
+  const location = entry?.vertexLocation ?? opts.gcpLocation ?? env.GOOGLE_VERTEX_LOCATION;
+  if (!project) throw new Error(`model ${id} requires GOOGLE_VERTEX_PROJECT`);
+  if (!location) throw new Error(`model ${id} requires GOOGLE_VERTEX_LOCATION`);
+  const { createVertex } = createRequire(import.meta.url)(
+    "@ai-sdk/google-vertex",
+  ) as typeof import("@ai-sdk/google-vertex");
+  const tokenSource = opts.gcpAccessToken;
+  // Production selects ADC even if an unrelated Vertex API key is in the host.
+  const provider = tokenSource
+    ? createVertex({
+        project,
+        location,
+        // The SDK's API-key branch bypasses its ADC lookup. Keep the standard
+        // Vertex URL and replace that key with the injected bearer token.
+        apiKey: "injected-adc",
+        baseURL: vertexBaseURL(project, location),
+        fetch: async (input, init) => {
+          const headers = new Headers(init?.headers);
+          headers.delete("x-goog-api-key");
+          headers.set("Authorization", `Bearer ${await tokenSource()}`);
+          return (opts.fetch ?? globalThis.fetch)(input, { ...init, headers });
+        },
+      })
+    : createVertex({ project, location, apiKey: "", fetch: opts.fetch });
+  return { id, model: provider(vertexModelId) };
+}
+
+function vertexBaseURL(project: string, location: string): string {
+  const host =
+    location === "global"
+      ? "aiplatform.googleapis.com"
+      : location === "eu" || location === "us"
+        ? `aiplatform.${location}.rep.googleapis.com`
+        : `${location}-aiplatform.googleapis.com`;
+  return `https://${host}/v1beta1/projects/${project}/locations/${location}/publishers/google`;
 }
 
 function withModelIdentityAndReasoning(
