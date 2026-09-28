@@ -85,8 +85,12 @@ export function dollarCost(
   // caller can spot a stale price table by cross-referencing raw tokens with
   // expected provider rates. For local runs the $0 is real, not stale.
   if (!price) return 0;
+  // AI SDK inputTokens is the total prompt count, including cache reads/writes.
+  // Bill each reported category once; tolerate older rows that reported only
+  // cache categories without a total.
+  const uncachedInput = Math.max(0, tokens.input - tokens.cachedInput - tokens.cacheCreation);
   return (
-    (tokens.input * price.inputPer1M +
+    (uncachedInput * price.inputPer1M +
       tokens.output * price.outputPer1M +
       tokens.cachedInput * price.cachedInputPer1M +
       tokens.cacheCreation * price.cacheCreationPer1M) /

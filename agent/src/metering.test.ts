@@ -74,6 +74,27 @@ describe("summarize", () => {
 });
 
 describe("dollarCost", () => {
+  it("charges cached Gemini prompt tokens at the cache rate only", () => {
+    expect(
+      dollarCost(
+        "gcp/gemini-2.5-pro",
+        {
+          input: 20,
+          output: 6,
+          cachedInput: 5,
+          cacheCreation: 0,
+        },
+        {
+          "gcp/gemini-2.5-pro": {
+            inputPer1M: 2,
+            outputPer1M: 4,
+            cachedInputPer1M: 0.2,
+            cacheCreationPer1M: 2.5,
+          },
+        },
+      ),
+    ).toBeCloseTo(55 / 1_000_000, 12);
+  });
   // DEFAULT_PRICING is an empty fallback (real rates live in models.json), so
   // against it every model — known ids included — resolves to $0.
   it("returns 0 for every model against the (empty) default table", () => {

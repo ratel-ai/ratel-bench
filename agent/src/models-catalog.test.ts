@@ -16,7 +16,10 @@ const campaign = JSON.parse(readFileSync(resolve(REPO_ROOT, "models.json"), "utf
 /** Bedrock-served, or routed to a vendor API by id prefix (cli.ts:resolveModel). */
 function isApiRouted(e: ModelCatalogEntry): boolean {
   return (
-    e.bedrockProfile !== undefined || e.id.startsWith("anthropic/") || e.id.startsWith("openai/")
+    e.bedrockProfile !== undefined ||
+    e.id.startsWith("anthropic/") ||
+    e.id.startsWith("openai/") ||
+    e.id.startsWith("gcp/")
   );
 }
 
@@ -103,6 +106,22 @@ describe("models.json", () => {
       // vLLM-style max_model_len is unverified: no cap is sent.
       "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b": null,
       "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct": null,
+    });
+  });
+
+  it("keeps optional Vertex publishers and exact API IDs out of the Bedrock campaign", () => {
+    expect(campaign).toHaveLength(16);
+    expect(catalog.find((entry) => entry.id === "gcp/gemini-2.5-pro")).toMatchObject({
+      publisher: "Google",
+      vertexModelId: "gemini-2.5-pro",
+      vertexLocation: "us-central1",
+      aliases: ["gcp/publishers/google/models/gemini-2.5-pro"],
+      maxOutputTokens: 16384,
+    });
+    expect(catalog.find((entry) => entry.id === "gcp/claude-sonnet-4-5@20250929")).toMatchObject({
+      publisher: "Anthropic",
+      vertexModelId: "claude-sonnet-4-5@20250929",
+      aliases: ["gcp/publishers/anthropic/models/claude-sonnet-4-5@20250929"],
     });
   });
 });

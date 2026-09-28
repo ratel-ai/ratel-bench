@@ -412,16 +412,26 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
 function usageFields(
   modelId: string,
   usage: LanguageModelUsage | undefined,
-): Pick<SragentsSelectCell, "input_tokens" | "output_tokens" | "total_tokens" | "dollar_cost"> {
+): Pick<
+  SragentsSelectCell,
+  | "input_tokens"
+  | "output_tokens"
+  | "total_tokens"
+  | "cached_input_tokens"
+  | "cache_creation_tokens"
+  | "dollar_cost"
+> {
   const input = usage?.inputTokens ?? 0;
   const output = usage?.outputTokens ?? 0;
-  const cachedInput = usage?.cachedInputTokens ?? 0;
+  const cachedInput = usage?.inputTokenDetails?.cacheReadTokens ?? usage?.cachedInputTokens ?? 0;
+  const cacheCreation = usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
   return {
     input_tokens: input,
     output_tokens: output,
     total_tokens: usage?.totalTokens ?? input + output,
-    // generateObject's usage doesn't surface cache-creation tokens separately.
-    dollar_cost: dollarCost(modelId, { input, output, cachedInput, cacheCreation: 0 }, PRICING),
+    cached_input_tokens: cachedInput,
+    cache_creation_tokens: cacheCreation,
+    dollar_cost: dollarCost(modelId, { input, output, cachedInput, cacheCreation }, PRICING),
   };
 }
 

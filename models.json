@@ -339,6 +339,23 @@
       }
     },
     {
+      "id": "gcp/gemini-2.5-pro",
+      "displayName": "Gemini 2.5 Pro (Vertex AI)",
+      "publisher": "Google",
+      "vertexModelId": "gemini-2.5-pro",
+      "vertexLocation": "us-central1",
+      "aliases": ["gcp/publishers/google/models/gemini-2.5-pro"],
+      "maxOutputTokens": 16384
+    },
+    {
+      "id": "gcp/claude-sonnet-4-5@20250929",
+      "displayName": "Claude Sonnet 4.5 (Vertex AI)",
+      "publisher": "Anthropic",
+      "vertexModelId": "claude-sonnet-4-5@20250929",
+      "aliases": ["gcp/publishers/anthropic/models/claude-sonnet-4-5@20250929"],
+      "maxOutputTokens": 16384
+    },
+    {
       "id": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b",
       "endpoint": "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b"
     },
