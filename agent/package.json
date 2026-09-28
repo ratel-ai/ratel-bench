@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check src",
     "test": "vitest run",
+    "test:provider-compatibility": "vitest run src/provider-compatibility.test.ts",
+    "provider-compatibility-fixture": "tsx src/provider-compatibility.ts",
     "start": "tsx src/cli.ts",
     "report": "tsx src/report-cli.ts",
     "bfcl-candidates": "tsx src/bfcl-candidates.ts",
