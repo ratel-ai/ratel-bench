@@ -6,6 +6,7 @@
 
 import type { ExecutableTool } from "@ratel-ai/sdk";
 import { type Tool as AISDKTool, jsonSchema, stepCountIs, ToolLoopAgent, tool } from "ai";
+import { BudgetContentionError, BudgetLimitedError } from "../campaign-budget.js";
 import { FatalProviderError } from "../cell-errors.js";
 import { cellRetry, SpendJournalError } from "../llm-retry.js";
 import {
@@ -219,7 +220,12 @@ export async function runMeteredLoop(
     input.pricing as PricingTable | undefined,
     recorder,
   );
-  if (thrown instanceof SpendJournalError) throw thrown;
+  if (
+    thrown instanceof SpendJournalError ||
+    thrown instanceof BudgetLimitedError ||
+    thrown instanceof BudgetContentionError
+  )
+    throw thrown;
   if (retry.stats.fatal) {
     const fatal = thrown instanceof FatalProviderError ? thrown : new FatalProviderError(thrown);
     fatal.dollarCost = cell.dollar_cost ?? 0;

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -10,11 +10,22 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import {
+  BudgetContentionError,
+  BudgetLimitedError,
+  type CampaignBudget,
+} from "./campaign-budget.js";
 import { type AttemptRecorder, SpendJournalError } from "./llm-retry.js";
 import { type ModelPrice, xaiCostTicks } from "./metering.js";
+import { ratedTicks } from "./money-ticks.js";
 
 export interface SpendDispatch {
   id: string;
+  /** Stable logical cell retry number; physical wrapper retries add their own ordinal. */
+  attemptOrdinal?: number;
+  workNamespace?: string;
+  /** Budget identity; distinct campaigns can share a historical attempt journal. */
+  campaignId?: string;
   /** Invocation whose output row can later be matched to this journal. */
   runId?: string;
   /** Benchmark/version whose live spend this attempt belongs to. */
@@ -157,6 +168,9 @@ export function openSpendLedger(path: string) {
   }
 
   return {
+    entries(): ReadonlyArray<Readonly<Attempt>> {
+      return [...attempts.values()];
+    },
     hasRun(runId: string, scope?: string): boolean {
       return scope === undefined
         ? runIds.has(runId)
@@ -242,6 +256,17 @@ function benchmarkMatchesScope(kind: SpendDispatch["kind"], scope: string): bool
 
 export type SpendLedger = ReturnType<typeof openSpendLedger>;
 
+/** Replay budget settlement after a crash between journal fsync and store acknowledgement. */
+export async function reconcileCampaignBudget(
+  ledger: SpendLedger,
+  budget: CampaignBudget,
+): Promise<void> {
+  for (const { dispatch, settlement } of ledger.entries()) {
+    if (dispatch.campaignId !== budget.campaignId || !settlement) continue;
+    await budget.settle(dispatch.id, costTicks(dispatch.model, dispatch.price, settlement));
+  }
+}
+
 /** A distinct ID for each physical provider dispatch, including every retry. */
 export function newSpendAttemptId(): string {
   return randomUUID();
@@ -251,18 +276,54 @@ export function newSpendAttemptId(): string {
 export function spendRecorder(
   ledger: SpendLedger,
   context: Omit<SpendDispatch, "id">,
+  budget?: CampaignBudget,
 ): AttemptRecorder {
+  let physicalOrdinal = 0;
   return {
-    start() {
-      const id = newSpendAttemptId();
+    async start(options) {
+      physicalOrdinal++;
+      const id = budget
+        ? createHash("sha256")
+            .update(
+              JSON.stringify([
+                budget.campaignId,
+                context.workNamespace ?? "evaluation",
+                context.kind,
+                context.scope,
+                context.cellKey,
+                context.model,
+                context.attemptOrdinal ?? 1,
+                physicalOrdinal,
+              ]),
+            )
+            .digest("hex")
+        : newSpendAttemptId();
+      if (budget) {
+        const maxOutputTokens = (options as { maxOutputTokens?: number } | undefined)
+          ?.maxOutputTokens;
+        try {
+          await budget.reserve(id, context.model, maxOutputTokens, context.price);
+        } catch (error) {
+          if (error instanceof BudgetLimitedError || error instanceof BudgetContentionError)
+            throw error;
+          throw new SpendJournalError(error);
+        }
+        try {
+          await budget.claim(id);
+        } catch (error) {
+          throw new SpendJournalError(error);
+        }
+      }
       try {
-        ledger.dispatch({ ...context, id });
+        ledger.dispatch({ ...context, id, ...(budget ? { campaignId: budget.campaignId } : {}) });
       } catch (error) {
+        // The claim may already authorize a concurrent worker. Retain its
+        // reservation; no request can follow a failed journal write here.
         throw new SpendJournalError(error);
       }
       return id;
     },
-    finish(id, result, error, aborted) {
+    async finish(id, result, error, aborted) {
       try {
         const response = error === undefined ? result : error;
         const object =
@@ -271,12 +332,14 @@ export function spendRecorder(
           object.usage ?? (object.response as { usage?: unknown } | undefined)?.usage;
         const usage = spendUsageOf(rawUsage);
         const billedTicks = xaiCostTicks(object.providerMetadata, object.usage);
-        ledger.settle(id, {
+        const settlement: SpendSettlement = {
           status: aborted ? "aborted" : error === undefined ? "completed" : "failed",
           usage,
           rawUsage,
           ...(billedTicks === undefined ? {} : { providerCostTicks: billedTicks }),
-        });
+        };
+        ledger.settle(id, settlement);
+        if (budget) await budget.settle(id, costTicks(context.model, context.price, settlement));
       } catch (failure) {
         throw new SpendJournalError(failure);
       }
@@ -347,18 +410,6 @@ function costTicks(
   if (parts.some((part) => part === null)) return null;
   const total = parts.reduce<bigint>((sum, part) => sum + (part ?? 0n), 0n);
   return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
-}
-
-/** Decimal catalog rates become exact rational ticks, rounded up per category. */
-function ratedTicks(tokens: number, rate: number): bigint | null {
-  if (!validCount(tokens) || !Number.isFinite(rate) || rate < 0) return null;
-  const match = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i.exec(rate.toString());
-  if (!match) return null;
-  const digits = BigInt(`${match[1]}${match[2] ?? ""}`);
-  const scale = (match[2]?.length ?? 0) - Number(match[3] ?? 0);
-  const numerator = BigInt(tokens) * digits * 10_000n * (scale < 0 ? 10n ** BigInt(-scale) : 1n);
-  const denominator = scale > 0 ? 10n ** BigInt(scale) : 1n;
-  return (numerator + denominator - 1n) / denominator;
 }
 
 function validCount(value: unknown): value is number {

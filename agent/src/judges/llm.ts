@@ -13,6 +13,7 @@
 
 import { generateObject, type LanguageModel, NoObjectGeneratedError, RetryError } from "ai";
 import { z } from "zod";
+import { BudgetContentionError, BudgetLimitedError } from "../campaign-budget.js";
 import {
   type AttemptRecorder,
   DEFAULT_RETRY_SETTINGS,
@@ -148,7 +149,12 @@ export async function judgeLLM(args: LLMJudgeArgs): Promise<LLMJudgeResult> {
     });
     return { verdict: object.verdict, explanation: object.explanation };
   } catch (err) {
-    if (err instanceof SpendJournalError) throw err;
+    if (
+      err instanceof SpendJournalError ||
+      err instanceof BudgetLimitedError ||
+      err instanceof BudgetContentionError
+    )
+      throw err;
     // A verdict cut off by the output cap is no verdict: n/a, labelled so a
     // too-tight `--judge-max-output-tokens` is visible (not a judge outage).
     const cause = RetryError.isInstance(err) ? err.lastError : err;

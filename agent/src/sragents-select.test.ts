@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { FatalProviderError } from "./cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
@@ -1745,6 +1746,35 @@ describe("runCampaign", () => {
 });
 
 describe("runCampaign: breaker, rounds and cap", () => {
+  it("marks unfunded SR work budget_limited before another provider call", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return answer;
+      },
+    });
+    const tasks = [taskOf("bedrock/m", model, 0), taskOf("bedrock/m", model, 1)];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: { "bedrock/m": price },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+      expect(calls).toBe(1);
+      expect(result.coverage).toMatchObject({ requested: 2, skipped: 1, status: "budget_limited" });
+      expect(result.campaignBudget).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+      expect(await store.snapshot()).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   const sc = (i: number) => ({
     scenarioId: `sragents-toolqa_${i}`,
     category: "sragents-toolqa",

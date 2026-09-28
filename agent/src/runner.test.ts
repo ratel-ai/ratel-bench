@@ -5,6 +5,7 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { FatalProviderError } from "./cell-errors.js";
 import { DEFAULT_RETRY_SETTINGS, type RetrySettings, SpendJournalError } from "./llm-retry.js";
 import { resolveModel } from "./model-factory.js";
@@ -129,6 +130,89 @@ function readRows(path: string): CellResult[] {
 }
 
 describe("runner", () => {
+  it("stops BFCL coverage before an unaffordable physical request", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((s) => JSON.stringify(s)).join("\n"),
+    );
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return {
+          content: [{ type: "text", text: "done" }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 50, noCache: 50, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 5, text: 5, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const store = createMemoryBudgetStore(0.00015);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: 10 }],
+      pricing: { "bedrock/m": price },
+      campaignBudget: createCampaignBudget(store, {
+        "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+      }),
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(calls).toBe(1);
+    expect(summary.coverage).toMatchObject({ requested: 2, skipped: 1, status: "budget_limited" });
+    expect(summary.campaignBudget).toMatchObject({ spentTicks: 600000, reservedTicks: 0 });
+    expect(await store.snapshot()).toMatchObject({ spentTicks: 600000, reservedTicks: 0 });
+  });
+
+  it("keeps an explicit local cap stricter than campaign admission", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((s) => JSON.stringify(s)).join("\n"),
+    );
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model: {} as never, maxOutputTokens: 10 }],
+      pricing: { "bedrock/m": price },
+      campaignBudget: createCampaignBudget(createMemoryBudgetStore(1), {
+        "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+      }),
+      campaignLocalCapUsd: 0.001,
+      runCell: makeFakeRunCell(0.001, called),
+    });
+    expect(called).toHaveLength(1);
+    expect(summary.coverage).toMatchObject({ status: "budget_limited" });
+  });
+
+  it("fails campaign preflight before BFCL inference when the selected route lacks a price", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const calls: string[] = [];
+    await expect(
+      run({
+        ...baseConfig(corpus, output),
+        arms: ["control-baseline"],
+        models: [{ id: "bedrock/m", model: {} as never, maxOutputTokens: 10 }],
+        campaignBudget: createCampaignBudget(createMemoryBudgetStore(1), {
+          "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+        runCell: makeFakeRunCell(0, calls),
+      }),
+    ).rejects.toThrow(/price snapshot/);
+    expect(calls).toEqual([]);
+  });
   it("drains in-flight cells and starts no more after a journal failure", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     const output = join(tempDir, "agent.jsonl");
