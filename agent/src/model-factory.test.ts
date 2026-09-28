@@ -10,7 +10,7 @@ import { loadModelCatalog } from "./output-limits.js";
 describe("native model resolution", () => {
   it("imports for Bedrock-only runs without reading Vertex credentials", () => {
     const factoryUrl = new URL("./model-factory.ts", import.meta.url).href;
-    const script = `const env = process.env; process.env = new Proxy(env, { get(target, key) { if (key === "GOOGLE_VERTEX_API_KEY") throw new Error("Vertex key read at import"); return Reflect.get(target, key); } }); await import(${JSON.stringify(factoryUrl)});`;
+    const script = `const env = process.env; process.env = new Proxy(env, { get(target, key) { if (["GOOGLE_VERTEX_API_KEY", "XAI_API_KEY", "XAI_BASE_URL"].includes(key)) throw new Error("external provider configuration read at import"); return Reflect.get(target, key); } }); await import(${JSON.stringify(factoryUrl)});`;
     expect(() =>
       execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
         cwd: resolve(dirname(fileURLToPath(import.meta.url)), ".."),

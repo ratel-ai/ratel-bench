@@ -281,6 +281,10 @@ export interface CellResult {
   // Performance
   wall_ms: number;
   dollar_cost: number;
+  /** xAI raw billed ticks, when returned by the provider (10^10 ticks/USD). */
+  provider_cost_ticks?: number;
+  /** Whether dollar_cost came from provider ticks, catalog rates, or neither. */
+  cost_source?: "provider" | "partial" | "estimate" | "unknown";
   // Trace
   tool_calls: ToolCall[];
 }

@@ -3,6 +3,7 @@ import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
 import { createBedrockMantle } from "@ai-sdk/amazon-bedrock/mantle";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createXai } from "@ai-sdk/xai";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import type { LanguageModel } from "ai";
 import { AwsV4Signer } from "aws4fetch";
@@ -46,6 +47,7 @@ const providerResolvers: Partial<Record<string, ProviderResolver>> = {
   anthropic: resolveAnthropic,
   openai: resolveOpenAI,
   gcp: resolveGcp,
+  xai: resolveXai,
 };
 
 /** Resolve one serving identity to one native AI SDK model. */
@@ -195,6 +197,120 @@ function resolveOpenAI(
       ? withModelIdentityAndReasoning(direct, "responses", model, true, "openai.responses")
       : direct,
   };
+}
+
+function resolveXai(
+  id: string,
+  model: string,
+  opts: ResolveModelOptions,
+  env: Record<string, string | undefined>,
+): ResolvedModel {
+  const apiKey = env.XAI_API_KEY;
+  if (!apiKey) throw new Error(`model ${id} requires XAI_API_KEY`);
+  const baseURL = env.XAI_BASE_URL;
+  if (baseURL) {
+    const parsed = new URL(baseURL);
+    if (
+      parsed.protocol !== "https:" &&
+      !(parsed.protocol === "http:" && parsed.hostname === "localhost")
+    ) {
+      throw new Error(`model ${id} requires an HTTPS XAI_BASE_URL`);
+    }
+  }
+  const entry = findModelCatalogEntry(id, opts.catalog ?? loadModelCatalog());
+  const effort = entry?.xaiReasoningEffort;
+  if (effort && !["none", "low", "medium", "high", "xhigh"].includes(effort)) {
+    throw new Error(`model ${id}: unsupported xAI reasoning effort ${effort}`);
+  }
+  const direct = createXai({
+    apiKey,
+    ...(baseURL ? { baseURL } : {}),
+    fetch: opts.fetch,
+  }).responses(model);
+  return { id, model: withXaiToolState(direct, effort) };
+}
+
+function withXaiToolState(model: LanguageModel, effort?: string): LanguageModel {
+  if (typeof model === "string") throw new Error("expected a resolved xAI model");
+  return new Proxy(model, {
+    get(target, property, receiver) {
+      if (property === "doGenerate" || property === "doStream") {
+        return async (args: {
+          tools?: unknown[];
+          providerOptions?: Record<string, Record<string, unknown>>;
+        }) => {
+          if ((args.tools?.length ?? 0) > 350) {
+            throw new Error(`xAI supports at most 350 tools; got ${args.tools?.length}`);
+          }
+          const result = await Reflect.apply(Reflect.get(target, property), target, [
+            {
+              ...args,
+              providerOptions: {
+                ...args.providerOptions,
+                xai: {
+                  ...args.providerOptions?.xai,
+                  ...(effort ? { reasoningEffort: effort } : {}),
+                  store: false,
+                },
+              },
+            },
+          ]);
+          if (property !== "doGenerate") return result;
+          const body = result.response?.body as
+            | {
+                output?: Array<{
+                  type?: string;
+                  call_id?: string;
+                  id?: string;
+                  encrypted_content?: string;
+                }>;
+                usage?: { cost_in_usd_ticks?: number };
+              }
+            | undefined;
+          if (
+            body?.output?.some((part) => part.type === "function_call") &&
+            body.output.some((part) => part.type === "reasoning" && !part.encrypted_content)
+          ) {
+            throw new Error("xAI tool turn is missing required encrypted reasoning state");
+          }
+          const callIds = new Map(
+            body?.output
+              ?.filter((part) => part.type === "function_call")
+              .map((part) => [part.call_id, part.id]) ?? [],
+          );
+          const costTicks = body?.usage?.cost_in_usd_ticks;
+          return {
+            ...result,
+            ...(typeof costTicks === "number" && Number.isFinite(costTicks) && costTicks >= 0
+              ? {
+                  providerMetadata: {
+                    ...result.providerMetadata,
+                    xai: { ...result.providerMetadata?.xai, costInUsdTicks: costTicks },
+                  },
+                }
+              : {}),
+            content: result.content.map(
+              (part: {
+                type: string;
+                toolCallId?: string;
+                providerMetadata?: Record<string, unknown>;
+              }) =>
+                part.type === "tool-call" && callIds.has(part.toolCallId)
+                  ? {
+                      ...part,
+                      providerMetadata: {
+                        ...part.providerMetadata,
+                        xai: { itemId: callIds.get(part.toolCallId) },
+                      },
+                    }
+                  : part,
+            ),
+          };
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
 }
 
 function resolveGcp(

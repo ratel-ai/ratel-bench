@@ -163,6 +163,12 @@
   ],
   "historical": [
     {
+      "id": "xai/grok-4-fast",
+      "publisher": "xAI",
+      "maxOutputTokens": 4096,
+      "xaiReasoningEffort": "medium"
+    },
+    {
       "id": "bedrock/claude-sonnet-5",
       "maxOutputTokens": 16384,
       "bedrockProfile": "eu.anthropic.claude-sonnet-5",
