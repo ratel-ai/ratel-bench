@@ -25,6 +25,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { runAllProviderModels } from "./model-defaults.js";
 import { REPO_ROOT, resolveRepoPath } from "./paths.js";
 
 type CorpusName = "metatool" | "toolret" | "bfcl-simple" | "bfcl-multiple" | "bfcl-all";
@@ -285,7 +286,7 @@ function sragentsSelectCampaign(skipAgent: boolean, scenarios?: string): void {
     );
     return;
   }
-  const model = hasOpenAI ? "gpt-5.4-mini" : "claude-haiku-4-5";
+  const model = hasOpenAI ? "openai/gpt-5.4-mini" : "anthropic/claude-haiku-4-5";
   runStep("sragents skill-selection campaign", "pnpm", [
     "-F",
     "@ratel-ai/benchmark",
@@ -387,9 +388,7 @@ function agentCampaign(skipAgent: boolean): void {
     );
     return;
   }
-  const models: string[] = [];
-  if (hasAnthropic) models.push("claude-sonnet-4-6");
-  if (hasOpenAI) models.push("gpt-5.4-mini");
+  const models = runAllProviderModels({ anthropic: hasAnthropic, openai: hasOpenAI });
 
   // Conservative defaults for an automated invocation: small sampled subset,
   // 1 run per cell, every committed arm (control + 3 ratel ablations), $5 cap.

@@ -7,6 +7,7 @@ import {
   cacheTier,
   capsLine,
   checkResumeCaps,
+  findModelCatalogEntry,
   guardResumeCaps,
   type Harness,
   harnessOf,
@@ -32,6 +33,40 @@ const CATALOG: ModelCatalogEntry[] = [
 ];
 
 describe("resolveOutputCap", () => {
+  it("resolves a catalog route by canonical identity or explicit alias", () => {
+    const entry: ModelCatalogEntry = {
+      id: "bedrock/anthropic.claude-sonnet-5",
+      aliases: ["bedrock/claude-sonnet-5", "anthropic/claude-sonnet-5"],
+      bedrockProfile: "global.anthropic.claude-sonnet-5",
+    };
+    expect(findModelCatalogEntry("claude-sonnet-5", [entry])).toBe(entry);
+    expect(findModelCatalogEntry("anthropic/claude-sonnet-5", [entry])).toBe(entry);
+    expect(findModelCatalogEntry("openai/claude-sonnet-5", [entry])).toBeUndefined();
+  });
+
+  it("resolves Vertex Claude aliases without dropping the version suffix", () => {
+    const entry: ModelCatalogEntry = {
+      id: "gcp/publishers/anthropic/models/claude-sonnet-4-5@20250929",
+      aliases: ["gcp/claude-sonnet-4-5@20250929"],
+      maxOutputTokens: 8192,
+    };
+    expect(resolveOutputCap("gcp/claude-sonnet-4-5@20250929", [entry])).toBe(8192);
+    expect(findModelCatalogEntry("gcp/claude-sonnet-4-5@20250930", [entry])).toBeUndefined();
+  });
+  it("uses canonical serving identities and explicit catalog aliases", () => {
+    const catalog: ModelCatalogEntry[] = [
+      {
+        id: "bedrock/anthropic.claude-haiku-4-5",
+        aliases: ["claude-haiku-4-5", "anthropic/claude-haiku-4-5"],
+        maxOutputTokens: 4096,
+      },
+      { id: "openai/gpt-5.4-mini", maxOutputTokens: 16384 },
+    ];
+    expect(resolveOutputCap("anthropic.claude-haiku-4-5", catalog)).toBe(4096);
+    expect(resolveOutputCap("anthropic/claude-haiku-4-5", catalog)).toBe(4096);
+    expect(resolveOutputCap("openai/gpt-5.4-mini", catalog)).toBe(16384);
+    expect(resolveOutputCap("gpt-5.4-mini", catalog)).toBeNull();
+  });
   it("override > entry > null", () => {
     expect(resolveOutputCap("claude-haiku-4-5", CATALOG, 1234)).toBe(1234);
     expect(resolveOutputCap("claude-haiku-4-5", CATALOG)).toBe(4096);
@@ -89,6 +124,21 @@ describe("loadModelCatalog", () => {
     expect(() => loadModelCatalog(path)).toThrow(/models\.json|parse|JSON/i);
   });
 
+  it("rejects malformed and colliding catalog routes", () => {
+    const path = join(dir, "models.json");
+    writeFileSync(path, JSON.stringify({ run: [{ id: "future/model" }] }));
+    expect(() => loadModelCatalog(path)).toThrow(/unknown model provider/);
+    writeFileSync(
+      path,
+      JSON.stringify({ run: [{ id: "bedrock/m" }, { id: "anthropic/m", aliases: ["bedrock/m"] }] }),
+    );
+    expect(() => loadModelCatalog(path)).toThrow(/duplicate catalog route/);
+    writeFileSync(path, JSON.stringify({ run: [{ id: "bedrock/m", aliases: "anthropic/m" }] }));
+    expect(() => loadModelCatalog(path)).toThrow(/aliases must be an array/);
+    writeFileSync(path, JSON.stringify({ run: [{ id: "bedrock/m" }, { id: "bedrock/m" }] }));
+    expect(() => loadModelCatalog(path)).toThrow(/duplicate catalog route/);
+  });
+
   // The CLIs call loadModelCatalog() with no path: a broken default would silently uncap every run.
   it("defaults to the MODELS_JSON overlay (which replaces, not merges, the repo file)", () => {
     const overlay = join(dir, "overlay.json");
@@ -106,6 +156,23 @@ describe("loadModelCatalog", () => {
 });
 
 describe("buildRunnerModels", () => {
+  it("stores canonical model IDs before resolving or writing rows", () => {
+    const seen: string[] = [];
+    const models = buildRunnerModels(
+      ["claude-haiku-4-5", "anthropic/claude-haiku-4-5", "ollama:qwen3.5"],
+      (id) => {
+        seen.push(id);
+        return { id, model: {} as never };
+      },
+      { catalog: [], override: undefined },
+    );
+    expect(seen).toEqual([
+      "bedrock/claude-haiku-4-5",
+      "anthropic/claude-haiku-4-5",
+      "ollama:qwen3.5",
+    ]);
+    expect(models.map((m) => m.id)).toEqual(seen);
+  });
   // Mimics the AWS harness's injected Bedrock GUARD: an early `return { id, model }`
   // inside the resolver, with no cap. Caps are attached after resolution, so it can't skip them.
   const guardResolver = (modelId: string): ResolvedModel => ({
@@ -119,10 +186,13 @@ describe("buildRunnerModels", () => {
       override: undefined,
     });
     expect(models.map((m) => [m.id, m.maxOutputTokens])).toEqual([
-      ["claude-haiku-4-5", 4096],
+      ["bedrock/claude-haiku-4-5", 4096],
       ["ollama:qwen3.5", null],
     ]);
-    expect(models[0].model).toEqual({ provider: "amazon-bedrock", modelId: "claude-haiku-4-5" });
+    expect(models[0].model).toEqual({
+      provider: "amazon-bedrock",
+      modelId: "bedrock/claude-haiku-4-5",
+    });
   });
 
   it("applies the --max-output-tokens override to every model", () => {
@@ -147,11 +217,11 @@ describe("capsLine", () => {
       { catalog: CATALOG, override: undefined },
     );
     expect(capsLine(models)).toBe(
-      "caps: claude-haiku-4-5=4096, gpt-5.6-luna=16384, ollama:qwen3.5=none (no models.json cap)",
+      "caps: bedrock/claude-haiku-4-5=4096, bedrock/gpt-5.6-luna=16384, ollama:qwen3.5=none (no models.json cap)",
     );
     const none = models.map((m) => ({ ...m, maxOutputTokens: null }));
     expect(capsLine(none.slice(0, 1), "none")).toBe(
-      "caps: claude-haiku-4-5=none (--max-output-tokens none)",
+      "caps: bedrock/claude-haiku-4-5=none (--max-output-tokens none)",
     );
   });
 });
