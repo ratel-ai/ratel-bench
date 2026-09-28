@@ -1,0 +1,108 @@
+name: Run benchmark campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      runOnlyModels:
+        description: "Comma-separated provider/model IDs; replaces the 16-model default"
+        required: false
+        type: string
+      excludeModels:
+        description: "Comma-separated provider/model IDs removed after selection"
+        required: false
+        type: string
+      notifyToEmails:
+        description: "Comma-separated additional recipients; dev@ratel.sh is always included"
+        required: false
+        type: string
+      modelConcurrency:
+        description: "Concurrent model pipelines"
+        required: true
+        default: "1"
+        type: string
+      campaignBudgetUsd:
+        description: "Aggregate model/API spend ceiling in USD"
+        required: true
+        default: "1000"
+        type: string
+      runId:
+        description: "Optional idempotent run ID"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: benchmark-submit-${{ github.event.inputs.runId || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out immutable benchmark revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install frozen dispatch tooling
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate and serialize request
+        id: prepare
+        env:
+          CAMPAIGN_TEMPLATE_JSON: ${{ vars.BENCHMARK_CAMPAIGN_TEMPLATE_JSON }}
+          BENCHMARK_SHA: ${{ github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ONLY_MODELS: ${{ inputs.runOnlyModels }}
+          EXCLUDE_MODELS: ${{ inputs.excludeModels }}
+          NOTIFY_TO_EMAILS: ${{ inputs.notifyToEmails }}
+          MODEL_CONCURRENCY: ${{ inputs.modelConcurrency }}
+          CAMPAIGN_BUDGET_USD: ${{ inputs.campaignBudgetUsd }}
+          CAMPAIGN_RUN_ID: ${{ inputs.runId }}
+        run: pnpm --filter @ratel-ai/benchmark exec tsx src/workflow-dispatch-cli.ts prepare
+
+      - name: Check out immutable AWS launcher revision
+        uses: actions/checkout@v4
+        with:
+          repository: ratel-ai/ratel-bench-aws
+          ref: ${{ steps.prepare.outputs.aws_sha }}
+          path: .campaign/ratel-bench-aws
+
+      - name: Assume campaign launch role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}
+          aws-region: ${{ vars.BENCHMARK_AWS_REGION }}
+
+      - name: Start campaign asynchronously
+        env:
+          RESULTS_BUCKET: ${{ vars.BENCHMARK_RESULTS_BUCKET }}
+          CAMPAIGN_STATE_MACHINE_ARN: ${{ vars.BENCHMARK_CAMPAIGN_STATE_MACHINE_ARN }}
+          CAMPAIGN_RUN_TABLE: ${{ vars.BENCHMARK_CAMPAIGN_RUN_TABLE }}
+          CAMPAIGN_MODEL_CONCURRENCY_LIMIT: ${{ vars.BENCHMARK_MODEL_CONCURRENCY_LIMIT }}
+          CAMPAIGN_PREPARATION_CONCURRENCY_LIMIT: ${{ vars.BENCHMARK_PREPARATION_CONCURRENCY_LIMIT }}
+          CAMPAIGN_CODEBUILD_CONCURRENCY_LIMIT: ${{ vars.BENCHMARK_CODEBUILD_CONCURRENCY_LIMIT }}
+        run: |
+          if ! .campaign/ratel-bench-aws/scripts/bench-suite.sh submit \
+            .campaign/request-template.json --config .campaign/options.json \
+            > .campaign/launch.out 2> .campaign/launch.err; then
+            echo "::error title=Campaign launch failed::The coordinator rejected or could not start the campaign. Check the error below and verify repository variables, the deployed AWS revision, and OIDC role configuration."
+            sed -n '1,120p' .campaign/launch.err >&2
+            exit 1
+          fi
+          cat .campaign/launch.out
+
+      - name: Publish run links
+        run: pnpm --filter @ratel-ai/benchmark exec tsx src/workflow-dispatch-cli.ts summarize .campaign/launch.out

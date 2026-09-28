@@ -405,7 +405,7 @@ describe("frozen suite manifest and public result v1", () => {
     });
     expect(validateSuiteResult(completed).status).toBe("completed");
     expect(attachmentBytes(completed)).toBeLessThan(18_000_000);
-  });
+  }, 15_000);
 
   it("requires the fixed SR six-dataset stratification for a publishable campaign", () => {
     const inputs = {

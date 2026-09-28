@@ -37,6 +37,7 @@ agent/dist/
 plan.md
 progress.md
 CLAUDE.local.md
+.campaign/
 
 # version-set baseline snapshot (Cargo.toml/lock backup during a git-tag experiment)
 .version-set-baseline/
