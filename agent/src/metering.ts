@@ -68,7 +68,7 @@ export type PricingTable = Record<string, ModelPrice>;
  * entry in models.json (backend-keyed) and are loaded at runtime into
  * `RunnerConfig.pricing` by {@link file://./pricing.ts} — see `loadModelPricing`.
  * That keeps a model defined in one place and lets an unpriced model run fine at
- * $0. This empty default only applies when no pricing table is passed at all.
+ * unknown. This empty default only applies when no pricing table is passed at all.
  */
 export const DEFAULT_PRICING: PricingTable = {};
 
@@ -81,12 +81,10 @@ export function dollarCost(
     cacheCreation: number;
   },
   pricing: PricingTable = DEFAULT_PRICING,
-): number {
+): number | null {
   const price = pricing[modelId];
-  // Unknown models (incl. `ollama:*` local runs) intentionally return $0 — the
-  // caller can spot a stale price table by cross-referencing raw tokens with
-  // expected provider rates. For local runs the $0 is real, not stale.
-  if (!price) return 0;
+  if (modelId.startsWith("ollama:")) return 0;
+  if (!price) return null;
   // AI SDK inputTokens is the total prompt count, including cache reads/writes.
   // Bill each reported category once; tolerate older rows that reported only
   // cache categories without a total.
@@ -124,6 +122,10 @@ export interface MeterContext {
   nameToId?: ReadonlyMap<string, string>;
   /** AI SDK provider id of the model (see {@link providerOf}); stamped on the row. */
   provider?: string;
+  servingProvider?: string;
+  publisher?: string;
+  resolvedModel?: string;
+  vertexLocation?: string;
   /**
    * The cell's retry counters (`llm-retry.ts`), read once `generate` settles.
    * Plan-pinned U1/U4 rule: a timeout in a cell that saw any retry classifies
@@ -192,6 +194,10 @@ export async function meter(
     arm: ctx.arm,
     model: ctx.model,
     provider: ctx.provider,
+    serving_provider: ctx.servingProvider,
+    publisher: ctx.publisher,
+    resolved_model: ctx.resolvedModel,
+    vertex_location: ctx.vertexLocation,
     run_index: ctx.runIndex,
     ratel_version: sdkVersion(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
@@ -221,15 +227,15 @@ export async function meter(
     max_step_output_tokens: usage.maxStepOutputTokens,
     wall_ms: wallMs,
     dollar_cost: dollars,
+    cost_source: completeProviderCost
+      ? "provider"
+      : hasProviderCost
+        ? "partial"
+        : estimatedDollars === null
+          ? "unknown"
+          : "estimate",
     ...(ctx.provider === "xai.responses"
       ? {
-          cost_source: completeProviderCost
-            ? ("provider" as const)
-            : hasProviderCost
-              ? ("partial" as const)
-              : pricing[ctx.model]
-                ? ("estimate" as const)
-                : ("unknown" as const),
           ...(hasProviderCost
             ? {
                 provider_cost_ticks: providerTicks.reduce<number>(

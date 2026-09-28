@@ -343,7 +343,14 @@ function resolveGcp(
       generateAuthToken: opts.gcpAccessToken,
       fetch: opts.fetch,
     });
-    return { id, model: provider(vertexModelId) };
+    return {
+      id,
+      model: provider(vertexModelId),
+      servingProvider: "gcp",
+      publisher: "Anthropic",
+      resolvedModel: vertexModelId,
+      vertexLocation: location,
+    };
   }
   const { createVertex } = createRequire(import.meta.url)(
     "@ai-sdk/google-vertex",
@@ -366,7 +373,14 @@ function resolveGcp(
         },
       })
     : createVertex({ project, location, apiKey: "", fetch: opts.fetch });
-  return { id, model: provider(vertexModelId) };
+  return {
+    id,
+    model: provider(vertexModelId),
+    servingProvider: "gcp",
+    publisher: "Google",
+    resolvedModel: vertexModelId,
+    vertexLocation: location,
+  };
 }
 
 function vertexBaseURL(project: string, location: string): string {

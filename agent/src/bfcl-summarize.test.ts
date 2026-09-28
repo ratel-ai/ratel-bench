@@ -139,6 +139,72 @@ describe("summarizeBfcl — retrieval summary", () => {
 });
 
 describe("summarizeBfcl — task completion", () => {
+  it("separates serving routes and carries exact Vertex provenance into summaries", () => {
+    const rows = [
+      cell({ model: "bedrock/claude-sonnet-5" }),
+      cell({ model: "anthropic/claude-sonnet-5" }),
+      cell({
+        model: "gcp/claude-sonnet-5",
+        serving_provider: "gcp",
+        publisher: "Anthropic",
+        resolved_model: "claude-sonnet-5@20260901",
+        vertex_location: "us-central1",
+      }),
+      cell({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        generated_at: "2026-09-29",
+      }),
+    ];
+    const result = summarizeBfcl({ retrievalRows: [], cells: rows, scenarios });
+    expect(result.taskSummary.map((r) => r.model).sort()).toEqual([
+      "anthropic/claude-sonnet-5",
+      "bedrock/claude-sonnet-5",
+      "gcp/claude-sonnet-5",
+    ]);
+    expect(result.taskSummary.find((r) => r.model === "gcp/claude-sonnet-5")).toMatchObject({
+      serving_provider: "gcp",
+      publisher: "Anthropic",
+      resolved_model: "claude-sonnet-5@20260901",
+      vertex_location: "us-central1",
+    });
+  });
+
+  it("rejects a report group whose GCP alias resolved to different Vertex models", () => {
+    const cells = [
+      cell({ model: "gcp/claude-alias", resolved_model: "claude-sonnet-5@20260801" }),
+      cell({ model: "gcp/claude-alias", resolved_model: "claude-sonnet-5@20260901", run_index: 1 }),
+    ];
+    expect(() => summarizeBfcl({ retrievalRows: [], cells, scenarios })).toThrow(/resolved_model/);
+  });
+  it("ignores stale infrastructure errors when validating route provenance", () => {
+    const cells = [
+      cell({ model: "gcp/claude-alias", resolved_model: "claude-sonnet-5@20260901" }),
+      cell({
+        model: "gcp/claude-alias",
+        run_index: 1,
+        error: "Overloaded",
+        resolved_model: "claude-sonnet-5@20260801",
+      }),
+    ];
+    const { taskSummary } = summarizeBfcl({ retrievalRows: [], cells, scenarios });
+    expect(taskSummary[0]).toMatchObject({ scenarios: 1, excluded_cells: 1 });
+  });
+  it("rejects conflicting kept routes before a later row supersedes the same cell", () => {
+    const cells = [
+      cell({
+        model: "gcp/claude-alias",
+        resolved_model: "claude-sonnet-5@20260801",
+        generated_at: "2026-09-28T00:00:00.000Z",
+      }),
+      cell({
+        model: "gcp/claude-alias",
+        resolved_model: "claude-sonnet-5@20260901",
+        generated_at: "2026-09-29T00:00:00.000Z",
+      }),
+    ];
+    expect(() => summarizeBfcl({ retrievalRows: [], cells, scenarios })).toThrow(/resolved_model/);
+  });
   it("builds per-row records for every arm, joined to the corpus", () => {
     const cells = [
       cell({ scenario_id: "bfcl-simple-0" }), // ratel-full

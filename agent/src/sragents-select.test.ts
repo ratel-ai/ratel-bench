@@ -397,6 +397,52 @@ describe("drainControlCache", () => {
           .map((l) => JSON.parse(l) as SragentsSelectCell)
       : [];
 
+  it("keeps Bedrock, direct Anthropic and Vertex controls apart", () => {
+    const output = join(dir, "out.jsonl");
+    const source = join(dir, "cache.jsonl");
+    writeCells(source, [
+      cached({
+        model: "bedrock/claude-sonnet-5",
+        provider: "amazon-bedrock",
+        max_output_tokens: null,
+        selected_skill_ids: ["bedrock"],
+      }),
+      cached({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        max_output_tokens: null,
+        selected_skill_ids: ["direct"],
+      }),
+      cached({
+        model: "gcp/claude-sonnet-5",
+        provider: "vertex.anthropic.messages",
+        max_output_tokens: null,
+        selected_skill_ids: ["vertex"],
+      }),
+      cached({ model: "claude-sonnet-5", selected_skill_ids: ["ambiguous"] }),
+    ]);
+    const tasks = [
+      ["bedrock/claude-sonnet-5", "amazon-bedrock"],
+      ["anthropic/claude-sonnet-5", "anthropic.messages"],
+      ["gcp/claude-sonnet-5", "vertex.anthropic.messages"],
+    ].map(([id, provider]) => ({
+      ...task("control-baseline"),
+      model: { id, model: { provider } as never, maxOutputTokens: null },
+    }));
+    const result = drainControlCache(tasks, {
+      outputPath: output,
+      cachePaths: [source],
+      force: false,
+      allowLegacyCache: true,
+    });
+    expect(result.reused).toBe(3);
+    expect(readCells(output).map((row) => [row.model, row.selected_skill_ids[0]])).toEqual([
+      ["bedrock/claude-sonnet-5", "bedrock"],
+      ["anthropic/claude-sonnet-5", "direct"],
+      ["gcp/claude-sonnet-5", "vertex"],
+    ]);
+  });
+
   it("appends reused controls re-stamped with cache_source 'reused'; the rest run live", () => {
     const output = join(dir, "out.jsonl");
     const canonical = join(dir, "agent.jsonl");
@@ -1059,7 +1105,8 @@ describe("selectForCell", () => {
     expect(cell.error_class).toBe("access");
     expect(cell.finish_reason).toBe("error");
     expect(cell.input_tokens).toBe(0);
-    expect(cell.dollar_cost).toBe(0);
+    expect(cell.dollar_cost).toBeNull();
+    expect(cell.cost_source).toBe("unknown");
     expect(cell.provider).toBe("anthropic.messages");
   });
 

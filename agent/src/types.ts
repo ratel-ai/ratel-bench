@@ -79,6 +79,11 @@ export interface ResolvedModel {
   id: string;
   /** AI SDK model instance. */
   model: LanguageModel;
+  /** Route provenance resolved by the factory from catalog, options, and environment. */
+  servingProvider?: string;
+  publisher?: string;
+  resolvedModel?: string;
+  vertexLocation?: string;
 }
 
 /**
@@ -87,7 +92,9 @@ export interface ResolvedModel {
  * no cap sent (the provider default applies). Built after resolution, so every
  * resolver path (including injected ones) gets a cap.
  */
-export type RunnerModel = ResolvedModel & { maxOutputTokens: number | null };
+export type RunnerModel = ResolvedModel & {
+  maxOutputTokens: number | null;
+};
 
 export interface AgentRunInput {
   scenario: Scenario;
@@ -190,6 +197,12 @@ export interface CellResult {
   model: string;
   /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
   provider?: string;
+  /** Serving route, separate from the AI SDK adapter and model publisher. */
+  serving_provider?: string;
+  publisher?: string;
+  /** Exact invoked profile or Vertex API model ID. */
+  resolved_model?: string;
+  vertex_location?: string;
   run_index: number;
   /**
    * `@ratel-ai/sdk` version this row is filed under (resume-key dimension, not a
@@ -280,7 +293,8 @@ export interface CellResult {
   retry_policy?: string;
   // Performance
   wall_ms: number;
-  dollar_cost: number;
+  /** Null when no route-specific rate or billed amount is known. */
+  dollar_cost: number | null;
   /** xAI raw billed ticks, when returned by the provider (10^10 ticks/USD). */
   provider_cost_ticks?: number;
   /** Whether dollar_cost came from provider ticks, catalog rates, or neither. */

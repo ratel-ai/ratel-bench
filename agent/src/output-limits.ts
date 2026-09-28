@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isInfraError } from "./cell-errors.js";
 import { providerOf } from "./metering.js";
-import { canonicalModelId } from "./model-identity.js";
+import { canonicalModelId, parseModelIdentity } from "./model-identity.js";
 import { modelsJsonPath } from "./pricing.js";
 import type { AttemptRow } from "./rerun.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
@@ -52,7 +52,10 @@ const LEGACY_LABEL = "legacy (no recorded cap)";
 /** The cache-relevant harness a row was produced under. */
 export interface Harness {
   provider?: string;
+  serving_provider?: string;
   max_output_tokens?: number | null;
+  resolved_model?: string;
+  vertex_location?: string;
 }
 
 /** A row as `checkResumeCaps` sees it (BFCL `CellResult` and SR cells both fit). */
@@ -158,13 +161,42 @@ export function buildRunnerModels(
 ): RunnerModel[] {
   return modelIds.map((modelId) => {
     const canonicalId = canonicalModelId(modelId);
-    const { model } = resolve(canonicalId);
+    const resolved = resolve(canonicalId);
+    const identity = parseModelIdentity(canonicalId);
+    const entry = findModelCatalogEntry(canonicalId, opts.catalog);
     return {
       id: canonicalId,
-      model,
+      model: resolved.model,
       maxOutputTokens: resolveOutputCap(canonicalId, opts.catalog, opts.override),
+      ...(identity.kind === "provider"
+        ? {
+            servingProvider: resolved.servingProvider ?? identity.provider,
+            publisher:
+              resolved.publisher ??
+              entry?.publisher ??
+              (identity.provider === "gcp"
+                ? vertexPublisher(entry?.vertexModelId ?? identity.model)
+                : undefined),
+            resolvedModel:
+              resolved.resolvedModel ??
+              (identity.provider === "gcp"
+                ? (entry?.vertexModelId ?? identity.model)
+                : identity.provider === "bedrock"
+                  ? (entry?.bedrockProfile ?? identity.model)
+                  : identity.model),
+            ...(identity.provider === "gcp" && (resolved.vertexLocation ?? entry?.vertexLocation)
+              ? { vertexLocation: resolved.vertexLocation ?? entry?.vertexLocation }
+              : {}),
+          }
+        : {}),
     };
   });
+}
+
+function vertexPublisher(model: string): "Google" | "Anthropic" | undefined {
+  if (model.startsWith("gemini-")) return "Google";
+  if (model.startsWith("claude-")) return "Anthropic";
+  return undefined;
 }
 
 /**
@@ -180,8 +212,19 @@ export function capsLine(models: readonly RunnerModel[], override?: OutputCapOve
 }
 
 /** The harness a model runs under now: its SDK provider id and requested cap. */
-export function harnessOf(m: Pick<RunnerModel, "model" | "maxOutputTokens">): Harness {
-  return { provider: providerOf(m.model), max_output_tokens: m.maxOutputTokens };
+export function harnessOf(
+  m: Pick<
+    RunnerModel,
+    "model" | "maxOutputTokens" | "servingProvider" | "resolvedModel" | "vertexLocation"
+  >,
+): Harness {
+  return {
+    provider: providerOf(m.model),
+    ...(m.servingProvider ? { serving_provider: m.servingProvider } : {}),
+    max_output_tokens: m.maxOutputTokens,
+    ...(m.resolvedModel ? { resolved_model: m.resolvedModel } : {}),
+    ...(m.vertexLocation ? { vertex_location: m.vertexLocation } : {}),
+  };
 }
 
 /** `harnessOf` for every model of a run, keyed by model id. */
@@ -206,6 +249,14 @@ export function cacheTier(
   current: Harness | undefined,
   allowLegacy = true,
 ): "exact" | "legacy" | null {
+  if (
+    current?.serving_provider &&
+    row.serving_provider &&
+    row.serving_provider !== current.serving_provider
+  )
+    return null;
+  if (current?.resolved_model && row.resolved_model !== current.resolved_model) return null;
+  if (current?.vertex_location && row.vertex_location !== current.vertex_location) return null;
   if (row.max_output_tokens === undefined) {
     if (row.provider !== undefined && current && row.provider !== current.provider) return null;
     if (row.provider !== undefined && current?.max_output_tokens === null) return "exact";
@@ -263,12 +314,32 @@ export function checkResumeCaps(
 ): { legacy: number } {
   let legacy = 0;
   const conflicts = new Map<string, Set<string>>();
+  const identityConflicts: string[] = [];
   const conflict = (model: string, found: string) => {
     (conflicts.get(model) ?? conflicts.set(model, new Set()).get(model))?.add(found);
   };
   for (const r of rows) {
     const current = harness.get(r.model);
     if (!current || isInfraError(r)) continue;
+    if (
+      current.serving_provider &&
+      r.serving_provider &&
+      r.serving_provider !== current.serving_provider
+    ) {
+      identityConflicts.push(
+        `${r.model}: serving_provider ${r.serving_provider} != ${current.serving_provider}`,
+      );
+    }
+    if (current.resolved_model && r.resolved_model !== current.resolved_model) {
+      identityConflicts.push(
+        `${r.model}: resolved_model ${r.resolved_model ?? "unset"} != ${current.resolved_model}`,
+      );
+    }
+    if (current.vertex_location && r.vertex_location !== current.vertex_location) {
+      identityConflicts.push(
+        `${r.model}: vertex_location ${r.vertex_location ?? "unset"} != ${current.vertex_location}`,
+      );
+    }
     if (r.max_output_tokens === undefined) {
       if (r.cache_source !== "reused") legacy++;
       else if (!allowLegacy && cacheTier(r, current, false) === null) {
@@ -279,6 +350,11 @@ export function checkResumeCaps(
     if (r.max_output_tokens !== current.max_output_tokens) {
       conflict(r.model, capLabel(r.max_output_tokens));
     }
+  }
+  if (identityConflicts.length > 0) {
+    throw new Error(
+      `resume: output model identity differs from this run (${identityConflicts.join("; ")}); use a fresh --output or --force`,
+    );
   }
   if (conflicts.size > 0) {
     const detail = [...conflicts]

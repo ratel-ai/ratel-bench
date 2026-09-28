@@ -16,9 +16,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
+import { modelRouteOfRow } from "./cell-key.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import {
+  assertSingleModelProvenance,
   corpusOf,
   isTruncated,
   mean,
@@ -96,9 +98,10 @@ export function summarizeSragents(args: {
 }): SummarizeResult {
   const { label } = args;
   const inLabel = (version: string | undefined) => !label || (version ?? "unknown") === label;
-  const cells = (args.cells ?? []).filter(
-    (c) => datasetOfCell(c) !== null && inLabel(c.ratel_ai_core_version),
-  );
+  const cells = (args.cells ?? [])
+    .filter((c) => datasetOfCell(c) !== null && inLabel(c.ratel_ai_core_version))
+    .map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
+  assertCellProvenance(cells);
   const taskRows = buildTaskRows(supersede(cells, sragentsCellKeyOf));
   return {
     retrievalSummary: summarizeRetrieval(
@@ -204,6 +207,10 @@ function buildTaskRows(cells: SragentsSelectCell[]): SragentsTaskRow[] {
       generated_at: c.generated_at ?? "",
       dataset,
       model: c.model,
+      ...(c.serving_provider ? { serving_provider: c.serving_provider } : {}),
+      ...(c.publisher ? { publisher: c.publisher } : {}),
+      ...(c.resolved_model ? { resolved_model: c.resolved_model } : {}),
+      ...(c.vertex_location ? { vertex_location: c.vertex_location } : {}),
       arm: c.arm,
       scenario_id: c.scenario_id,
       gold_skill_ids: c.gold_skill_ids,
@@ -243,6 +250,7 @@ function summarizeTask(
   for (const [key, arr] of groups) {
     const [version, dataset, model, arm] = key.split("::");
     const kept = arr.filter((r) => !r.excluded);
+    assertSingleModelProvenance(kept, model);
     const clean = kept.filter((r) => r.error_class === null);
     out.push({
       timestamp: timestamps.get(key) ?? "",
@@ -252,6 +260,18 @@ function summarizeTask(
       ),
       source: "task_completion",
       model,
+      ...(kept.some((r) => r.serving_provider)
+        ? { serving_provider: provenance(kept.map((r) => r.serving_provider ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.publisher)
+        ? { publisher: provenance(kept.map((r) => r.publisher ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.resolved_model)
+        ? { resolved_model: provenance(kept.map((r) => r.resolved_model ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.vertex_location)
+        ? { vertex_location: provenance(kept.map((r) => r.vertex_location ?? null)) }
+        : {}),
       arm,
       dataset,
       scenarios: kept.length,
@@ -279,6 +299,23 @@ function summarizeTask(
       rank(a.dataset) - rank(b.dataset) ||
       a.dataset.localeCompare(b.dataset),
   );
+}
+
+/** Validate every non-infrastructure route before history supersession can hide a conflict. */
+function assertCellProvenance(cells: SragentsSelectCell[]): void {
+  const groups = new Map<string, SragentsSelectCell[]>();
+  for (const cell of cells) {
+    if (isInfraError(cell)) continue;
+    const dataset = datasetOfCell(cell);
+    if (dataset === null) continue;
+    const version = cell.ratel_ai_core_version ?? "unknown";
+    for (const key of groupKeys({ ...cell, ratel_ai_core_version: version, dataset })) {
+      (groups.get(key) ?? groups.set(key, []).get(key))?.push(cell);
+    }
+  }
+  for (const group of groups.values()) {
+    assertSingleModelProvenance(group, group[0]?.model ?? "unknown");
+  }
 }
 
 /** Summary groups of a row: its own dataset and the `all` rollup (label × dataset × LLM × arm). */

@@ -31,6 +31,7 @@ import {
   isRerunnable,
   type RerunPolicy,
 } from "./cell-errors.js";
+import { modelRouteOfRow } from "./cell-key.js";
 import { parseOutputCapFlag } from "./cli-args.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import {
@@ -335,6 +336,10 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     arm: args.arm,
     model: args.model.id,
     provider: providerOf(args.model.model),
+    serving_provider: args.model.servingProvider,
+    publisher: args.model.publisher,
+    resolved_model: args.model.resolvedModel,
+    vertex_location: args.model.vertexLocation,
     run_index: args.runIndex,
     pool_size: poolSize,
     candidate_count: candidates.length,
@@ -343,7 +348,8 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     input_tokens: 0,
     output_tokens: 0,
     total_tokens: 0,
-    dollar_cost: 0,
+    dollar_cost: null,
+    cost_source: "unknown",
     wall_ms: 0,
     error: null,
     cache_source: "live",
@@ -401,7 +407,8 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     };
     if (retry.stats.fatal) {
       const fatal = err instanceof FatalProviderError ? err : new FatalProviderError(err);
-      fatal.dollarCost = row.dollar_cost;
+      fatal.dollarCost = row.dollar_cost ?? 0;
+      fatal.unknownCost = row.dollar_cost === null;
       throw fatal;
     }
     return row;
@@ -439,14 +446,14 @@ function usageFields(
       ticks === undefined
         ? dollarCost(modelId, { input, output, cachedInput, cacheCreation }, PRICING)
         : ticks / 10_000_000_000,
+    cost_source:
+      ticks !== undefined
+        ? "provider"
+        : PRICING[modelId] || modelId.startsWith("ollama:")
+          ? "estimate"
+          : "unknown",
     ...(modelId.startsWith("xai/")
       ? {
-          cost_source:
-            ticks === undefined
-              ? PRICING[modelId]
-                ? ("estimate" as const)
-                : ("unknown" as const)
-              : ("provider" as const),
           ...(ticks === undefined ? {} : { provider_cost_ticks: ticks }),
         }
       : {}),
@@ -498,6 +505,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
   const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
   const tally = newRunTally();
   let dollars = 0;
+  let unknownCostCells = 0;
   let capHit = false;
   let done = 0;
   let total = tasks.length;
@@ -538,6 +546,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
         } catch (err) {
           if (!(err instanceof FatalProviderError)) throw err;
           breaker.fatal(t.model.id, err);
+          if (err.unknownCost) unknownCostCells++;
           spend(err.dollarCost);
           if (!opts.quiet) {
             console.log(
@@ -549,11 +558,13 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
         // A peer cell may have aborted this model while this call was in flight.
         // Charge its spend, but leave the aborted model's output untouched.
         if (breaker.isAborted(t.model.id)) {
-          spend(cell.dollar_cost);
+          if (cell.dollar_cost === null) unknownCostCells++;
+          spend(cell.dollar_cost ?? 0);
           continue;
         }
         cell.attempt = t.attempt;
-        spend(cell.dollar_cost);
+        if (cell.dollar_cost === null) unknownCostCells++;
+        spend(cell.dollar_cost ?? 0);
         opts.onCell(cell);
         done++;
         tallyRow(tally, cell);
@@ -589,6 +600,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
   return {
     cells_run: done,
     total_dollars: dollars,
+    unknown_cost_cells: unknownCostCells,
     stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
     cap_hit: capHit,
     ...tally,
@@ -668,8 +680,9 @@ export function readControlIndex(
     for (const c of readJsonl<SragentsSelectCell>(path)) {
       if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
       if (isRerunnable(c) || isRerunnable(c, policy)) continue;
-      const key = rowKey(c);
-      const best = preferCacheRow(reuse.get(key), c, harness.get(c.model), allowLegacy);
+      const route = harness.has(c.model) ? c.model : modelRouteOfRow(c);
+      const key = controlKey(c.scenario_id, c.arm, route, c.pool_size, c.run_index);
+      const best = preferCacheRow(reuse.get(key), c, harness.get(route), allowLegacy);
       if (best) reuse.set(key, best);
     }
   }
@@ -754,7 +767,8 @@ export function drainControlCache(
   const { pending, skipped, resume, requeued } = planCells(tasks, current, rerun);
   checkOutputCaps(capGuardRows(current, rowKey, requeued), tasks, allowLegacy);
   const harness = harnessByModel(tasks.map((t) => t.model));
-  const tierOf = (c: SragentsSelectCell) => cacheTier(c, harness.get(c.model), allowLegacy);
+  const tierOf = (c: SragentsSelectCell) =>
+    cacheTier(c, harness.get(harness.has(c.model) ? c.model : modelRouteOfRow(c)), allowLegacy);
   const reuseIndex = readControlIndex([opts.outputPath], harness, allowLegacy, rerun.policy);
   const ext = readControlIndex(
     opts.cachePaths.filter((p) => p !== opts.outputPath),
@@ -776,6 +790,7 @@ export function drainControlCache(
       if (prior) {
         appendJsonl(opts.outputPath, {
           ...prior,
+          model: t.model.id,
           ratel_ai_core_version: RATEL_AI_CORE_VERSION,
           ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
           generated_at: new Date().toISOString(),

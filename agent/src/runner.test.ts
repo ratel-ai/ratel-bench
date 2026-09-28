@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
 import { FatalProviderError } from "./cell-errors.js";
 import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
+import { resolveModel } from "./model-factory.js";
+import { buildRunnerModels } from "./output-limits.js";
 import { DEFAULT_RERUN_SETTINGS } from "./rerun.js";
 import {
   appendRow,
@@ -172,6 +174,46 @@ describe("runner", () => {
     }
     // One run → one shared run_id across all its cells.
     expect(new Set(rows.map((r) => r.run_id)).size).toBe(1);
+  });
+
+  it("stamps factory-resolved Vertex provenance on emitted rows", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const output = join(tempDir, "agent.jsonl");
+    const catalog = [
+      {
+        id: "gcp/gemini-alias",
+        publisher: "Google",
+        vertexModelId: "gemini-2.5-pro",
+      },
+    ];
+    const models = buildRunnerModels(
+      ["gcp/gemini-alias"],
+      (id) =>
+        resolveModel(id, {
+          catalog,
+          env: {},
+          gcpProject: "offline-project",
+          gcpLocation: "europe-west4",
+          gcpAccessToken: async () => "offline-token",
+        }),
+      { catalog, override: undefined },
+    );
+
+    await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models,
+      runCell: makeFakeRunCell(0.001, []),
+    });
+
+    expect(readRows(output)[0]).toMatchObject({
+      model: "gcp/gemini-alias",
+      serving_provider: "gcp",
+      publisher: "Google",
+      resolved_model: "gemini-2.5-pro",
+      vertex_location: "europe-west4",
+    });
   });
 
   it("stamps live cells with config.ratelVersion and cache_source 'live'", async () => {
@@ -872,6 +914,44 @@ describe("control cache", () => {
     });
     return { summary, called };
   }
+
+  it("serves only matching Claude provider routes, including evidenced historical rows", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const source = join(tempDir, "cache.jsonl");
+    writeRows(source, [
+      cachedRow({
+        model: "bedrock/claude-sonnet-5",
+        provider: "amazon-bedrock",
+        max_output_tokens: null,
+        final_text: "bedrock",
+      }),
+      cachedRow({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        max_output_tokens: null,
+        final_text: "direct",
+      }),
+      cachedRow({
+        model: "gcp/claude-sonnet-5",
+        provider: "vertex.anthropic.messages",
+        max_output_tokens: null,
+        final_text: "vertex",
+      }),
+      cachedRow({ model: "claude-sonnet-5", final_text: "ambiguous" }),
+    ]);
+    const models = [
+      ["bedrock/claude-sonnet-5", "amazon-bedrock"],
+      ["anthropic/claude-sonnet-5", "anthropic.messages"],
+      ["gcp/claude-sonnet-5", "vertex.anthropic.messages"],
+    ].map(([id, provider]) => ({ id, model: { provider } as never, maxOutputTokens: null }));
+    const { summary } = await runBaseline(output, { models, cacheSourcePaths: [source] });
+    expect(summary.cells_cached).toBe(3);
+    expect(readRows(output).map((r) => [r.model, r.final_text])).toEqual([
+      ["bedrock/claude-sonnet-5", "bedrock"],
+      ["anthropic/claude-sonnet-5", "direct"],
+      ["gcp/claude-sonnet-5", "vertex"],
+    ]);
+  });
 
   it("skips a transient-error control row and serves a later good row", async () => {
     const canonical = join(tempDir, "canonical.jsonl");
@@ -1747,6 +1827,21 @@ describe("breaker, resume re-queue and retry rounds", () => {
   }
 
   const noRounds = { ...DEFAULT_RERUN_SETTINGS, rounds: 0 };
+
+  it("reports unknown cost from a fatal call that wrote no row", async () => {
+    const output = join(tempDir, "fatal-unknown.jsonl");
+    const err = Object.assign(fatal(0), { unknownCost: true });
+    const summary = await run({
+      ...baseConfig(corpusOf(1), output),
+      arms: ["ratel-full"],
+      models: [model("B")],
+      runCell: async () => {
+        throw err;
+      },
+    });
+    expect(summary.unknown_cost_cells).toBe(1);
+    expect(summary.cells_run).toBe(0);
+  });
 
   it.each([
     1, 4,

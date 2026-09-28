@@ -406,6 +406,33 @@ describe("checkResumeCaps", () => {
 });
 
 describe("guardResumeCaps", () => {
+  it("refuses to resume a GCP alias after its resolved Vertex model changes", () => {
+    const models = [
+      {
+        id: "gcp/claude-alias",
+        model: { provider: "vertex.anthropic.messages" } as never,
+        maxOutputTokens: 1024,
+        resolvedModel: "claude-sonnet-5@20260901",
+        vertexLocation: "us-central1",
+      },
+    ];
+    expect(() =>
+      guardResumeCaps(
+        [
+          {
+            model: "gcp/claude-alias",
+            provider: "vertex.anthropic.messages",
+            max_output_tokens: 1024,
+            resolved_model: "claude-sonnet-5@20260801",
+            vertex_location: "us-central1",
+          },
+        ],
+        models,
+        "v",
+        true,
+      ),
+    ).toThrow(/resolved_model/);
+  });
   const models = [{ id: "m", model: {} as never, maxOutputTokens: 4096 }];
 
   it("warns once with the legacy count and version", () => {
