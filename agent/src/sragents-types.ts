@@ -90,6 +90,8 @@ export interface SragentsSelectCell {
   cached_input_tokens?: number;
   cache_creation_tokens?: number;
   dollar_cost: number;
+  provider_cost_ticks?: number;
+  cost_source?: "provider" | "partial" | "estimate" | "unknown";
   wall_ms: number;
   error: string | null;
   /**

@@ -42,7 +42,7 @@ import {
   retrySettingsFromEnv,
   retrySettingsLine,
 } from "./llm-retry.js";
-import { dollarCost, providerOf } from "./metering.js";
+import { dollarCost, providerOf, xaiCostTicks } from "./metering.js";
 import {
   buildRunnerModels,
   cacheTier,
@@ -358,7 +358,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
   );
   const startedAt = Date.now();
   try {
-    const { object, usage, finishReason } = await retry.run(() =>
+    const { object, usage, finishReason, providerMetadata } = await retry.run(() =>
       generateObject({
         model: retry.model,
         schema: SelectionSchema,
@@ -374,7 +374,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       ...retry.rowFields(),
       // Drop hallucinated ids the model wasn't shown.
       selected_skill_ids: object.selected_skill_ids.filter((id) => candidateIdSet.has(id)),
-      ...usageFields(args.model.id, usage),
+      ...usageFields(args.model.id, usage, providerMetadata),
       finish_reason: finishReason,
       wall_ms: Date.now() - startedAt,
     };
@@ -412,6 +412,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
 function usageFields(
   modelId: string,
   usage: LanguageModelUsage | undefined,
+  providerMetadata?: unknown,
 ): Pick<
   SragentsSelectCell,
   | "input_tokens"
@@ -420,18 +421,35 @@ function usageFields(
   | "cached_input_tokens"
   | "cache_creation_tokens"
   | "dollar_cost"
+  | "provider_cost_ticks"
+  | "cost_source"
 > {
   const input = usage?.inputTokens ?? 0;
   const output = usage?.outputTokens ?? 0;
   const cachedInput = usage?.inputTokenDetails?.cacheReadTokens ?? usage?.cachedInputTokens ?? 0;
   const cacheCreation = usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
+  const ticks = modelId.startsWith("xai/") ? xaiCostTicks(providerMetadata, usage) : undefined;
   return {
     input_tokens: input,
     output_tokens: output,
     total_tokens: usage?.totalTokens ?? input + output,
     cached_input_tokens: cachedInput,
     cache_creation_tokens: cacheCreation,
-    dollar_cost: dollarCost(modelId, { input, output, cachedInput, cacheCreation }, PRICING),
+    dollar_cost:
+      ticks === undefined
+        ? dollarCost(modelId, { input, output, cachedInput, cacheCreation }, PRICING)
+        : ticks / 10_000_000_000,
+    ...(modelId.startsWith("xai/")
+      ? {
+          cost_source:
+            ticks === undefined
+              ? PRICING[modelId]
+                ? ("estimate" as const)
+                : ("unknown" as const)
+              : ("provider" as const),
+          ...(ticks === undefined ? {} : { provider_cost_ticks: ticks }),
+        }
+      : {}),
   };
 }
 

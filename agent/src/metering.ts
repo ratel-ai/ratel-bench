@@ -33,6 +33,7 @@ export interface AgentStep {
     inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
     totalTokens?: number;
   };
+  providerMetadata?: Record<string, Record<string, unknown>>;
 }
 
 /**
@@ -163,7 +164,7 @@ export async function meter(
   // scores on its partial trace. `usage` meters what the cell spent either way.
   const trace = summarize(raw, ctx.nameToId);
   const usage = raw || !recorder ? trace : summarize({ steps: recorder.steps }, ctx.nameToId);
-  const dollars = dollarCost(
+  const estimatedDollars = dollarCost(
     ctx.model,
     {
       input: usage.inputTokens,
@@ -173,6 +174,17 @@ export async function meter(
     },
     pricing,
   );
+  const meteredSteps = raw?.steps ?? recorder?.steps ?? [];
+  const providerTicks =
+    ctx.provider === "xai.responses" && meteredSteps.length > 0
+      ? meteredSteps.map((step) => xaiCostTicks(step.providerMetadata, step.usage))
+      : [];
+  const completeProviderCost =
+    raw !== null && providerTicks.length > 0 && providerTicks.every((ticks) => ticks !== undefined);
+  const hasProviderCost = providerTicks.some((ticks) => ticks !== undefined);
+  const dollars = hasProviderCost
+    ? providerTicks.reduce<number>((total, ticks) => total + (ticks ?? 0), 0) / 10_000_000_000
+    : estimatedDollars;
 
   const cell: CellResult = {
     scenario_id: ctx.scenarioId,
@@ -209,9 +221,45 @@ export async function meter(
     max_step_output_tokens: usage.maxStepOutputTokens,
     wall_ms: wallMs,
     dollar_cost: dollars,
+    ...(ctx.provider === "xai.responses"
+      ? {
+          cost_source: completeProviderCost
+            ? ("provider" as const)
+            : hasProviderCost
+              ? ("partial" as const)
+              : pricing[ctx.model]
+                ? ("estimate" as const)
+                : ("unknown" as const),
+          ...(hasProviderCost
+            ? {
+                provider_cost_ticks: providerTicks.reduce<number>(
+                  (total, ticks) => total + (ticks ?? 0),
+                  0,
+                ),
+              }
+            : {}),
+        }
+      : {}),
     tool_calls: trace.toolCalls,
   };
   return { cell, raw };
+}
+
+/** xAI bills in 10^-10 USD ticks; reject malformed metadata. */
+export function xaiCostTicks(metadata: unknown, usage?: unknown): number | undefined {
+  const xai =
+    metadata && typeof metadata === "object" ? (metadata as { xai?: unknown }).xai : undefined;
+  const fromMetadata =
+    xai && typeof xai === "object"
+      ? (xai as { costInUsdTicks?: unknown }).costInUsdTicks
+      : undefined;
+  const raw = usage && typeof usage === "object" ? (usage as { raw?: unknown }).raw : undefined;
+  const fromUsage =
+    raw && typeof raw === "object"
+      ? (raw as { cost_in_usd_ticks?: unknown }).cost_in_usd_ticks
+      : undefined;
+  const ticks = fromMetadata ?? fromUsage;
+  return typeof ticks === "number" && Number.isFinite(ticks) && ticks >= 0 ? ticks : undefined;
 }
 
 interface Summary {

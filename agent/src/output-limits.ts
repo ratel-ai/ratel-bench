@@ -37,6 +37,8 @@ export interface ModelCatalogEntry {
   vertexModelId?: string;
   /** Optional model-specific Vertex location override. */
   vertexLocation?: string;
+  /** Direct xAI Responses reasoning setting; absent leaves the model default. */
+  xaiReasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   /** Positive integer; absent = no cap sent. */
   maxOutputTokens?: number;
 }
