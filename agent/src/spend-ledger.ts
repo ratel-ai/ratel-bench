@@ -281,23 +281,26 @@ export function spendRecorder(
   let physicalOrdinal = 0;
   return {
     async start(options) {
-      physicalOrdinal++;
-      const id = budget
-        ? createHash("sha256")
-            .update(
-              JSON.stringify([
-                budget.campaignId,
-                context.workNamespace ?? "evaluation",
-                context.kind,
-                context.scope,
-                context.cellKey,
-                context.model,
-                context.attemptOrdinal ?? 1,
-                physicalOrdinal,
-              ]),
-            )
-            .digest("hex")
-        : newSpendAttemptId();
+      let id: string;
+      do {
+        physicalOrdinal++;
+        id = budget
+          ? createHash("sha256")
+              .update(
+                JSON.stringify([
+                  budget.campaignId,
+                  context.workNamespace ?? "evaluation",
+                  context.kind,
+                  context.scope,
+                  context.cellKey,
+                  context.model,
+                  context.attemptOrdinal ?? 1,
+                  physicalOrdinal,
+                ]),
+              )
+              .digest("hex")
+          : newSpendAttemptId();
+      } while (budget && isSettledAttempt(ledger, id));
       if (budget) {
         const maxOutputTokens = (options as { maxOutputTokens?: number } | undefined)
           ?.maxOutputTokens;
@@ -345,6 +348,10 @@ export function spendRecorder(
       }
     },
   };
+}
+
+function isSettledAttempt(ledger: SpendLedger, id: string): boolean {
+  return ledger.entries().some((attempt) => attempt.dispatch.id === id && attempt.settlement);
 }
 
 function spendUsageOf(raw: unknown): SpendUsage | null {

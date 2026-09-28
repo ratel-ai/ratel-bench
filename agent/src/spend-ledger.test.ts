@@ -120,6 +120,32 @@ describe("durable live spend", () => {
     expect(await store.snapshot()).toMatchObject({ reservedTicks: 800000 });
   });
 
+  it("advances a settled physical attempt when resuming before its output row", async () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const store = { ...createMemoryBudgetStore(0.0001), campaignId: "campaign" };
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const route = { "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 } };
+    const budget = createCampaignBudget(store, route);
+    const context = {
+      kind: "bfcl" as const,
+      cellKey: "cell",
+      model: "bedrock/m",
+      price,
+      attemptOrdinal: 1,
+    };
+    const first = spendRecorder(ledger, context, budget);
+    const firstId = await first.start({ maxOutputTokens: 10 });
+    await first.finish(firstId, { usage: { inputTokens: 5, outputTokens: 2 } }, undefined, false);
+
+    const resumed = openSpendLedger(file);
+    await reconcileCampaignBudget(resumed, createCampaignBudget(store, route));
+    const resumedId = await spendRecorder(resumed, context, budget).start({ maxOutputTokens: 10 });
+
+    expect(resumedId).not.toBe(firstId);
+    expect(resumed.summary()).toMatchObject({ attempts: 2, unresolved: 1 });
+  });
+
   it("does not journal a second dispatched attempt from another worker", async () => {
     const firstLedger = openSpendLedger(path());
     const duplicateLedger = openSpendLedger(path());
