@@ -50,11 +50,21 @@ src/
   pool.ts             builds the per-scenario tool pool (gold + seeded distractors)
   report.ts           aggregator (medians, savings, retrieval, taxonomy)
   report-cli.ts       entry — pnpm report
+  suite-contract.ts    version 1 request/manifest/result validation and attachment preflight
   results-audit.ts    entry — pnpm results-audit (read-only error / stale-cache audit of raw JSONL)
   run-all.ts          entry — pnpm run-all (whole benchmark: ingest + a + b + c + report)
   runner.ts           registry-based dispatch, resumable, dollar-capped
   types.ts            AgentDescriptor / AgentRunInput / CellResult / Scenario shapes
 ```
+
+The full-suite contract reads the ordered 16 Bedrock defaults from `models.json`.
+`normalizeSuiteRequest` resolves model replacements and exclusions, a private
+recipient list, model concurrency, and the aggregate model/API budget.
+`buildSuiteManifest` freezes the stable SDK/core pair, exact corpus/scenario
+inputs and all three retrievers. `sealSuiteResult` validates coverage and
+accounting, checks the encoded attachment budget, and adds the public checksum.
+`fixtures/suite/` at the repository root contains JSON examples shared with
+the downstream importer. A smoke manifest is always non-publishable.
 
 ## Run the whole benchmark
 

@@ -29,6 +29,29 @@ Each run measures accuracy, input tokens, output tokens, cost, and latency. The 
 
 Full results: [benchmark.ratel.sh](https://benchmark.ratel.sh)
 
+## Full suite contract
+
+The version 1 request and result contracts are in
+[`agent/src/suite-contract.ts`](agent/src/suite-contract.ts). Shared producer/import
+fixtures are in [`fixtures/suite/`](fixtures/suite/). The committed
+[`models.json`](models.json) `run[]` list supplies exactly 16 Bedrock defaults;
+an explicit `runOnlyModels` list replaces them, and `excludeModels` applies
+afterward. Unqualified model IDs mean Bedrock. Model concurrency defaults to
+one (maximum 16). `campaignBudgetUsd` defaults to a positive, finite $1,000
+ceiling across all model/API attempts in the campaign. Extra notification
+addresses are validated and deduplicated with the mandatory `dev@ratel.sh`
+recipient; recipients stay outside the public artifact.
+
+The frozen manifest includes one stable compatible SDK/core pair, all three
+retrievers (BM25, dense, hybrid), the fixed BFCL/SR scenario and arm design,
+immutable source and corpus provenance, and unique expected work-unit keys.
+The public result contains one reconciled stage for every requested model,
+benchmark and retriever, bounded reports and diagnostics, timing, provider and
+infrastructure accounting, and a checksum. BM25 stages own the shared controls;
+dense and hybrid stages own their Ratel cells. Attachment sizing uses serialized
+JSON bytes plus base64 encoding and is checked before spend and on the final JSON.
+See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact work matrix.
+
 ## Corpora
 
 Three datasets the arms run against:
