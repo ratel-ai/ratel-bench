@@ -8,6 +8,7 @@ import { FatalProviderError } from "./cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
 import { formatDoneLine } from "./rerun.js";
+import { openSpendLedger } from "./spend-ledger.js";
 import {
   armCandidates,
   buildCandidateSets,
@@ -1027,6 +1028,30 @@ describe("selectForCell", () => {
     timeoutMs: 300_000,
   });
 
+  it("uses default retry settings when a direct metered selection omits overrides", async () => {
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    vi.mocked(ai.generateObject).mockImplementationOnce(actual.generateObject);
+    const dir = mkdtempSync(join(tmpdir(), "sr-default-retry-"));
+    const spendLedger = openSpendLedger(join(dir, "attempts.jsonl"));
+    const input = args();
+    input.model.model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: '{"selected_skill_ids":["g1"]}' }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const cell = await selectForCell({ ...input, spendLedger });
+    expect(cell.error).toBeNull();
+    expect(spendLedger.summary().attempts).toBe(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("records usage, finish_reason 'length', error_class 'outcome' from NoObjectGeneratedError", async () => {
     const ai = await import("ai");
     vi.mocked(ai.generateObject).mockRejectedValueOnce(
@@ -1486,6 +1511,49 @@ describe("planCells", () => {
   }
   const overloaded = { error: "Overloaded" };
 
+  it("reconciles resumed and reused cells without charging historical control cost", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-summary-"));
+    const spend = openSpendLedger(join(dir, "attempts.jsonl")).summary();
+    const tasks = [task("control-baseline"), task("ratel-full"), task("control-oracle")];
+    const rows = [
+      prior("control-baseline", { cache_source: "reused", dollar_cost: 0.5 }),
+      prior("ratel-full"),
+    ];
+    const summary = campaignDoneSummary(
+      {
+        cells_run: 0,
+        total_dollars: 0,
+        spend,
+        stopped_reason: "completed",
+        cap_hit: false,
+        retries: 0,
+        throttled_retries: 0,
+        errors: 0,
+        requeued: 0,
+        exhausted: 0,
+        aborted: {},
+      },
+      {
+        reused: 1,
+        skipped: 1,
+        resume: { requeued: {}, exhausted: 0 },
+        requestedTasks: tasks,
+        rows,
+        spend,
+      },
+    );
+    expect(summary.spend).toMatchObject({ attempts: 0, knownUsd: 0 });
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 1,
+      skipped: 1,
+      status: "partial",
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("planCells resumes all arms incl. ratel-full", () => {
     const tasks = [
       task("control-baseline"),
@@ -1765,6 +1833,145 @@ describe("runCampaign: breaker, rounds and cap", () => {
       mock.mockReset();
     }
   }
+
+  it("journals each physical SR call and keeps retry spend after an error row", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        if (calls === 1) {
+          throw Object.assign(
+            new APICallError({
+              message: "busy",
+              url: "https://api.test/v1",
+              requestBodyValues: {},
+              statusCode: 503,
+              isRetryable: true,
+            }),
+            {
+              usage: { inputTokens: 10, outputTokens: 2 },
+            },
+          );
+        }
+        return answer;
+      },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "sr-spend-"));
+    const path = join(dir, "sr.spend.jsonl");
+    const ledger = openSpendLedger(path);
+    ledger.dispatch({
+      id: "historical",
+      kind: "sragents",
+      scope: "sragents/old",
+      cellKey: "old",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("historical", {
+      status: "completed",
+      usage: { inputTokens: 500, outputTokens: 0 },
+    });
+    const task = taskOf("bedrock/m", model, 0);
+    task.model.servingProvider = "bedrock";
+    task.model.publisher = "example";
+    task.model.resolvedModel = "global.example.m";
+    const { result } = await campaign([task], {
+      spendLedger: ledger,
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    });
+    expect(result.spend).toMatchObject({ attempts: 2, unresolved: 0, knownUsd: 0.000124 });
+    const dispatches = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "dispatch");
+    expect(dispatches).toHaveLength(3);
+    expect(dispatches[1].value).toMatchObject({
+      kind: "sragents",
+      model: "bedrock/m",
+      servingProvider: "bedrock",
+      publisher: "example",
+      resolvedModel: "global.example.m",
+      adapterProvider: model.provider,
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps SR spend from a fatal request with no result row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-fatal-spend-"));
+    const spendLedger = openSpendLedger(join(dir, "attempts.jsonl"));
+    const gated = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw Object.assign(apiError(403, "model not available for this account"), {
+          usage: { inputTokens: 12, outputTokens: 2 },
+        });
+      },
+    });
+    const { result, rows } = await campaign([taskOf("bedrock/m", gated, 0)], {
+      spendLedger,
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    });
+    expect(rows).toEqual([]);
+    expect(result.spend).toMatchObject({ attempts: 1, knownUsd: 0.000016 });
+    expect(result.coverage).toMatchObject({ requested: 1, skipped: 1, status: "failed" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports all-error, budget-limited, and interrupted SR coverage truthfully", async () => {
+    const bad = scriptedModel(() => apiError(400, "bad request"));
+    const allError = await campaign([taskOf("bad", bad, 0)], {
+      rerun: { rounds: 0 },
+    });
+    expect(allError.result.coverage).toEqual({
+      requested: 1,
+      completed: 0,
+      failed: 1,
+      reused: 0,
+      skipped: 0,
+      status: "failed",
+    });
+
+    const priced = scriptedModel(() => null);
+    const limited = await campaign(
+      [0, 1, 2].map((i) => taskOf("claude-haiku-4-5", priced, i)),
+      { dollarCap: 0.0001 },
+    );
+    expect(limited.result.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "budget_limited",
+    });
+
+    const controller = new AbortController();
+    const interrupted = await campaign(
+      [0, 1, 2].map((i) =>
+        taskOf(
+          "ok",
+          scriptedModel(() => null),
+          i,
+        ),
+      ),
+      {
+        signal: controller.signal,
+        onCell: () => controller.abort(),
+      },
+    );
+    expect(interrupted.result.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "cancelled",
+    });
+  });
 
   it("K consecutive transport errors abort the model; its cells get no retry round", async () => {
     const down = scriptedModel(() => apiError(529, "Overloaded"));

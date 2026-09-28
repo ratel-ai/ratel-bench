@@ -19,6 +19,43 @@ function path(): string {
 }
 
 describe("durable live spend", () => {
+  it("isolates a current version from historical comparison attempts in one journal", () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 1,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "old",
+      runId: "historical",
+      kind: "bfcl",
+      scope: "bfcl/old",
+      cellKey: "old-cell",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("old", { status: "completed", usage: { inputTokens: 100, outputTokens: 0 } });
+    ledger.dispatch({
+      id: "current",
+      runId: "current",
+      kind: "bfcl",
+      scope: "bfcl/new",
+      cellKey: "new-cell",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("current", { status: "completed", usage: { inputTokens: 20, outputTokens: 0 } });
+    expect(ledger.summary("bfcl/new")).toMatchObject({ attempts: 1, knownUsd: 0.00002 });
+    expect(ledger.hasRun("historical", "bfcl/new")).toBe(false);
+    expect(ledger.summary()).toMatchObject({ attempts: 2, knownUsd: 0.00012 });
+    expect(openSpendLedger(file).summary("bfcl/new")).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.00002,
+    });
+  });
   it("keeps a dispatched request unresolved across a crash and counts a retry separately", () => {
     const file = path();
     const ledger = openSpendLedger(file);
@@ -44,6 +81,55 @@ describe("durable live spend", () => {
     });
     resumed.settle("retry", { status: "failed", usage: null });
     expect(openSpendLedger(file).summary()).toMatchObject({ attempts: 2, unresolved: 1 });
+  });
+
+  it("keeps an unscoped legacy crash visible when its version cannot be trusted", () => {
+    const file = path();
+    openSpendLedger(file).dispatch({
+      id: "phase10-crashed",
+      kind: "bfcl",
+      cellKey: "0.12.0::cell",
+      model: "bedrock/m",
+      price: null,
+    });
+
+    expect(openSpendLedger(file).summary("bfcl/0.12.0")).toMatchObject({
+      attempts: 0,
+      unresolved: 0,
+      unattributedAttempts: 1,
+      completeness: "partial",
+    });
+  });
+
+  it("attributes an unscoped paid attempt from a canonical BFCL cell key", () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    ledger.dispatch({
+      id: "phase10-paid",
+      runId: "legacy-run",
+      kind: "bfcl",
+      cellKey: "0.12.0::scenario::control-baseline::bedrock/m::0::p1",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("phase10-paid", {
+      status: "completed",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+
+    const resumed = openSpendLedger(file);
+    expect(resumed.summary("bfcl/0.12.0")).toMatchObject({
+      attempts: 1,
+      unresolved: 0,
+      knownUsd: 0.00002,
+      completeness: "complete",
+    });
+    expect(resumed.hasRun("legacy-run", "bfcl/0.12.0")).toBe(true);
+    expect(resumed.summary("bfcl/other")).toMatchObject({
+      attempts: 0,
+      knownUsd: 0,
+      completeness: "complete",
+    });
   });
 
   it("persists a response before the cell checkpoint and never double-counts replay", () => {

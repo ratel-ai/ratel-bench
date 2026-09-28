@@ -18,6 +18,7 @@ import {
   type RunnerSummary,
   run,
 } from "./runner.js";
+import { openSpendLedger } from "./spend-ledger.js";
 import type { AgentDescriptor, CellResult, Scenario } from "./types.js";
 import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -197,6 +198,14 @@ describe("runner", () => {
       knownUsd: 0.000016,
       completeness: "complete",
     });
+    expect(summary.coverage).toEqual({
+      requested: 1,
+      completed: 0,
+      failed: 0,
+      reused: 0,
+      skipped: 1,
+      status: "failed",
+    });
   });
 
   it("marks resumed live rows without an attempt journal as incomplete accounting", async () => {
@@ -222,6 +231,68 @@ describe("runner", () => {
       registry: new Map([[controlBaseline.id, controlBaseline]]),
     });
     expect(summary.spend).toMatchObject({ untrackedRows: 1, completeness: "partial" });
+  });
+
+  it("retains legacy paid spend and an ambiguous crash in a BFCL resume summary", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const config = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    };
+    const previous = await makeFakeRunCell(
+      0.5,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: config.models[0],
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config,
+    });
+    writeRows(output, [{ ...previous, run_id: "legacy-paid", cache_source: "live" }]);
+    const ledger = openSpendLedger(`${output}.spend.jsonl`);
+    ledger.dispatch({
+      id: "phase10-paid",
+      runId: "legacy-paid",
+      kind: "bfcl",
+      cellKey: "test::fs-001::control-baseline::fake-model::0::p1",
+      model: "fake-model",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("phase10-paid", {
+      status: "completed",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    ledger.dispatch({
+      id: "phase10-crashed",
+      kind: "bfcl",
+      cellKey: "test::untrusted",
+      model: "fake-model",
+      price: null,
+    });
+
+    const summary = await run(config);
+
+    expect(summary.spend).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.00002,
+      unattributedAttempts: 1,
+      untrackedRows: 0,
+      completeness: "partial",
+    });
+    expect(summary.coverage).toEqual({
+      requested: 1,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 0,
+      status: "partial",
+    });
   });
 
   it("persists agent and judge attempts and reuses them on resume without new spend", async () => {
@@ -316,6 +387,21 @@ describe("runner", () => {
       config: baseConfig(corpus, canonical),
     });
     writeRows(canonical, [historical]);
+    writeRows(output, [{ ...historical, ratel_version: "old", run_id: "historical" }]);
+    const oldLedger = openSpendLedger(`${output}.spend.jsonl`);
+    oldLedger.dispatch({
+      id: "old-control",
+      runId: "historical",
+      kind: "bfcl",
+      scope: "bfcl/old",
+      cellKey: "old-cell",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 1, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    oldLedger.settle("old-control", {
+      status: "completed",
+      usage: { inputTokens: 500, outputTokens: 0 },
+    });
     const summary = await run({
       ...baseConfig(corpus, output),
       arms: ["control-baseline"],
@@ -326,7 +412,7 @@ describe("runner", () => {
     });
     expect(summary.cells_cached).toBe(1);
     expect(summary.spend).toMatchObject({ attempts: 0, knownUsd: 0, completeness: "complete" });
-    expect(readRows(output)[0].dollar_cost).toBe(0.5);
+    expect(readRows(output)[1].dollar_cost).toBe(0.5);
     expect(model.doGenerateCalls).toHaveLength(0);
   });
 
@@ -1048,6 +1134,45 @@ describe("runner", () => {
     });
     expect(summary.stopped_reason).toBe("global_cap");
     expect(summary.cells_run).toBeLessThan(3);
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 2,
+      failed: 0,
+      reused: 0,
+      skipped: 1,
+      status: "budget_limited",
+    });
+  });
+
+  it("drains an interrupted BFCL run and marks unfinished cells cancelled", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }, { ...scenario, id: "fs-003" }]
+        .map((s) => JSON.stringify(s))
+        .join("\n"),
+    );
+    const controller = new AbortController();
+    const fake = makeFakeRunCell(0.001, []);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      signal: controller.signal,
+      runCell: async (args) => {
+        const row = await fake(args);
+        controller.abort();
+        return row;
+      },
+    });
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "cancelled",
+    });
   });
 });
 

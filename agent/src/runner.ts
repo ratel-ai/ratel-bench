@@ -69,6 +69,7 @@ import {
   rerunOutcome,
   resumeLine,
   runRounds,
+  summarizeRunCoverage,
   tallyRow,
 } from "./rerun.js";
 import { sdkVersion } from "./sdk/resolve.js";
@@ -128,6 +129,8 @@ export interface RunnerConfig {
    */
   retry?: RetrySettings;
   dollarGlobalCap: number;
+  /** Stop dispatching new cells when cancelled; finish already dispatched work. */
+  signal?: AbortSignal;
   force: boolean;
   /**
    * Which errored rows resume and the in-process retry rounds re-run, how many
@@ -149,6 +152,8 @@ export interface RunnerConfig {
   /** Runner-owned journal, passed to descriptor calls. */
   spendLedger?: SpendLedger;
   spendRunId?: string;
+  /** Current benchmark/version ledger partition; assigned by `run`. */
+  spendScope?: string;
   /** `--judge-max-output-tokens`: cap on each LLM-judge call. Unset = no cap sent. */
   judgeMaxOutputTokens?: number;
   /** Skip the argument-level (AST) task-completion verdict. Defaults to off (AST on). */
@@ -486,6 +491,7 @@ export function makeRegistryRunCell(
     if (config.spendLedger) {
       retry.attempt = spendRecorder(config.spendLedger, {
         runId: config.spendRunId,
+        scope: config.spendScope,
         kind: "bfcl",
         cellKey,
         model: model.id,
@@ -541,6 +547,7 @@ export function makeRegistryRunCell(
         attempt: config.spendLedger
           ? spendRecorder(config.spendLedger, {
               runId: config.spendRunId,
+              scope: config.spendScope,
               kind: "judge",
               cellKey,
               model:
@@ -648,7 +655,7 @@ function buildTaskQueue(
   ratelVersion: string,
   plan: ResumePlan,
   registry: Map<string, AgentDescriptor> | undefined,
-): { tasks: PendingTask[]; cellsSkipped: number; resume: ResumeCounts } {
+): { tasks: PendingTask[]; requestedKeys: string[]; cellsSkipped: number; resume: ResumeCounts } {
   const poolCache = new Map<string, ToolSpec[]>();
   const expand = (scenario: Scenario, poolSize: number): ToolSpec[] => {
     const key = `${scenario.id}::${poolSize}`;
@@ -665,6 +672,7 @@ function buildTaskQueue(
   const sweepArms = config.arms.filter((arm) => !isAgnostic(arm));
 
   const tasks: PendingTask[] = [];
+  const requestedKeys: string[] = [];
   let cellsSkipped = 0;
   const resume = emptyResumeCounts();
   const tryEnqueue = (
@@ -685,6 +693,7 @@ function buildTaskQueue(
       runIndex,
       poolSize,
     });
+    requestedKeys.push(key);
     countResume(plan, key, resume);
     if (plan.completed.has(key)) {
       cellsSkipped++;
@@ -720,7 +729,7 @@ function buildTaskQueue(
       }
     }
   }
-  return { tasks, cellsSkipped, resume };
+  return { tasks, requestedKeys, cellsSkipped, resume };
 }
 
 export async function run(config: RunnerConfig): Promise<RunnerSummary> {
@@ -728,10 +737,12 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   // rows join to retrieval rows (by `scenario_id`) and are scoped to this run.
   const runId = randomUUID();
   const runTimestamp = new Date().toISOString();
+  const ratelVersion = config.ratelVersion ?? sdkVersion();
+  const spendScope = `bfcl/${ratelVersion}`;
   const spendLedger =
     config.spendLedger ??
     openSpendLedger(config.spendLedgerPath ?? `${config.outputPath}.spend.jsonl`);
-  config = { ...config, spendLedger, spendRunId: runId };
+  config = { ...config, spendLedger, spendRunId: runId, spendScope };
 
   const allScenarios = loadScenarios(config.corpusPath);
   const scenarios = sampleScenarios(allScenarios, config.scenarioLimit, config.seed);
@@ -760,7 +771,6 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     }
   }
 
-  const ratelVersion = config.ratelVersion ?? sdkVersion();
   const rerun = config.rerun ?? DEFAULT_RERUN_SETTINGS;
   const logLevel = config.logLevel ?? "normal";
   // Resume: completed cells are skipped; rerunnable rows with attempts left re-run.
@@ -779,6 +789,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
 
   const {
     tasks,
+    requestedKeys,
     cellsSkipped: initialSkipped,
     resume,
   } = buildTaskQueue(scenarios, universe, config, ratelVersion, plan, registry);
@@ -880,14 +891,16 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   tally.requeued = requeuedTotal(resume);
   tally.exhausted = resume.exhausted;
   let cellsRun = 0;
-  let totalDollars = config.runCell ? 0 : spendLedger.summary().knownUsd;
+  let totalDollars = config.runCell ? 0 : spendLedger.summary(spendScope).knownUsd;
   let unknownCostCells = 0;
   let capHit = false;
   let totalToRun = liveTasks.length;
 
   // Every dollar a cell spent counts toward the cap, including a fatal cell's.
   const spend = (dollars: number): void => {
-    totalDollars = config.runCell ? totalDollars + dollars : spendLedger.summary().knownUsd;
+    totalDollars = config.runCell
+      ? totalDollars + dollars
+      : spendLedger.summary(spendScope).knownUsd;
     if (totalDollars >= config.dollarGlobalCap) capHit = true;
   };
 
@@ -903,7 +916,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
     // Synchronous; safe to call from any worker because the JS event loop
     // guarantees no preemption between the read and the increment.
     const pickTask = (): PendingTask | null => {
-      if (dispatchStopped) return null;
+      if (dispatchStopped || config.signal?.aborted) return null;
       if (capHit || totalDollars >= config.dollarGlobalCap) {
         capHit = true;
         return null;
@@ -999,29 +1012,46 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
       totalToRun += queue.length;
       return runPass(queue);
     },
-    (task) => !capHit && !breaker.isAborted(task.model.id),
+    (task) => !capHit && !config.signal?.aborted && !breaker.isAborted(task.model.id),
   );
 
-  const ledgerSummary = spendLedger.summary();
+  const ledgerSummary = spendLedger.summary(spendScope);
+  const requestedSet = new Set(requestedKeys);
   const untrackedRows = config.runCell
     ? 0
     : priorRows.filter(
-        (row) => row.cache_source !== "reused" && (!row.run_id || !spendLedger.hasRun(row.run_id)),
+        (row) =>
+          requestedSet.has(cellKeyOf(row)) &&
+          row.cache_source !== "reused" &&
+          (!row.run_id || !spendLedger.hasRun(row.run_id, spendScope)),
       ).length;
+  const spendSummary = {
+    ...ledgerSummary,
+    untrackedRows,
+    completeness:
+      ledgerSummary.completeness === "partial" || untrackedRows > 0
+        ? ("partial" as const)
+        : ("complete" as const),
+  };
+  const stoppedReason = config.signal?.aborted
+    ? "interrupted"
+    : (breaker.stopped() ?? (capHit ? "global_cap" : "completed"));
   return {
     cells_run: cellsRun,
     cells_skipped: initialSkipped,
     cells_cached: cellsCached,
     scenarios: scenarios.length,
     total_dollars: totalDollars,
-    spend: {
-      ...ledgerSummary,
-      untrackedRows,
-      completeness:
-        ledgerSummary.completeness === "partial" || untrackedRows > 0 ? "partial" : "complete",
-    },
+    spend: spendSummary,
+    coverage: summarizeRunCoverage(
+      requestedKeys,
+      readOutputRows(config.outputPath),
+      cellKeyOf,
+      stoppedReason,
+      spendSummary,
+    ),
     unknown_cost_cells: unknownCostCells,
-    stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
+    stopped_reason: stoppedReason,
     cap_hit: capHit,
     ...tally,
     aborted: breaker.aborted(),

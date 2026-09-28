@@ -79,10 +79,19 @@ export interface ResumeCounts {
 
 /**
  * How a run ended: drained, the dollar cap, or a model abort. Precedence:
- * `fatal` > `error_circuit` > `global_cap` > `completed`; an abort that outranks
- * a cap hit still shows it (`cap_hit`, `stopped=fatal+global_cap`).
+ * An interruption stops dispatch; otherwise `fatal` > `error_circuit` >
+ * `global_cap` > `completed`. An abort that outranks a cap hit still shows it.
  */
-export type StopReason = "completed" | "global_cap" | AbortReason;
+export type StopReason = "completed" | "global_cap" | "interrupted" | AbortReason;
+
+export interface RunCoverage {
+  requested: number;
+  completed: number;
+  failed: number;
+  reused: number;
+  skipped: number;
+  status: "completed" | "partial" | "failed" | "cancelled" | "budget_limited";
+}
 
 /** The counts behind the final `done:` line (BFCL `RunnerSummary`, SR `runCampaign`). */
 export interface DoneSummary {
@@ -93,8 +102,9 @@ export interface DoneSummary {
   /** Control cells served from the cache (re-stamped) instead of running live. */
   cells_cached: number;
   total_dollars: number;
-  /** Durable provider attempts; absent from legacy SR-Agents summaries. */
+  /** Durable provider attempts for this benchmark/version. */
   spend?: SpendSummary;
+  coverage?: RunCoverage;
   /** Live cells whose provider cost and route estimate were both unavailable. */
   unknown_cost_cells?: number;
   stopped_reason: StopReason;
@@ -233,6 +243,45 @@ export function rerunOutcome(
   return outOfAttempts(attempt, settings.maxAttempts) ? "exhausted" : "retry";
 }
 
+/** Classify each planned cell once, from its final row after retries and resume. */
+export function summarizeRunCoverage<T extends ErrorRow & { cache_source?: "live" | "reused" }>(
+  requestedKeys: readonly string[],
+  rows: readonly T[],
+  keyOf: (row: T) => string,
+  stopped: StopReason,
+  spend?: SpendSummary,
+): RunCoverage {
+  const requested = new Set(requestedKeys);
+  const final = new Map(
+    supersede(
+      rows.filter((row) => requested.has(keyOf(row))),
+      keyOf,
+    ).map((row) => [keyOf(row), row]),
+  );
+  let completed = 0;
+  let failed = 0;
+  let reused = 0;
+  let skipped = 0;
+  for (const key of requested) {
+    const row = final.get(key);
+    if (!row) skipped++;
+    else if (row.error != null) failed++;
+    else if (row.cache_source === "reused") reused++;
+    else completed++;
+  }
+  const status =
+    stopped === "interrupted"
+      ? "cancelled"
+      : stopped === "global_cap"
+        ? "budget_limited"
+        : completed + reused === 0
+          ? "failed"
+          : failed || skipped || stopped !== "completed" || spend?.completeness === "partial"
+            ? "partial"
+            : "completed";
+  return { requested: requested.size, completed, failed, reused, skipped, status };
+}
+
 /**
  * The in-process retry rounds. `retryable` is the main pass's rerunnable tasks;
  * each round waits `delayMs`, then re-runs those `canRetry` still allows (model
@@ -282,7 +331,7 @@ export function tallyRow(
 export function formatDoneLine(s: DoneSummary): string {
   const accounting =
     s.spend?.completeness === "partial"
-      ? ` (known lower bound; ${s.spend.unresolved} unresolved, ${s.spend.unknown} unknown, ${s.spend.untrackedRows ?? 0} untracked rows)`
+      ? ` (known lower bound; ${s.spend.unresolved} unresolved, ${s.spend.unknown} unknown, ${s.spend.untrackedRows ?? 0} untracked rows, ${s.spend.unattributedAttempts ?? 0} unattributed attempts)`
       : "";
   return (
     `done: ${s.cells_run} cells run, ${s.cells_cached} cached, ${s.cells_skipped} skipped, ` +
@@ -298,15 +347,24 @@ export function formatDoneLine(s: DoneSummary): string {
 export function doneLines(s: DoneSummary): string[] {
   return [
     formatDoneLine(s),
+    ...(s.coverage
+      ? [
+          `coverage: status=${s.coverage.status}, requested=${s.coverage.requested}, ` +
+            `completed=${s.coverage.completed}, failed=${s.coverage.failed}, ` +
+            `reused=${s.coverage.reused}, skipped=${s.coverage.skipped}`,
+        ]
+      : []),
     ...Object.entries(s.aborted).map(
       ([model, why]) => `aborted: ${model} — ${why.reason}: ${why.detail}`,
     ),
   ];
 }
 
-/** The run's exit code: 2 when the breaker aborted a model (after the summary), else 0. */
-export function runExitCode(s: Pick<DoneSummary, "aborted">): 0 | 2 {
-  return Object.keys(s.aborted).length > 0 ? 2 : 0;
+/** Exit nonzero for any non-completed coverage or model abort. */
+export function runExitCode(s: Pick<DoneSummary, "aborted" | "coverage">): 0 | 2 {
+  return Object.keys(s.aborted).length > 0 || (s.coverage && s.coverage.status !== "completed")
+    ? 2
+    : 0;
 }
 
 /**

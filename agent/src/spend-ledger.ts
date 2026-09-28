@@ -17,7 +17,9 @@ export interface SpendDispatch {
   id: string;
   /** Invocation whose output row can later be matched to this journal. */
   runId?: string;
-  kind: "bfcl" | "judge";
+  /** Benchmark/version whose live spend this attempt belongs to. */
+  scope?: string;
+  kind: "bfcl" | "sragents" | "judge";
   cellKey: string;
   model: string;
   servingProvider?: string;
@@ -54,11 +56,20 @@ export interface SpendSummary {
   completeness: "complete" | "partial";
   /** Legacy live rows without evidence of provider-attempt journaling. */
   untrackedRows?: number;
+  /** Legacy attempts compatible with this benchmark but lacking trustworthy scope evidence. */
+  unattributedAttempts?: number;
 }
 
 interface Attempt {
   dispatch: SpendDispatch;
   settlement?: SpendSettlement;
+}
+
+interface Totals {
+  attempts: number;
+  unresolved: number;
+  unknown: number;
+  knownTicks: number;
 }
 
 type Event =
@@ -69,9 +80,17 @@ type Event =
 export function openSpendLedger(path: string) {
   const attempts = new Map<string, Attempt>();
   const runIds = new Set<string>();
-  let unresolved = 0;
-  let unknown = 0;
-  let knownTicks = 0;
+  const scopedRunIds = new Map<string, Set<string>>();
+  const totals: Totals = { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+  const scoped = new Map<string, Totals>();
+  const forScope = (scope: string): Totals => {
+    let value = scoped.get(scope);
+    if (!value) {
+      value = { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+      scoped.set(scope, value);
+    }
+    return value;
+  };
   if (existsSync(path)) {
     const contents = readFileSync(path, "utf8");
     const end = contents.lastIndexOf("\n") + 1;
@@ -89,9 +108,22 @@ export function openSpendLedger(path: string) {
         throw new Error(`conflicting spend attempt ${event.value.id}`);
       if (!old) {
         attempts.set(event.value.id, { dispatch: event.value });
-        unresolved++;
+        for (const current of [
+          totals,
+          ...(event.value.scope ? [forScope(event.value.scope)] : []),
+        ]) {
+          current.attempts++;
+          current.unresolved++;
+        }
       }
-      if (event.value.runId) runIds.add(event.value.runId);
+      if (event.value.runId) {
+        runIds.add(event.value.runId);
+        if (event.value.scope) {
+          const scopedIds = scopedRunIds.get(event.value.scope) ?? new Set<string>();
+          scopedIds.add(event.value.runId);
+          scopedRunIds.set(event.value.scope, scopedIds);
+        }
+      }
     } else {
       const attempt = attempts.get(event.id);
       if (!attempt) throw new Error(`settlement without dispatch: ${event.id}`);
@@ -99,10 +131,15 @@ export function openSpendLedger(path: string) {
         throw new Error(`conflicting spend settlement ${event.id}`);
       if (!attempt.settlement) {
         attempt.settlement = event.value;
-        unresolved--;
         const ticks = costTicks(attempt.dispatch.model, attempt.dispatch.price, event.value);
-        if (ticks === null) unknown++;
-        else knownTicks += ticks;
+        for (const current of [
+          totals,
+          ...(attempt.dispatch.scope ? [forScope(attempt.dispatch.scope)] : []),
+        ]) {
+          current.unresolved--;
+          if (ticks === null) current.unknown++;
+          else current.knownTicks += ticks;
+        }
       }
     }
   }
@@ -120,8 +157,14 @@ export function openSpendLedger(path: string) {
   }
 
   return {
-    hasRun(runId: string): boolean {
-      return runIds.has(runId);
+    hasRun(runId: string, scope?: string): boolean {
+      return scope === undefined
+        ? runIds.has(runId)
+        : (scopedRunIds.get(scope)?.has(runId) ?? false) ||
+            [...attempts.values()].some(
+              ({ dispatch }) =>
+                !dispatch.scope && dispatch.runId === runId && legacyScopeOf(dispatch) === scope,
+            );
     },
     dispatch(value: SpendDispatch): void {
       if (attempts.has(value.id)) {
@@ -140,16 +183,61 @@ export function openSpendLedger(path: string) {
       }
       append({ type: "settle", id, value });
     },
-    summary(): SpendSummary {
+    summary(scope?: string): SpendSummary {
+      const value = scope === undefined ? totals : { ...(scoped.get(scope) ?? emptyTotals()) };
+      let unattributedAttempts = 0;
+      if (scope !== undefined) {
+        for (const attempt of attempts.values()) {
+          if (attempt.dispatch.scope) continue;
+          const inferred = legacyScopeOf(attempt.dispatch);
+          if (inferred === scope) addAttempt(value, attempt);
+          else if (!inferred && benchmarkMatchesScope(attempt.dispatch.kind, scope)) {
+            unattributedAttempts++;
+          }
+        }
+      }
       return {
-        attempts: attempts.size,
-        unresolved,
-        unknown,
-        knownUsd: knownTicks / 10_000_000_000,
-        completeness: unresolved || unknown ? "partial" : "complete",
+        attempts: value.attempts,
+        unresolved: value.unresolved,
+        unknown: value.unknown,
+        knownUsd: value.knownTicks / 10_000_000_000,
+        completeness:
+          value.unresolved || value.unknown || unattributedAttempts ? "partial" : "complete",
+        ...(unattributedAttempts ? { unattributedAttempts } : {}),
       };
     },
   };
+}
+
+function emptyTotals(): Totals {
+  return { attempts: 0, unresolved: 0, unknown: 0, knownTicks: 0 };
+}
+
+function addAttempt(totals: Totals, attempt: Attempt): void {
+  totals.attempts++;
+  if (!attempt.settlement) {
+    totals.unresolved++;
+    return;
+  }
+  const ticks = costTicks(attempt.dispatch.model, attempt.dispatch.price, attempt.settlement);
+  if (ticks === null) totals.unknown++;
+  else totals.knownTicks += ticks;
+}
+
+function legacyScopeOf(dispatch: SpendDispatch): string | undefined {
+  if (dispatch.kind !== "bfcl" && dispatch.kind !== "judge") return undefined;
+  const parts = dispatch.cellKey.split("::");
+  if (parts.length !== 5 && parts.length !== 6) return undefined;
+  const [version, scenario, arm, model, runIndex, pool] = parts;
+  if (!version || !scenario || !arm || !model || !/^(0|[1-9]\d*)$/.test(runIndex)) return undefined;
+  if (pool !== undefined && !/^p(0|[1-9]\d*)$/.test(pool)) return undefined;
+  return `bfcl/${version}`;
+}
+
+function benchmarkMatchesScope(kind: SpendDispatch["kind"], scope: string): boolean {
+  if (scope.startsWith("bfcl/")) return kind === "bfcl" || kind === "judge";
+  if (scope.startsWith("sragents/")) return kind === "sragents";
+  return false;
 }
 
 export type SpendLedger = ReturnType<typeof openSpendLedger>;
