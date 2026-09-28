@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { LanguageModel } from "ai";
+import type { CampaignBudget } from "./campaign-budget.js";
 import { errorClassOf } from "./cell-errors.js";
 import { cellKeyOf } from "./cell-key.js";
 import { loadScenarios } from "./corpus.js";
@@ -22,7 +23,7 @@ import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import { judgeAst } from "./judges/ast.js";
 import { judgeLLM as defaultJudgeLLM, type JudgePromptVariant } from "./judges/llm.js";
 import { effectiveCalls, type PricingTable } from "./metering.js";
-import { openSpendLedger, spendRecorder } from "./spend-ledger.js";
+import { openSpendLedger, reconcileCampaignBudget, spendRecorder } from "./spend-ledger.js";
 import type { CellResult, Scenario } from "./types.js";
 
 export interface RejudgeArgs {
@@ -33,6 +34,7 @@ export interface RejudgeArgs {
   judgeModel?: LanguageModel;
   judgeModelId?: string;
   pricing?: PricingTable;
+  campaignBudget?: CampaignBudget;
   /** Defaults to `"strict"` — same as the runner's default. */
   promptVariant?: JudgePromptVariant;
   /** `--judge-max-output-tokens`: cap on each judge call. Unset = no cap sent. */
@@ -69,10 +71,27 @@ export interface RejudgeSummary {
  *    (errored rows pass through unchanged and are counted in `skipped_error`).
  */
 export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
+  if (args.campaignBudget) {
+    if (args.judgeModel && !args.judgeModelId)
+      throw new Error("campaign preflight: judge model requires a canonical priced route");
+    args.campaignBudget.preflight(
+      args.judgeModelId
+        ? [
+            {
+              model: args.judgeModelId,
+              price: args.pricing?.[args.judgeModelId] ?? null,
+              requestedOutputTokens: args.judgeMaxOutputTokens,
+            },
+          ]
+        : [],
+    );
+  }
   const judge = args.judge ?? defaultJudgeLLM;
   const spendLedger = args.judgeModel
     ? openSpendLedger(`${args.outputPath}.spend.jsonl`)
     : undefined;
+  if (args.campaignBudget && spendLedger)
+    await reconcileCampaignBudget(spendLedger, args.campaignBudget);
   const spendRunId = randomUUID();
   const variant = args.promptVariant ?? "strict";
   const recomputeAst = args.recomputeAst ?? true;
@@ -116,22 +135,28 @@ export async function rejudge(args: RejudgeArgs): Promise<RejudgeSummary> {
         promptVariant: variant,
         maxOutputTokens: args.judgeMaxOutputTokens,
         attempt: spendLedger
-          ? spendRecorder(spendLedger, {
-              runId: spendRunId,
-              scope: `bfcl/${cell.ratel_version}`,
-              kind: "judge",
-              cellKey: cellKeyOf(cell),
-              model:
-                args.judgeModelId ??
-                (typeof args.judgeModel === "string"
-                  ? args.judgeModel
-                  : `${args.judgeModel.provider}/${args.judgeModel.modelId}`),
-              adapterProvider:
-                typeof args.judgeModel === "string" ? undefined : args.judgeModel.provider,
-              adapterModel:
-                typeof args.judgeModel === "string" ? undefined : args.judgeModel.modelId,
-              price: args.judgeModelId ? (args.pricing?.[args.judgeModelId] ?? null) : null,
-            })
+          ? spendRecorder(
+              spendLedger,
+              {
+                runId: spendRunId,
+                scope: `bfcl/${cell.ratel_version}`,
+                kind: "judge",
+                workNamespace: "rejudge",
+                attemptOrdinal: cell.attempt ?? 1,
+                cellKey: cellKeyOf(cell),
+                model:
+                  args.judgeModelId ??
+                  (typeof args.judgeModel === "string"
+                    ? args.judgeModel
+                    : `${args.judgeModel.provider}/${args.judgeModel.modelId}`),
+                adapterProvider:
+                  typeof args.judgeModel === "string" ? undefined : args.judgeModel.provider,
+                adapterModel:
+                  typeof args.judgeModel === "string" ? undefined : args.judgeModel.modelId,
+                price: args.judgeModelId ? (args.pricing?.[args.judgeModelId] ?? null) : null,
+              },
+              args.campaignBudget,
+            )
           : undefined,
       });
       cell.judge_verdict = judged.verdict;

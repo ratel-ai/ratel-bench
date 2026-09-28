@@ -137,8 +137,9 @@ describe("withRetry", () => {
           events.push(`start:${id}`);
           return id;
         },
-        finish: (id, result, error) =>
-          events.push(`${id}:${error ? "failed" : result ? "completed" : "missing"}`),
+        finish: (id, result, error) => {
+          events.push(`${id}:${error ? "failed" : result ? "completed" : "missing"}`);
+        },
       },
     });
     await wrapped.doGenerate({ prompt: [] });

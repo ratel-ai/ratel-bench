@@ -79,8 +79,8 @@ export interface WithRetryOptions {
 }
 
 export interface AttemptRecorder {
-  start(): string;
-  finish(id: string, result: unknown, error: unknown, aborted: boolean): void;
+  start(options?: unknown): string | Promise<string>;
+  finish(id: string, result: unknown, error: unknown, aborted: boolean): void | Promise<void>;
 }
 
 /** Storage failed at the paid-call boundary; callers must stop new inference. */
@@ -197,7 +197,7 @@ export function withRetry<M extends LanguageModel>(model: M, opts: WithRetryOpti
   const target = model as unknown as { doGenerate: Generate } & Record<PropertyKey, unknown>;
   const name = `${String(target.provider)}/${String(target.modelId)}`;
   const doGenerate: Generate = (options) =>
-    generateWithRetry(() => target.doGenerate(options), options.abortSignal, name, opts);
+    generateWithRetry(() => target.doGenerate(options), options, name, opts);
   return new Proxy(target, {
     get(obj, prop) {
       if (prop === "doGenerate") return doGenerate;
@@ -459,16 +459,17 @@ export function breakerLine(threshold: number): string {
 
 async function generateWithRetry<T>(
   call: () => Promise<T>,
-  signal: AbortSignal | undefined,
+  options: CallOptions,
   name: string,
   opts: WithRetryOptions,
 ): Promise<T> {
+  const signal = options.abortSignal;
   const { policy, stats, deadline } = opts;
   const sleepFn = opts.sleep ?? sleep;
   for (let attempt = 1; ; attempt++) {
     // A journal failure must stop inference. A response-journal failure must
     // leave the dispatch unresolved, never trigger another hidden retry.
-    const attemptId = opts.attempt?.start();
+    const attemptId = await opts.attempt?.start(options);
     let result: T | undefined;
     let error: unknown;
     let failed = false;
@@ -479,7 +480,7 @@ async function generateWithRetry<T>(
       failed = true;
     }
     if (attemptId !== undefined)
-      opts.attempt?.finish(
+      await opts.attempt?.finish(
         attemptId,
         result,
         failed ? error : undefined,

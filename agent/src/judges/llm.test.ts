@@ -1,5 +1,6 @@
 import { NoObjectGeneratedError, RetryError } from "ai";
 import { describe, expect, it, vi } from "vitest";
+import { BudgetLimitedError } from "../campaign-budget.js";
 import { SpendJournalError } from "../llm-retry.js";
 import { JUDGE_MAX_RETRIES, judgeLLM } from "./llm.js";
 
@@ -12,6 +13,22 @@ vi.mock("ai", async () => {
 });
 
 describe("judgeLLM", () => {
+  it("propagates budget denial instead of returning a judge n/a", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(
+      new BudgetLimitedError({
+        ceilingTicks: 100,
+        spentTicks: 100,
+        reservedTicks: 0,
+        remainingTicks: 0,
+        unresolved: 0,
+        discrepant: false,
+      }),
+    );
+    await expect(
+      judgeLLM({ prompt: "hi", finalText: "hi", model: {} as never }),
+    ).rejects.toMatchObject({ status: "budget_limited" });
+  });
   it("propagates journal failure instead of scoring an unaccounted judge call", async () => {
     const ai = await import("ai");
     vi.mocked(ai.generateObject).mockRejectedValueOnce(

@@ -27,6 +27,12 @@ import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { preflightBedrockModels } from "./bedrock-preflight.js";
 import {
+  BudgetContentionError,
+  BudgetLimitedError,
+  type BudgetSnapshot,
+  type CampaignBudget,
+} from "./campaign-budget.js";
+import {
   classifyError,
   FatalProviderError,
   isRerunnable,
@@ -96,6 +102,7 @@ import {
 } from "./rerun.js";
 import {
   openSpendLedger,
+  reconcileCampaignBudget,
   type SpendLedger,
   type SpendSummary,
   spendRecorder,
@@ -314,6 +321,7 @@ export interface SelectArgs {
   query: string;
   model: RunnerModel;
   runIndex: number;
+  attempt?: number;
   seed: number;
   catalog: Map<string, { name: string; description: string }>;
   /** `--timeout-ms`: the call's active-time deadline (abortable; retry sleeps don't count). */
@@ -321,6 +329,7 @@ export interface SelectArgs {
   /** Retry policy + backstop grace; defaults to `DEFAULT_RETRY_SETTINGS`. */
   retry?: RetrySettings;
   spendLedger?: SpendLedger;
+  campaignBudget?: CampaignBudget;
   spendRunId?: string;
   pricing?: PricingTable;
 }
@@ -334,6 +343,8 @@ export interface SelectArgs {
  * metering, carrying the call's spend (`dollarCost`).
  */
 export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
+  if (args.campaignBudget && !args.spendLedger)
+    throw new Error("campaign preflight: spend journal is required");
   const { ids, poolSize } = armCandidates(args.arm, args.sc, args.seed);
   const candidates = ids
     .map((id) => ({ id, ...(args.catalog.get(id) ?? { name: id, description: "" }) }))
@@ -372,20 +383,26 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
 
   const retrySettings: RetrySettings = { ...(args.retry ?? DEFAULT_RETRY_SETTINGS) };
   if (args.spendLedger) {
-    retrySettings.attempt = spendRecorder(args.spendLedger, {
-      runId: args.spendRunId,
-      scope: SR_SPEND_SCOPE,
-      kind: "sragents",
-      cellKey: taskKey(args),
-      model: args.model.id,
-      servingProvider: args.model.servingProvider,
-      publisher: args.model.publisher,
-      resolvedModel: args.model.resolvedModel,
-      vertexLocation: args.model.vertexLocation,
-      adapterProvider: typeof args.model.model === "string" ? undefined : args.model.model.provider,
-      adapterModel: typeof args.model.model === "string" ? undefined : args.model.model.modelId,
-      price: (args.pricing ?? PRICING)[args.model.id] ?? null,
-    });
+    retrySettings.attempt = spendRecorder(
+      args.spendLedger,
+      {
+        runId: args.spendRunId,
+        scope: SR_SPEND_SCOPE,
+        kind: "sragents",
+        attemptOrdinal: args.attempt ?? 1,
+        cellKey: taskKey(args),
+        model: args.model.id,
+        servingProvider: args.model.servingProvider,
+        publisher: args.model.publisher,
+        resolvedModel: args.model.resolvedModel,
+        vertexLocation: args.model.vertexLocation,
+        adapterProvider:
+          typeof args.model.model === "string" ? undefined : args.model.model.provider,
+        adapterModel: typeof args.model.model === "string" ? undefined : args.model.model.modelId,
+        price: (args.pricing ?? PRICING)[args.model.id] ?? null,
+      },
+      args.campaignBudget,
+    );
   }
   const retry = cellRetry(
     args.model.model,
@@ -416,7 +433,12 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       wall_ms: Date.now() - startedAt,
     };
   } catch (err) {
-    if (err instanceof SpendJournalError) throw err;
+    if (
+      err instanceof SpendJournalError ||
+      err instanceof BudgetLimitedError ||
+      err instanceof BudgetContentionError
+    )
+      throw err;
     // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
     // carries its usage and finish reason (`length` = truncated at the output cap:
     // an `outcome` error, final — never re-run or excluded). generateObject raises
@@ -507,6 +529,8 @@ export interface Task {
 export interface CampaignOptions {
   concurrency: number;
   dollarCap: number;
+  /** Optional stricter command cap for a funded campaign. */
+  campaignLocalCapUsd?: number;
   seed: number;
   quiet: boolean;
   onCell: (c: SragentsSelectCell) => void;
@@ -518,13 +542,16 @@ export interface CampaignOptions {
   /** The breaker's streak (`RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`; 0 = off). */
   abortAfterConsecutiveErrors: number;
   spendLedger?: SpendLedger;
+  campaignBudget?: CampaignBudget;
   spendRunId?: string;
   pricing?: PricingTable;
   signal?: AbortSignal;
 }
 
 /** The campaign's share of the `done:` counts (the cache and resume add the rest). */
-export type CampaignSummary = Omit<DoneSummary, "cells_cached" | "cells_skipped">;
+export type CampaignSummary = Omit<DoneSummary, "cells_cached" | "cells_skipped"> & {
+  campaignBudget?: BudgetSnapshot;
+};
 
 type QueuedTask = Task & { attempt: number };
 
@@ -537,6 +564,22 @@ type QueuedTask = Task & { attempt: number };
  * rounds re-run the rerunnable cells under the same cap.
  */
 export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise<CampaignSummary> {
+  if (
+    opts.campaignLocalCapUsd !== undefined &&
+    (!Number.isFinite(opts.campaignLocalCapUsd) || opts.campaignLocalCapUsd <= 0)
+  )
+    throw new Error("campaign local cap must be positive and finite");
+  if (opts.campaignBudget && !opts.spendLedger)
+    throw new Error("campaign preflight: spend journal is required");
+  opts.campaignBudget?.preflight(
+    tasks.map((task) => ({
+      model: task.model.id,
+      price: (opts.pricing ?? PRICING)[task.model.id] ?? null,
+      requestedOutputTokens: task.model.maxOutputTokens ?? undefined,
+    })),
+  );
+  if (opts.campaignBudget && opts.spendLedger)
+    await reconcileCampaignBudget(opts.spendLedger, opts.campaignBudget);
   const breaker = createBreaker(opts.abortAfterConsecutiveErrors);
   const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
   const runId = opts.spendRunId ?? randomUUID();
@@ -544,6 +587,9 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
   let dollars = opts.spendLedger?.summary(SR_SPEND_SCOPE).knownUsd ?? 0;
   let unknownCostCells = 0;
   let capHit = false;
+  const effectiveDollarCap = opts.campaignBudget
+    ? (opts.campaignLocalCapUsd ?? Number.POSITIVE_INFINITY)
+    : opts.dollarCap;
   let done = 0;
   let total = tasks.length;
   const emitted: SragentsSelectCell[] = [];
@@ -552,7 +598,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     dollars = opts.spendLedger
       ? opts.spendLedger.summary(SR_SPEND_SCOPE).knownUsd
       : dollars + dollarCost;
-    if (dollars >= opts.dollarCap) capHit = true;
+    if (dollars >= effectiveDollarCap) capHit = true;
   };
 
   const runPass = async (queue: QueuedTask[]): Promise<QueuedTask[]> => {
@@ -560,8 +606,8 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     let i = 0;
     let dispatchStopped = false;
     const pick = (): QueuedTask | null => {
-      if (dispatchStopped || opts.signal?.aborted) return null;
-      if (dollars >= opts.dollarCap) {
+      if (dispatchStopped || capHit || opts.signal?.aborted) return null;
+      if (dollars >= effectiveDollarCap) {
         capHit = true;
         return null;
       }
@@ -586,10 +632,15 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
               timeoutMs: opts.timeoutMs,
               retry,
               spendLedger: opts.spendLedger,
+              campaignBudget: opts.campaignBudget,
               spendRunId: runId,
               pricing: opts.pricing,
             });
           } catch (err) {
+            if (err instanceof BudgetLimitedError) {
+              capHit = true;
+              continue;
+            }
             if (!(err instanceof FatalProviderError)) throw err;
             breaker.fatal(t.model.id, err);
             if (err.unknownCost) unknownCostCells++;
@@ -659,6 +710,7 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     : (breaker.stopped() ?? (capHit ? "global_cap" : "completed"));
   return {
     cells_run: done,
+    ...(opts.campaignBudget ? { campaignBudget: await opts.campaignBudget.snapshot() } : {}),
     total_dollars: dollars,
     ...(spendSummary ? { spend: spendSummary } : {}),
     coverage: summarizeRunCoverage(

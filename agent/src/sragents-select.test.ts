@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { FatalProviderError } from "./cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
@@ -1745,6 +1746,94 @@ describe("runCampaign", () => {
 });
 
 describe("runCampaign: breaker, rounds and cap", () => {
+  it("marks unfunded SR work budget_limited before another provider call", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return answer;
+      },
+    });
+    const tasks = [taskOf("bedrock/m", model, 0), taskOf("bedrock/m", model, 1)];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: { "bedrock/m": price },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+      expect(calls).toBe(1);
+      expect(result.coverage).toMatchObject({ requested: 2, skipped: 1, status: "budget_limited" });
+      expect(result.campaignBudget).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+      expect(await store.snapshot()).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops picking cheaper SR work after confirmed budget exhaustion", async () => {
+    const calls = [0, 0, 0];
+    const models = calls.map(
+      (_, i) =>
+        new MockLanguageModelV3({
+          doGenerate: async () => {
+            calls[i]++;
+            return answer;
+          },
+        }),
+    );
+    const tasks = [
+      taskOf("bedrock/first", models[0], 0),
+      taskOf("bedrock/expensive", models[1], 1),
+      taskOf("bedrock/cheap", models[2], 2),
+    ];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const standard = {
+      inputPer1M: 1,
+      outputPer1M: 2,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    const cheap = {
+      inputPer1M: 0.1,
+      outputPer1M: 0.1,
+      cachedInputPer1M: 0.1,
+      cacheCreationPer1M: 0.1,
+    };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-stop-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: {
+          "bedrock/first": standard,
+          "bedrock/expensive": standard,
+          "bedrock/cheap": cheap,
+        },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/first": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/expensive": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/cheap": { price: cheap, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+
+      expect(calls).toEqual([1, 0, 0]);
+      expect(result.coverage).toMatchObject({
+        requested: 3,
+        completed: 1,
+        skipped: 2,
+        status: "budget_limited",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const sc = (i: number) => ({
     scenarioId: `sragents-toolqa_${i}`,
     category: "sragents-toolqa",

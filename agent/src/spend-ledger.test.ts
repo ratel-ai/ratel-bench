@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APICallError } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { newRetryStats, withRetry } from "./llm-retry.js";
-import { openSpendLedger, spendRecorder } from "./spend-ledger.js";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
+import { newRetryStats, SpendJournalError, withRetry } from "./llm-retry.js";
+import { openSpendLedger, reconcileCampaignBudget, spendRecorder } from "./spend-ledger.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -19,6 +20,160 @@ function path(): string {
 }
 
 describe("durable live spend", () => {
+  it("reserves and claims before each physical retry, then settles usage", async () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(store, {
+      "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 },
+    });
+    let calls = 0;
+    const model = {
+      provider: "test",
+      modelId: "m",
+      async doGenerate(_options?: unknown) {
+        calls++;
+        expect((await store.snapshot()).reservedTicks).toBeGreaterThan(0);
+        if (calls === 1)
+          throw new APICallError({
+            message: "retry",
+            url: "https://example.test",
+            requestBodyValues: {},
+            statusCode: 503,
+          });
+        return { usage: { inputTokens: 5, outputTokens: 2 } };
+      },
+    };
+    const wrapped = withRetry(model as never, {
+      policy: { maxAttempts: 2, baseMs: 1, maxDelayMs: 1, maxTotalWaitMs: 2 },
+      stats: newRetryStats(),
+      sleep: async () => {},
+      attempt: spendRecorder(
+        ledger,
+        { kind: "bfcl", cellKey: "cell", model: "bedrock/m", price },
+        budget,
+      ),
+    }) as typeof model;
+    await wrapped.doGenerate({ maxOutputTokens: 10 } as never);
+    expect(calls).toBe(2);
+    expect(ledger.summary()).toMatchObject({ attempts: 2, unknown: 1 });
+    expect(await store.snapshot()).toMatchObject({ spentTicks: 90000, reservedTicks: 400000 });
+  });
+
+  it("replays a journaled response after budget settlement was unavailable", async () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const route = { "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 } };
+    const failing = createCampaignBudget(
+      {
+        ...store,
+        settle: async () => {
+          throw new Error("store unavailable");
+        },
+      },
+      route,
+    );
+    const attempt = spendRecorder(
+      ledger,
+      { kind: "bfcl", cellKey: "cell", model: "bedrock/m", price },
+      failing,
+    );
+    const id = await attempt.start({ maxOutputTokens: 10 });
+    await expect(
+      attempt.finish(id, { usage: { inputTokens: 5, outputTokens: 2 } }, undefined, false),
+    ).rejects.toThrow(/store unavailable/);
+    expect(await store.snapshot()).toMatchObject({ spentTicks: 0, reservedTicks: 400000 });
+    const resumed = openSpendLedger(file);
+    await reconcileCampaignBudget(resumed, createCampaignBudget(store, route));
+    await reconcileCampaignBudget(resumed, createCampaignBudget(store, route));
+    expect(await store.snapshot()).toMatchObject({ spentTicks: 90000, reservedTicks: 0 });
+  });
+
+  it("fences duplicate worker delivery while a new logical retry gets a fresh reservation", async () => {
+    const ledger = openSpendLedger(path());
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(store, {
+      "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 },
+    });
+    const context = {
+      kind: "bfcl" as const,
+      cellKey: "cell",
+      model: "bedrock/m",
+      price,
+      attemptOrdinal: 1,
+      runId: "first-delivery",
+    };
+    await spendRecorder(ledger, context, budget).start({ maxOutputTokens: 10 });
+    await expect(
+      spendRecorder(ledger, { ...context, runId: "duplicate-delivery" }, budget).start({
+        maxOutputTokens: 10,
+      }),
+    ).rejects.toThrow(SpendJournalError);
+    await spendRecorder(ledger, { ...context, attemptOrdinal: 2 }, budget).start({
+      maxOutputTokens: 10,
+    });
+    expect(ledger.summary()).toMatchObject({ attempts: 2, unresolved: 2 });
+    expect(await store.snapshot()).toMatchObject({ reservedTicks: 800000 });
+  });
+
+  it("does not journal a second dispatched attempt from another worker", async () => {
+    const firstLedger = openSpendLedger(path());
+    const duplicateLedger = openSpendLedger(path());
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(store, {
+      "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 },
+    });
+    const context = { kind: "bfcl" as const, cellKey: "same-cell", model: "bedrock/m", price };
+    await spendRecorder(firstLedger, context, budget).start({ maxOutputTokens: 10 });
+    await expect(
+      spendRecorder(duplicateLedger, context, budget).start({ maxOutputTokens: 10 }),
+    ).rejects.toThrow(SpendJournalError);
+    expect(firstLedger.summary().attempts).toBe(1);
+    expect(duplicateLedger.summary().attempts).toBe(0);
+  });
+
+  it("never invokes the provider when the reservation service is unavailable", async () => {
+    const ledger = openSpendLedger(path());
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(
+      {
+        ...store,
+        reserve: async () => {
+          throw new Error("unavailable");
+        },
+      },
+      { "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 } },
+    );
+    let calls = 0;
+    const model = {
+      provider: "test",
+      modelId: "m",
+      async doGenerate(_options?: unknown) {
+        calls++;
+        return {};
+      },
+    };
+    const wrapped = withRetry(model as never, {
+      policy: { maxAttempts: 2, baseMs: 1, maxDelayMs: 1, maxTotalWaitMs: 2 },
+      stats: newRetryStats(),
+      attempt: spendRecorder(
+        ledger,
+        { kind: "bfcl", cellKey: "cell", model: "bedrock/m", price },
+        budget,
+      ),
+    }) as typeof model;
+    await expect(wrapped.doGenerate({ maxOutputTokens: 10 } as never)).rejects.toThrow(
+      /spend journal failed: unavailable/,
+    );
+    expect(calls).toBe(0);
+    expect(ledger.summary().attempts).toBe(0);
+  });
   it("isolates a current version from historical comparison attempts in one journal", () => {
     const file = path();
     const ledger = openSpendLedger(file);
