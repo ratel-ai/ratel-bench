@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { DEFAULT_BFCL_MODELS } from "./model-defaults.js";
 import { canonicalModelId, parseModelIdentity } from "./model-identity.js";
+import { campaignCeilingTicks } from "./money-ticks.js";
 
 export const SUITE_SCHEMA_VERSION = 1;
 export const MAX_SUITE_MODELS = 16;
@@ -26,13 +27,18 @@ export const SR_DATASETS = [
 ] as const;
 
 const modelList = z.union([z.array(z.string()), z.string()]);
+const campaignBudgetSchema = z
+  .number()
+  .positive()
+  .finite()
+  .refine((usd) => campaignCeilingTicks(usd) !== null, "campaign ceiling is not representable");
 export const suiteRequestV1Schema = z
   .object({
     schemaVersion: z.literal(1),
     runOnlyModels: modelList.optional(),
     excludeModels: modelList.optional(),
     modelConcurrency: z.number().int().min(1).max(MAX_MODEL_CONCURRENCY).optional(),
-    campaignBudgetUsd: z.number().positive().finite().optional(),
+    campaignBudgetUsd: campaignBudgetSchema.optional(),
     notifyToEmails: z.array(z.string()).optional(),
   })
   .strict();
@@ -82,7 +88,7 @@ const frozenRequestSchema = z
     excludedModels: boundedModelListSchema,
     unmatchedExclusions: boundedModelListSchema,
     modelConcurrency: z.number().int().min(1).max(MAX_MODEL_CONCURRENCY),
-    campaignBudgetUsd: z.number().positive().finite(),
+    campaignBudgetUsd: campaignBudgetSchema,
   })
   .strict();
 const stableReleaseSchema = z

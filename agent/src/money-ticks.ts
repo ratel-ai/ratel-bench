@@ -10,3 +10,9 @@ export function ratedTicks(tokens: number, rate: number): bigint | null {
   const denominator = scale > 0 ? 10n ** BigInt(scale) : 1n;
   return (numerator + denominator - 1n) / denominator;
 }
+
+/** Convert a campaign ceiling to the safe integer ticks used by budget stores. */
+export function campaignCeilingTicks(ceilingUsd: number): number | null {
+  const ticks = Math.floor(ceilingUsd * 10_000_000_000);
+  return Number.isSafeInteger(ticks) && ticks > 0 ? ticks : null;
+}

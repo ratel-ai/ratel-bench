@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ModelPrice } from "./metering.js";
-import { ratedTicks } from "./money-ticks.js";
+import { campaignCeilingTicks, ratedTicks } from "./money-ticks.js";
 
 export interface BudgetRoute {
   price: ModelPrice | null;
@@ -154,8 +154,8 @@ export function createMemoryBudgetStore(
   ceilingUsd: number,
   campaignId = randomUUID(),
 ): BudgetStore {
-  const ceilingTicks = Math.floor(ceilingUsd * 10_000_000_000);
-  if (!Number.isSafeInteger(ceilingTicks) || ceilingTicks <= 0)
+  const ceilingTicks = campaignCeilingTicks(ceilingUsd);
+  if (ceilingTicks === null)
     throw new Error("campaign ceiling must be positive, finite, and representable");
   const entries = new Map<
     string,

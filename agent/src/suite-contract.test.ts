@@ -107,9 +107,39 @@ describe("suite request contract v1", () => {
     }
     expect(() => normalizeSuiteRequest({ schemaVersion: 1, notifyToEmails: ["nope"] })).toThrow();
   });
+
+  it("accepts campaign ceilings from one tick through the maximum safe tick", () => {
+    for (const campaignBudgetUsd of [1e-10, Number.MAX_SAFE_INTEGER / 1e10]) {
+      expect(normalizeSuiteRequest({ schemaVersion: 1, campaignBudgetUsd }).campaignBudgetUsd).toBe(
+        campaignBudgetUsd,
+      );
+    }
+  });
+
+  it("rejects campaign ceilings below one tick or above the safe tick range", () => {
+    for (const campaignBudgetUsd of [1e-11, (Number.MAX_SAFE_INTEGER + 1) / 1e10]) {
+      expect(() => normalizeSuiteRequest({ schemaVersion: 1, campaignBudgetUsd })).toThrow(
+        /representable/,
+      );
+    }
+  });
 });
 
 describe("frozen suite manifest and public result v1", () => {
+  it("accepts only budget ceilings representable by the store in frozen manifests", () => {
+    const manifest = (fixture("result-partial.json") as SuiteResult).manifest;
+    for (const campaignBudgetUsd of [1e-10, Number.MAX_SAFE_INTEGER / 1e10]) {
+      const bounded = structuredClone(manifest);
+      bounded.request.campaignBudgetUsd = campaignBudgetUsd;
+      expect(() => assertAttachmentPreflight(bounded)).not.toThrow();
+    }
+    for (const campaignBudgetUsd of [1e-11, (Number.MAX_SAFE_INTEGER + 1) / 1e10]) {
+      const unrepresentable = structuredClone(manifest);
+      unrepresentable.request.campaignBudgetUsd = campaignBudgetUsd;
+      expect(() => assertAttachmentPreflight(unrepresentable)).toThrow(/representable/);
+    }
+  });
+
   it("rejects malformed nested manifests at the public sealing boundary", () => {
     const invalid = [
       (body: Record<string, unknown>) => {

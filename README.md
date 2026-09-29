@@ -37,8 +37,9 @@ fixtures are in [`fixtures/suite/`](fixtures/suite/). The committed
 [`models.json`](models.json) `run[]` list supplies exactly 16 Bedrock defaults;
 an explicit `runOnlyModels` list replaces them, and `excludeModels` applies
 afterward. Unqualified model IDs mean Bedrock. Model concurrency defaults to
-one (maximum 16). `campaignBudgetUsd` defaults to a positive, finite $1,000
-ceiling across all model/API attempts in the campaign. Extra notification
+one (maximum 16). `campaignBudgetUsd` defaults to a $1,000 ceiling across all
+model/API attempts in the campaign; requested ceilings must fit from one 10^-10 USD
+tick through the maximum safe integer tick. Extra notification
 addresses are validated and deduplicated with the mandatory `dev@ratel.sh`
 recipient; recipients stay outside the public artifact.
 
@@ -69,10 +70,14 @@ Emit the deterministic, importer-ready public result JSON to standard output wit
 `pnpm --silent provider-compatibility-fixture`. Its committed expected checksum makes fixture drift
 explicit; the artifact remains synthetic and non-publishable.
 
-The bounded live checks below are opt-in and were not executed by the offline gate:
+The bounded live checks below are opt-in and were not executed by the offline gate.
+Before the Bedrock check, pin reviewed positive input, output, cache-read and
+cache-write prices in [`models.json`](models.json) for each selected source region and
+context tier. The selected routes are intentionally unpriced; credentials alone cannot
+pass funded preflight. Confirm model access and quota before running the check.
 
 ```bash
-# Bedrock: one model from each selected API family (Converse, Responses, Mantle chat)
+# Bedrock (after pricing): one model from each selected API family (Converse, Responses, Mantle chat)
 pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-sonnet-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
 
 # Vertex: Gemini plus Claude, using GOOGLE_VERTEX_PROJECT/LOCATION and ADC
