@@ -16,15 +16,29 @@
 //   RATEL_VERSION_LABEL=0.4.0-dense pnpm -F @ratel-ai/benchmark bfcl-candidates \
 //     --retriever semantic --pool-sizes 30,100 \
 //     --output results/raw/bfcl/retrieval-0.4.0-dense.jsonl [--scenarios N]
+//
+// `--selector jev` swaps the Ratel catalog for TypeSafe Jev (src/selectors/jev.ts)
+// over the identical pools; needs TYPESAFE_API_KEY unless every request is cached
+// in `--jev-cache` (default results/raw/jev-cache/bfcl.jsonl):
+//   RATEL_VERSION_LABEL=jev-1.13.0 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+//     --selector jev --pool-sizes 30,100 --output results/raw/bfcl/retrieval-jev-1.13.0.jsonl
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { config as loadEnv } from "dotenv";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import { buildToolCatalog } from "./sdk/adapter.js";
 import { parseEmbedding } from "./sdk/embedding.js";
 import { selectVersion } from "./sdk/resolve.js";
+import {
+  JevCache,
+  JevRanker,
+  type JevRankMeta,
+  type RerankMeta,
+  rerankWithJev,
+} from "./selectors/jev.js";
 import type { RetrievalMethod, Scenario } from "./types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
@@ -87,6 +101,11 @@ function metrics(gold: string[], ranked: RetrievedHit[], k: number) {
 }
 
 async function main(): Promise<void> {
+  const selector = arg("--selector", "ratel");
+  if (selector !== "ratel" && selector !== "jev" && selector !== "ratel+jev") {
+    throw new Error(`--selector must be ratel, jev, or ratel+jev (got "${selector}")`);
+  }
+  const rerankDepth = Number(arg("--rerank-depth", "20")); // ratel+jev: Ratel shortlist size
   const method = arg("--retriever", "bm25") as RetrievalMethod;
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
     throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
@@ -104,6 +123,19 @@ async function main(): Promise<void> {
     arg("--output", `results/raw/bfcl/retrieval-${RATEL_AI_CORE_VERSION}.jsonl`),
   );
   const kSlices = [1, 3, 5]; // fixed retrieval-eval k (see EXPERIMENTS.md)
+  let jev: JevRanker | undefined;
+  if (selector !== "ratel") {
+    loadEnv();
+    const cache = new JevCache(
+      resolveRepoPath(arg("--jev-cache", "results/raw/jev-cache/bfcl.jsonl")),
+    );
+    jev = new JevRanker({ kind: "tool", cache, seed });
+    console.log(
+      `bfcl-candidates: selector=${selector}` +
+        (selector === "ratel+jev" ? ` rerank-depth=${rerankDepth}` : "") +
+        ` (${cache.size} cached responses in ${cache.path})`,
+    );
+  }
 
   let scenarios = loadScenarios(corpusPath);
   if (scenarioLimit > 0) scenarios = scenarios.slice(0, scenarioLimit);
@@ -121,22 +153,43 @@ async function main(): Promise<void> {
     const category = bfclCategory(sc);
     for (const poolSize of poolSizes) {
       const pool = expandPool(sc, universe, poolSize, seed);
-      const { search } = await buildToolCatalog({
-        method,
-        embedding,
-        tools: pool.map((t) => ({
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          inputSchema: t.input_schema,
-          outputSchema: t.output_schema ?? {},
-          execute: async () => ({}),
-        })),
-      });
-      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
-        id: h.toolId,
-        score: h.score,
-      }));
+      let hits: RetrievedHit[];
+      let jevMeta: JevRankMeta | RerankMeta | undefined;
+      if (jev && selector === "jev") {
+        const ranked = await jev.rank(sc.prompt, pool, {
+          scenarioId: sc.id,
+          poolSize,
+          seedKey: `${sc.id}:jev:${poolSize}`,
+        });
+        hits = ranked.hits;
+        jevMeta = ranked.meta;
+      } else {
+        const { search } = await buildToolCatalog({
+          method,
+          embedding,
+          tools: pool.map((t) => ({
+            id: t.id,
+            name: t.name,
+            description: t.description,
+            inputSchema: t.input_schema,
+            outputSchema: t.output_schema ?? {},
+            execute: async () => ({}),
+          })),
+        });
+        hits = (await search(sc.prompt, poolSize)).map((h) => ({
+          id: h.toolId,
+          score: h.score,
+        }));
+        if (jev) {
+          const reranked = await rerankWithJev(jev, sc.prompt, pool, hits, rerankDepth, {
+            scenarioId: sc.id,
+            poolSize,
+            seedKey: `${sc.id}:ratel+jev:${poolSize}`,
+          });
+          hits = reranked.hits;
+          jevMeta = reranked.meta;
+        }
+      }
 
       for (const k of kSlices) {
         if (k > poolSize) continue;
@@ -156,6 +209,7 @@ async function main(): Promise<void> {
             pool_size: poolSize,
             retrieved: hits.slice(0, k),
             ...metrics(sc.gold_tools, hits, k),
+            ...(jevMeta ? { selector, ...jevMeta } : {}),
           }),
         );
       }
@@ -168,6 +222,7 @@ async function main(): Promise<void> {
     `  wrote ${lines.length} rows (${scenarios.length} scenarios × ${poolSizes.length} pool(s) × ` +
       `${kSlices.length} k) in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
   );
+  if (jev) console.log(jev.summary());
 }
 
 main().catch((err) => {

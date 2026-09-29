@@ -285,6 +285,13 @@ pnpm version-reset
 
 ---
 
+### Comparing against TypeSafe Jev
+
+`bfcl-candidates` and `sragents-candidates` accept `--selector jev` to rank the identical pools
+with [TypeSafe Jev](https://docs.typesafe.ai) instead of Ratel (retrieval eval only). Set
+`TYPESAFE_API_KEY` in `agent/.env`; responses are cached under `results/raw/jev-cache/`. Exact
+commands: EXPERIMENTS.md → "Competitor: TypeSafe Jev".
+
 ## Repo layout
 
 ```

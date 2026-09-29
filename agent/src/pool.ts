@@ -78,7 +78,7 @@ function pickGoldSpecs(scenario: Scenario): ToolSpec[] {
  * mixing as the Rust runner (id bytes folded into the seed) so seeds derived
  * from the same `(id, seed)` are stable; the actual PRNG implementations differ.
  */
-function mixSeed(scenarioId: string, seed: number): number {
+export function mixSeed(scenarioId: string, seed: number): number {
   let h = seed >>> 0;
   for (let i = 0; i < scenarioId.length; i++) {
     h = Math.imul(h ^ scenarioId.charCodeAt(i), 0x01000193) >>> 0;
@@ -98,7 +98,7 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-function shuffleInPlace<T>(arr: T[], seed: number): void {
+export function shuffleInPlace<T>(arr: T[], seed: number): void {
   const rng = mulberry32(seed);
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));

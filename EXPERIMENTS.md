@@ -251,6 +251,46 @@ pnpm -F @ratel-ai/benchmark sragents-summarize --label 0.4.0-<m> \
 pnpm -F @ratel-ai/benchmark sragents-report
 ```
 
+## Competitor: TypeSafe Jev (retrieval eval only)
+`--selector jev` on `bfcl-candidates` / `sragents-candidates` ranks the SAME pools with Jev
+(`agent/src/selectors/jev.ts`) instead of a Ratel catalog: one `choice` question per
+(scenario, pool) whose options are the pool members; probabilities sorted desc = full ranking.
+Option text = the fields Ratel indexes; options shuffled (seeded) so gold-first pools don't leak;
+model pinned `jev-1.13.0`. Needs `TYPESAFE_API_KEY` (agent/.env) for uncached requests; every
+response is cached in `results/raw/jev-cache/<benchmark>.jsonl`, so reruns are free and resume.
+Cost ≈ $0.22 BFCL + $0.25 SR-Agents (full design). Default `--selector ratel` is byte-identical.
+```bash
+# Ratel side (free, local)
+RATEL_VERSION_LABEL=0.13.0-rc.7-bm25 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --sdk-version 0.13.0-rc.7 --retriever bm25 --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-0.13.0-rc.7-bm25.jsonl
+RATEL_VERSION_LABEL=0.13.0-rc.7-bm25 pnpm -F @ratel-ai/benchmark sragents-candidates \
+  --sdk-version 0.13.0-rc.7 --retriever bm25 --pool-sizes 50,100 \
+  --pool-from results/raw/sragents/candidates.jsonl \
+  --output results/raw/sragents/candidates-0.13.0-rc.7-bm25.jsonl
+
+# Jev side (paid API; add --scenarios 20 for a smoke run)
+RATEL_VERSION_LABEL=jev-1.13.0 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector jev --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-jev-1.13.0.jsonl
+RATEL_VERSION_LABEL=jev-1.13.0 pnpm -F @ratel-ai/benchmark sragents-candidates \
+  --selector jev --pool-sizes 50,100 --pool-from results/raw/sragents/candidates.jsonl \
+  --output results/raw/sragents/candidates-jev-1.13.0.jsonl
+
+# Ratel→Jev: Ratel's top --rerank-depth (default 20) re-ranked by Jev
+RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+jev-1.13.0 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector ratel+jev --rerank-depth 20 --sdk-version 0.13.0-rc.7 --retriever bm25 \
+  --pool-sizes 30,100 --output results/raw/bfcl/retrieval-ratel+jev.jsonl
+RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+jev-1.13.0 pnpm -F @ratel-ai/benchmark sragents-candidates \
+  --selector ratel+jev --rerank-depth 20 --sdk-version 0.13.0-rc.7 --retriever bm25 \
+  --pool-sizes 50,100 --pool-from results/raw/sragents/candidates.jsonl \
+  --output results/raw/sragents/candidates-ratel+jev.jsonl
+
+# summarize each label (bfcl-summarize / sragents-summarize --label <L> --retrieval-rows <file>)
+```
+Results: docs/jev-vs-ratel-results.md. Jev rows add `selector`, `jev_model`, `latency_ms` (network round-trip — report separately,
+not comparable to in-process Ratel), `input_tokens`, `cache_hit`.
+
 ## Pre-0.4.0 (0.2.0 / 0.3.0-rc.1) — unchanged, Rust retriever
 - Retrieval eval + candidates: Rust `cargo run -p ratel-benchmark-retrieval …` (BM25).
 - LLM eval: BFCL `start` (live SDK), SR-Agents `sragents-select` (Rust candidates).
