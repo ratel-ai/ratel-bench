@@ -27,6 +27,14 @@ export function parseCustomEndpoint(modelId: string): CustomEndpoint | null {
   }
   const baseURL = modelId.slice(0, hashIdx);
   const modelName = modelId.slice(hashIdx + 1);
+  try {
+    const parsed = new URL(baseURL);
+    if (!parsed.hostname || !["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error("missing host or unsupported protocol");
+    }
+  } catch {
+    throw new Error(`custom model URL "${modelId}" has an invalid base URL`);
+  }
   if (!modelName) {
     throw new Error(`custom model URL "${modelId}" is missing a model name after "#"`);
   }

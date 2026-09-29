@@ -50,11 +50,35 @@ src/
   pool.ts             builds the per-scenario tool pool (gold + seeded distractors)
   report.ts           aggregator (medians, savings, retrieval, taxonomy)
   report-cli.ts       entry — pnpm report
+  suite-contract.ts    version 1 request/manifest/result validation and attachment preflight
   results-audit.ts    entry — pnpm results-audit (read-only error / stale-cache audit of raw JSONL)
   run-all.ts          entry — pnpm run-all (whole benchmark: ingest + a + b + c + report)
   runner.ts           registry-based dispatch, resumable, dollar-capped
   types.ts            AgentDescriptor / AgentRunInput / CellResult / Scenario shapes
 ```
+
+The full-suite contract reads the ordered 16 Bedrock defaults from `models.json`.
+`normalizeSuiteRequest` resolves model replacements and exclusions, a private
+recipient list, model concurrency, and the aggregate model/API budget.
+`buildSuiteManifest` freezes the stable SDK/core pair, exact corpus/scenario
+inputs and all three retrievers. `sealSuiteResult` validates coverage and
+accounting, checks the encoded attachment budget, and adds the public checksum.
+`fixtures/suite/` at the repository root contains JSON examples shared with
+the downstream importer. A smoke manifest is always non-publishable.
+
+Funded runners accept an injected `CampaignBudget` backed by an atomic,
+campaign-scoped `BudgetStore`. Construct it with pinned route prices and
+provider-enforced input/output (including reasoning) token bounds; preflight
+rejects missing prices, uncapped output and mismatched rate snapshots before
+inference. Each BFCL, SR and judge physical call reserves its worst-case cost,
+claims its stable dispatch ID, fsyncs the attempt journal, then calls the provider.
+Wrapper retries use fresh IDs; AI SDK retries are disabled. Missing usage and
+crashed dispatches keep their reservations, and journaled settlements replay on
+resume. Temporary contention waits for settlement; a drained, unaffordable
+campaign reports `budget_limited`. The built-in memory store is for offline
+tests; a shared durable store is required for multi-worker campaigns.
+Funded runs ignore legacy per-command default caps; callers may set
+`campaignLocalCapUsd` as an explicit stricter limit.
 
 ## Run the whole benchmark
 
@@ -66,14 +90,14 @@ Ingests both corpora (if missing), runs retrieval modes (a) + (b), runs the mode
 
 Flags: `--force` (re-ingest), `--skip-ingest`, `--skip-agent` (skip mode (c) even with keys), `--only metatool|toolret`.
 
-The auto-invoked mode (c) defaults to: 50 sampled scenarios × 1 run × every committed arm (the two control arms plus the three ratel ablations), available models only (`claude-sonnet-4-6` and/or `gpt-5.4-mini` depending on which key is set), pool size 180, $5 global cap. The local-only `claude-sdk-tool-search` arm is excluded by default. For the headline variance run see the next section.
+The auto-invoked mode (c) defaults to: 50 sampled scenarios × 1 run × every committed arm (the two control arms plus the three ratel ablations), available direct routes only (`anthropic/claude-sonnet-4-6` and/or `openai/gpt-5.4-mini` depending on which key is set), pool size 180, $5 global cap. The local-only `claude-sdk-tool-search` arm is excluded by default. For the headline variance run see the next section.
 
 ## Run the headline agent campaign (mode c)
 
 ```bash
 # Required env (one or both):
 #   OPENAI_API_KEY     — for gpt-5.4-mini
-#   ANTHROPIC_API_KEY  — for claude-sonnet-4-6 (also powers the LLM judge)
+#   ANTHROPIC_API_KEY  — for anthropic/claude-sonnet-4-6
 #
 # The default --corpus path expects the ingested MetaTool snapshot at
 # test-data/metatool.jsonl. Run `pnpm -F @ratel-ai/benchmark run-all`
@@ -84,7 +108,7 @@ pnpm -F @ratel-ai/benchmark start \
   --output agent/results/agent.jsonl \
   --scenarios 200 \
   --arms control-baseline,control-oracle,ratel-full,ratel-pre-discovery,ratel-discovery-tool \
-  --models gpt-5.4-mini,claude-sonnet-4-6 \
+  --models openai/gpt-5.4-mini,anthropic/claude-sonnet-4-6 \
   --runs 5 \
   --top-k 5 \
   --pool-sizes 30,100,180 \
@@ -95,17 +119,27 @@ pnpm -F @ratel-ai/benchmark start \
 
 Resumable — re-runs skip cells already in `agent.jsonl` unless `--force`, except errored cells that are rerunnable (outages, gates, rejected requests), which are re-queued up to `--max-attempts` (see "Breaker, resume re-queue and retry rounds"). Pass `--ephemeral` instead to write each smoke into a fresh `agent/results/ephemeral/agent-<timestamp>.jsonl` file so the canonical `agent.jsonl` stays untouched. `--scenarios N` samples a deterministic seeded subset of the full ~21k MetaTool query set; the same `--seed` reproduces the same subset across runs.
 
-`--concurrency N` (default 10) controls how many cells run in parallel. The benchmark is wall-clock-bound on provider latency, so 10 typically yields ~10× speedup against cloud APIs. Dial down to `1` for Ollama (single-process server) or tight provider tiers. Dollar caps are best-effort under concurrency: in-flight cells finish, no new ones start, so overshoot is bounded by `concurrency × per-cell-cost` (~$0.30 at the defaults).
+`--concurrency N` (default 10) controls how many cells run in parallel. The benchmark is wall-clock-bound on provider latency, so 10 typically yields ~10× speedup against cloud APIs. Dial down to `1` for Ollama (single-process server) or tight provider tiers. Dollar caps are best-effort under concurrency: in-flight cells finish, no new ones start. The cap cannot bound unpriced routes; their cost is recorded as unknown.
 
 `--timeout-ms N` (default 60000) sets the per-cell **active-time** deadline: retry backoff doesn't count (see "LLM retries and deadlines"), and on expiry the request is aborted. Cloud models rarely need more, but local Ollama models (especially CPU-bound or large 70B+) can comfortably exceed a minute on a 12-step trace — bump to `300000` (5 min) or higher when you see `run timed out after 60000ms` errors in the trace.
 
-`--retriever bm25|semantic|hybrid` (default `bm25`) picks the retrieval method the Ratel arms use — this is the **0.4.0** knob (sparse / dense / hybrid). Pre-0.4.0 versions don't accept it; their runs are unchanged. Since there is no Rust `ratel-ai-core` 0.4.0, generation runs SDK-side: pin the 0.4.0 SDK, tag each method as its own report layer with `RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`, and set `--retriever`. `control-baseline`/`control-oracle` are retriever-independent and reused from the canonical 0.2.0 cache (see "Cached control runs") — run the *first* method with `--force` to purge any stale/pre-fix cells so a gold-incomplete 0.2.0 pool can't skew the numbers. See [`EXPERIMENTS.md`](../EXPERIMENTS.md) for the full per-method recipe. `bfcl-candidates` and `sragents-candidates` take the same flag; `sragents-select` does not (it reads pre-ranked candidates).
+`--sdk-version <exact-release>` selects an installed SDK alias for `start`, `bfcl-candidates`, and `sragents-candidates`. `0.12.0` is installed alongside historical `0.2.0`, `0.4.0`, and `0.5.0`; omitting the flag retains the historical `0.4.0` default. The selected package version is checked before inference and stamped on new BFCL rows. The package lock pins its npm integrity. SDK and Rust core versions are independent.
+
+`--retriever bm25|semantic|hybrid` (default `bm25`) picks the retrieval method the Ratel arms use — this is the **0.4.0** knob (sparse / dense / hybrid). Pre-0.4.0 versions don't accept it; their runs are unchanged. Since there is no Rust `ratel-ai-core` 0.4.0, generation runs SDK-side: select the 0.4.0 SDK, tag each method as its own report layer with `RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`, and set `--retriever`. `control-baseline`/`control-oracle` are retriever-independent and reused from the canonical 0.2.0 cache (see "Cached control runs") — run the *first* method with `--force` to purge any stale/pre-fix cells so a gold-incomplete 0.2.0 pool can't skew the numbers. See [`EXPERIMENTS.md`](../EXPERIMENTS.md) for the full per-method recipe. `bfcl-candidates` and `sragents-candidates` take the same flag; `sragents-select` does not (it reads pre-ranked candidates).
 
 `--pool-sizes` controls the per-scenario tool catalog (gold + distractors pulled from other scenarios). Accepts a comma-separated list (e.g. `--pool-sizes 30,100,180`) — each scenario is evaluated at every requested size, and the report breaks the headline / savings / failure tables down per pool. Pass a single value to skip the sweep. The legacy singular form `--pool-size 180` still works as an alias for one value but rejects commas. The default (180) sits at the MetaTool plugin universe ceiling; smaller values stress retrieval less, larger values are clamped at the universe size. Pool-size-agnostic arms (currently just `control-oracle`) ignore this flag and emit one cell per (scenario, model, run) regardless of how many sizes are listed.
 
 ## Output caps (`maxOutputTokens`)
 
-Every agent LLM call requests the model's output cap, taken from one place: `models.json` `run[].maxOutputTokens` (4096 for claude-haiku-4-5 / claude-sonnet-4-6 / claude-opus-4-5; 16384 for claude-sonnet-5 / claude-opus-4-8 / claude-fable-5 / gpt-5.4-mini / gpt-5.6-luna). A test (`models-catalog.test.ts`) requires it on every entry with a `bedrockProfile` or a `claude-`/`gpt-` id. There is no silent default: a model without a catalog cap (self-hosted `qwen3-4b` / `mistral-7b-instruct`, `ollama:*`, ad-hoc `<url>#name` ids — matched to an entry by its `endpoint`) sends no cap, and the startup line says so: `caps: claude-haiku-4-5=4096, ollama:qwen3.5=none (no models.json cap)`. Judge calls send no cap unless `--judge-max-output-tokens` is set.
+Every agent LLM call requests the model's output cap from `models.json`. Its ordered `run[]` is the default 16-model Bedrock campaign; `historical[]` keeps older direct, hosted and Bedrock routes available through explicit selection. Catalog entries and aliases use explicit serving providers, so `bedrock/claude-haiku-4-5` and `anthropic/claude-haiku-4-5` can share a cap while retaining distinct serving identities and prices. Bare names always mean Bedrock, including `gpt-*`; use `openai/gpt-5.4-mini` or `anthropic/claude-sonnet-4-6` for the historical direct routes. Hosted `<url>#<model>` and `ollama:<tag>` identities are preserved. A model without a catalog cap sends no cap, and the startup line says so. Judge calls send no cap unless `--judge-max-output-tokens` is set.
+
+Rows record the serving route separately from the AI SDK adapter (`provider`), plus publisher, exact resolved model/profile and Vertex location when configured. GCP Gemini and Claude both remain `gcp/` routes with their own publisher and Vertex model ID. Pricing reads only the selected route's complete input/output/cache rates from `models.json`; a missing rate produces `dollar_cost: null` and `cost_source: "unknown"`, never a zero estimate. Ollama has zero provider API charge. Bedrock funded preflight rejects unpriced routes. Hosted endpoints without a configured rate remain unknown.
+
+Both BFCL and SR use `model-factory.ts`. Selected Bedrock entries pin `bedrockProfile`, source `bedrockRegion`, `bedrockEndpoint`, `bedrockApi`, publisher and output cap. GPT-6 uses runtime Responses with its global profile and preserves encrypted tool-turn reasoning with `store: false`; Gemma 4 uses Mantle `/openai/v1` Chat, as runtime Converse is unavailable. Other selected models use supported runtime Converse routes. The factory uses `AWS_BEARER_TOKEN_BEDROCK` when present, or the AWS default credential chain and SigV4. Direct routes read `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only when selected.
+
+Direct `xai/<model>` uses pinned `@ai-sdk/xai` Responses support and reads `XAI_API_KEY` only when selected; `XAI_BASE_URL` optionally overrides the native endpoint. The committed historical `xai/grok-4-fast` capability profile uses medium reasoning and a 4096-token output cap; no xAI model is in `run[]`. The adapter requests `store: false` and encrypted reasoning content, preserves function call and result IDs across tool turns, and rejects missing encrypted state or more than 350 tools before a subsequent provider call. It uses `cost_in_usd_ticks / 10^10` when returned and records `cost_source=provider` (or `partial` when a later turn fails); otherwise `cost_source=estimate` with a route price or `unknown` while retaining token/cache usage. Live xAI credentials, access and quotas have not been checked. An opt-in smoke command is `pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --runs 1 --no-judge --ephemeral`; it has not been run.
+
+Before inference, BFCL, SR and rejudge check selected Bedrock profiles and model availability through the Bedrock control plane. Their AWS identity needs `bedrock:GetInferenceProfile` for profile IDs and `bedrock:GetFoundationModelAvailability` for destination foundation models. Missing route metadata, a positive route price, profile access, agreement, authorization, entitlement or regional availability stops the run without provider substitution. The new 16 entries intentionally have no price until the actual AWS route and context tier are quoted; the default campaign therefore fails preflight before any paid call until priced. The catalog records documented AWS routes; offline fixture success does **not** establish this account's live access. Quota must also be verified before a funded campaign.
 
 - `--max-output-tokens N|none` (`start`, `sragents-select`) overrides the catalog for every agent model; `none` sends no cap. Agent calls only.
 - `--judge-max-output-tokens N` (`start`, `rejudge`) caps the LLM judge. Unset (the default) sends no cap.
@@ -119,7 +153,7 @@ The cap is a per-call setting (`ToolLoopAgent` / `generateObject`), not `wrapLan
 
 ## LLM retries and deadlines
 
-Agent calls (every `start` arm via `runMeteredLoop`, and `sragents-select`) run with the AI SDK's own retries off (`maxRetries: 0`; ai@6 would retry only 2× at 2s/4s). Instead `llm-retry.ts` wraps each cell's model (`withRetry`, a Proxy over `doGenerate` that keeps `specificationVersion`/`provider`/`modelId`, so V2 anthropic/bedrock and V3 openai models alike):
+Agent calls (every `start` arm via `runMeteredLoop`, and `sragents-select`) run with the AI SDK's own retries off (`maxRetries: 0`; ai@6 would retry only 2× at 2s/4s). Instead `llm-retry.ts` wraps each cell's model (`withRetry`, a Proxy over `doGenerate` that keeps `specificationVersion`/`provider`/`modelId` across native V3 and historical V2 models):
 
 - **Only `transient` errors are retried** (`classifyError`: 429, 5xx, overload, network drops). Backoff is equal jitter over a capped exponential: `d/2 + rand·d/2` with `d = min(max-delay, base·2^(n−1))`. A `Retry-After`/`retry-after-ms` header raises the wait to `max(jittered, header)`; a header beyond the max delay or the cell's remaining wait budget fails fast.
 - **Gated or missing models fail at once**: a fatal provider marker or an `access` error (401/403/404, "not available for this account", Bedrock's daily cap "Too many tokens per day", OpenAI's exhausted credit: a 429 with code `insufficient_quota`) becomes a `FatalProviderError` (`error_class: "access"`): the cell writes no row and the breaker aborts the model (see below). Running out of attempts or wait budget is a `RetriesExhaustedError` (`Failed after N attempts[ (reason)]. Last error: …`), classified by its cause (`transient`). Every other error passes through unchanged.
@@ -134,7 +168,7 @@ Agent calls (every `start` arm via `runMeteredLoop`, and `sragents-select`) run 
 | `RATEL_LLM_RETRY_MAX_WAIT_MS` | 180000 | total backoff budget per cell |
 | `RATEL_CELL_TIMEOUT_GRACE_MS` | 30000 | backstop grace after the deadline |
 
-Each must be a positive integer, and the two that become a timer delay (`RATEL_LLM_RETRY_MAX_DELAY_MS`, `RATEL_CELL_TIMEOUT_GRACE_MS`) at most 2147483647 ms, Node's timer limit, as must `--timeout-ms` (anything else exits with an error naming the variable). Rows (BFCL and SR) record `retries`, `throttled_retries` (after a 429/503/529), `retry_wait_ms` (backoff inside `wall_ms`) and `retry_policy`, e.g. `a8/b2000/c60000/w180000;timeout=active:180000+g30000;rerun=infra/3` (the `;rerun=` suffix is the run's `--retry-errors`/`--max-attempts`, `/0` = unlimited); legacy rows lack them. Summaries add `retries` and `throttled_retries` (summed over every superseding row that recorded them, excluded ones included; `null` for an all-legacy group, a lower bound beside legacy rows), `retry_policy` (the kept rows' shared value, `"mixed"`, or `null` for legacy) and `latency_p50_net_ms` (median `wall_ms − retry_wait_ms`); REPORT.md's Headline adds `mean wall (net)` (`mean_wall_net_ms`). **Retries change a cell's completion probability, not its answer**; `latency_p50_ms`, `mean_wall_ms` and `wall_savings_pct` stay wall-clock (waits included). SR's `--timeout-ms` used to be undici's ~300s *per attempt* with no abort; it now bounds the whole call, so SR can record a `timeout` row. The BFCL LLM judge is not wrapped: it passes `maxRetries: 6` (`JUDGE_MAX_RETRIES`) to the SDK and never feeds these counters.
+Each must be a positive integer, and the two that become a timer delay (`RATEL_LLM_RETRY_MAX_DELAY_MS`, `RATEL_CELL_TIMEOUT_GRACE_MS`) at most 2147483647 ms, Node's timer limit, as must `--timeout-ms` (anything else exits with an error naming the variable). Rows (BFCL and SR) record `retries`, `throttled_retries` (after a 429/503/529), `retry_wait_ms` (backoff inside `wall_ms`) and `retry_policy`, e.g. `a8/b2000/c60000/w180000;timeout=active:180000+g30000;rerun=infra/3` (the `;rerun=` suffix is the run's `--retry-errors`/`--max-attempts`, `/0` = unlimited); legacy rows lack them. Summaries add `retries` and `throttled_retries` (summed over every superseding row that recorded them, excluded ones included; `null` for an all-legacy group, a lower bound beside legacy rows), `retry_policy` (the kept rows' shared value, `"mixed"`, or `null` for legacy) and `latency_p50_net_ms` (median `wall_ms − retry_wait_ms`); REPORT.md's Headline adds `mean wall (net)` (`mean_wall_net_ms`). **Retries change a cell's completion probability, not its answer**; `latency_p50_ms`, `mean_wall_ms` and `wall_savings_pct` stay wall-clock (waits included). SR's `--timeout-ms` used to be undici's ~300s *per attempt* with no abort; it now bounds the whole call, so SR can record a `timeout` row. The BFCL LLM judge keeps retries separate from these counters: journaled calls use `withRetry` for seven physical attempts with SDK retries disabled, while callers without an attempt recorder pass `maxRetries: 6` to the SDK.
 
 ## Breaker, resume re-queue and retry rounds
 
@@ -163,19 +197,19 @@ one `aborted:` line per aborted model; `stopped` is `completed`, `global_cap`, `
 
 ## Pinned `@ratel-ai/sdk` version
 
-The benchmark consumes `@ratel-ai/sdk` from the npm registry at a version pinned in `agent/package.json` (currently `0.1.5`). The resolved version is stamped on every JSONL row as `ratel_version` and rendered in the report header. To benchmark a new ratel release: bump the pinned version, `pnpm install`, re-run. The previous-version JSONL keeps its rows — they're keyed by version, so they neither collide with nor satisfy the new run.
+The benchmark installs exact npm aliases for SDK `0.2.0`, `0.4.0`, `0.5.0`, and `0.12.0`; the plain `@ratel-ai/sdk` remains `0.4.0`. Use `--sdk-version 0.12.0` to select the verified latest stable package, or another installed exact version for a historical run. To add a release, add a new exact alias and update the lockfile without retargeting existing aliases. New rows use the selected package version as `ratel_version`; existing output rows are not rewritten.
 
 Edits to the upstream SDK in [`ratel-ai/ratel`](https://github.com/ratel-ai/ratel) therefore **don't** flow into the benchmark unless and until they're published. This is deliberate: we want the campaign to measure the same artifact users install, not whatever's on the working tree.
 
 ## Cached control runs
 
-`control-baseline` and `control-oracle` cells are cached across invocations — they don't depend on the ratel code path being iterated on, so re-running them per campaign is pure waste. The cache is version-agnostic — keyed by `(scenario_id, arm, model, pool_size, run_index)` — and backed by the canonical `agent.jsonl`; a reused row is re-stamped to the current `ratel_version` with `cache_source: "reused"` (live rows carry `"live"`).
+`control-baseline` and `control-oracle` cells are cached across invocations — they don't depend on the ratel code path being iterated on, so re-running them per campaign is pure waste. The cache is version-agnostic — keyed by `(scenario_id, arm, provider-qualified model, pool_size, run_index)` — and backed by the canonical `agent.jsonl`; a reused row is re-stamped to the current `ratel_version` with `cache_source: "reused"` (live rows carry `"live"`). Bare historical rows enter a qualified control cache only when their recorded provider identifies the route; ambiguous rows stay separate. In particular, `openai.responses` alone cannot prove a direct OpenAI route because Bedrock can use that adapter too.
 
 - **Non-ephemeral runs** (default `--output`): control rows already in the output at the current version are skipped via the resume path, unless they are rerunnable errors: those are re-queued (see "Breaker, resume re-queue and retry rounds") and served from the cache like any missing control.
 - **Ephemeral runs** (`--ephemeral`): the canonical `agent.jsonl` is opened read-only at start. For each scheduled cell, if its key is in the cache, the cached row is re-stamped into the ephemeral output and the live agent loop is skipped. Ratel arms (`ratel-full` / `ratel-pre-discovery` / `ratel-discovery-tool`) still run live every time — that's the point of an ephemeral iteration.
 - **`--force`** disables the cache (and truncates the output file in non-ephemeral mode), so the campaign always re-pays.
 - **Errored rows are never served.** Rerunnable errors (`transient|access|request`, classified by `cell-errors.ts`) are skipped when indexing the cache, so a key whose only cached rows are errors runs live. `timeout`/`outcome` rows are final, scored results and stay reusable, unless `--retry-errors all` re-runs them (then the cache skips them too; see "Breaker, resume re-queue and retry rounds"). `--cache-source a,b,…` indexes several files (best harness tier, then earliest, across them; see below).
-- **Harness tiers.** A cached row must match the model's current harness, `provider|max_output_tokens`: exact-tier rows (same SDK provider and same requested cap) are served first, then legacy rows (no recorded cap, i.e. pre-cap builds; a recorded provider must still match), never a different recorded provider or cap. A same-provider row with no recorded cap is exact for an uncapped run (pre-cap builds sent no cap either). Within a tier the earliest row wins. So a REBASELINE (`--force`) run on a cap-recording build replaces older legacy rows in what later runs are served; a pre-cap re-baseline stays legacy-tier, where earlier rows win.
+- **Harness tiers.** A cached row must match the model's current harness: SDK provider, requested output cap, exact resolved model/profile and Vertex location when configured. Exact-tier rows (same SDK provider and same requested cap) are served first, then legacy rows (no recorded cap, i.e. pre-cap builds; a recorded provider must still match), never a different recorded provider or cap. A row without resolved-model or Vertex-location evidence cannot serve a run that specifies them. A same-provider row with no recorded cap is exact for an uncapped run (pre-cap builds sent no cap either). Within a tier the earliest row wins. A rebaseline (`--force`) run on a cap-recording build replaces older legacy rows in what later runs are served.
 - **An explicit `--max-output-tokens` (N or `none`) serves exact-tier rows only.** Legacy rows ran under an unknown (SDK-default) cap, so they can't stand in for a run that names its cap; nor does resume keep ones an earlier invocation served into the output. Paired cap comparisons still need `--force` on every side: the catalog-cap side takes legacy controls, and a repeat run is served the first run's exact rows.
 
 A run-start stderr line summarizes the hit count, calling out legacy-tier hits: `cache: 47 control cells reused (31 legacy-tier: no recorded cap) (re-stamped to 0.4.0), 153 will run`.
@@ -188,7 +222,7 @@ For a fast local smoke (~$0.20–$1):
 pnpm -F @ratel-ai/benchmark start \
   --scenarios 50 --runs 1 \
   --arms control-baseline,control-oracle,ratel-full \
-  --models claude-sonnet-4-6 \
+  --models anthropic/claude-sonnet-4-6 \
   --pool-sizes 180 \
   --dollar-global 5 \
   --concurrency 10
@@ -213,7 +247,7 @@ pnpm -F @ratel-ai/benchmark start \
 
 Flags:
 - `--ollama-base-url URL` — override the default `http://localhost:11434/v1` (or set `OLLAMA_BASE_URL` in the env). Useful for remote Ollama instances.
-- `--judge-model MODEL` — pick any model id (cloud or `ollama:*`) for the LLM judge. Defaults to `claude-sonnet-4-6` when `ANTHROPIC_API_KEY` is set, otherwise the LLM judge is disabled and only the programmatic verdict is recorded.
+- `--judge-model MODEL` — pick an explicit serving route (or `ollama:*`) for the LLM judge. The automatic judge route is `bedrock/claude-sonnet-5` when the Bedrock backend is configured; otherwise only the programmatic verdict runs. `rejudge` uses the same Bedrock route unless overridden or given `--no-judge`.
 
 `dollar_cost` is recorded as `0` for `ollama:*` cells — `--dollar-global` therefore never trips on local-only runs. If you mix cloud + local models in one run, the cap still bounds the cloud spend. The model id keeps its `ollama:` prefix in the JSONL row and the report so local vs cloud cells stay distinguishable.
 

@@ -27,6 +27,7 @@ export type SragentsRetrievalRow = BfclRetrievalRow;
 export interface SragentsRetrievalSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "retriever_evaluation";
   dataset: string;
   pool_size: number;
@@ -64,8 +65,12 @@ export type SragentsArm = "control-baseline" | "ratel-full" | "control-oracle";
  */
 export interface SragentsSelectCell {
   run_type: "skill_selection";
+  /** Run whose provider attempts produced this live cell; absent on historical rows. */
+  run_id?: string;
   generated_at: string;
   ratel_ai_core_version: string;
+  /** Exact crate release, independent of the method-specific report label. */
+  ratel_ai_core_resolved_version?: string;
   scenario_id: string;
   /** `sragents-<dataset>` — the bucketing key. */
   category: string;
@@ -73,6 +78,10 @@ export interface SragentsSelectCell {
   model: string;
   /** AI SDK provider id of the model that ran the cell (e.g. `anthropic.messages`, `amazon-bedrock`). */
   provider?: string;
+  serving_provider?: string;
+  publisher?: string;
+  resolved_model?: string;
+  vertex_location?: string;
   run_index: number;
   /** Candidate-pool size the arm drew from; `null` for the pool-agnostic oracle arm. */
   pool_size: number | null;
@@ -83,7 +92,12 @@ export interface SragentsSelectCell {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  dollar_cost: number;
+  /** Provider-reported cache read/write tokens; absent on historical rows. */
+  cached_input_tokens?: number;
+  cache_creation_tokens?: number;
+  dollar_cost: number | null;
+  provider_cost_ticks?: number;
+  cost_source?: "provider" | "partial" | "estimate" | "unknown";
   wall_ms: number;
   error: string | null;
   /**
@@ -125,9 +139,14 @@ export interface SragentsSelectCell {
 /** Per-row skill-selection record (`results/raw/sragents/task-completion-rows.jsonl`). */
 export interface SragentsTaskRow {
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   generated_at: string;
   dataset: string;
   model: string;
+  serving_provider?: string | null;
+  publisher?: string | null;
+  resolved_model?: string | null;
+  vertex_location?: string | null;
   arm: string;
   scenario_id: string;
   gold_skill_ids: string[];
@@ -173,8 +192,13 @@ export interface SragentsTaskRow {
 export interface SragentsTaskSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string;
+  serving_provider?: string | "mixed" | null;
+  publisher?: string | "mixed" | null;
+  resolved_model?: string | "mixed" | null;
+  vertex_location?: string | "mixed" | null;
   arm: string;
   dataset: string;
   /** Kept rows (the denominator); excluded ones not counted. */

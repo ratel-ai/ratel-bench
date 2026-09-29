@@ -3,6 +3,8 @@
 
 import { dirname, join } from "node:path";
 import type { JudgePromptVariant } from "./judges/llm.js";
+import { DEFAULT_BFCL_MODELS } from "./model-defaults.js";
+import { canonicalModelId, canonicalModelList } from "./model-identity.js";
 import type { OutputCapOverride } from "./output-limits.js";
 import { parsePositiveInt, parseTimerMs } from "./positive-int.js";
 import { applyRerunFlag, DEFAULT_RERUN_SETTINGS, type RerunSettings } from "./rerun.js";
@@ -46,6 +48,8 @@ export interface ParsedArgs {
   /** `--ratel-version V`: stamp (and resume) rows as version V instead of the
    * installed SDK's. Controls only — used to re-drain a label's controls. */
   ratelVersion?: string;
+  /** Exact installed SDK alias for this campaign; omitted uses the historical default. */
+  sdkVersion?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
@@ -62,7 +66,7 @@ export interface ParsedArgs {
   noJudge: boolean;
   /** Skip the (LLM-free) argument-level task-completion verdict. Defaults to off. */
   noAst: boolean;
-  /** Override the LLM judge model. Defaults to claude-sonnet-4-6 if ANTHROPIC_API_KEY is set. */
+  /** Override the LLM judge's configured Bedrock route. */
   judgeModelId?: string;
   /**
    * `--max-output-tokens N|none`: per-call cap for every agent model, overriding
@@ -111,7 +115,7 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
     outputExplicit: false,
     ephemeral: false,
     arms: [...DEFAULT_ARMS],
-    models: ["gpt-5.4-mini", "claude-sonnet-4-6"],
+    models: [...DEFAULT_BFCL_MODELS],
     runs: 1,
     topK: 5,
     retriever: "bm25",
@@ -160,6 +164,14 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.ratelVersion = v;
         break;
       }
+      case "--sdk-version": {
+        const v = next().trim();
+        if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(v)) {
+          throw new Error(`--sdk-version needs an exact release (got "${v}")`);
+        }
+        args.sdkVersion = v;
+        break;
+      }
       case "--scenarios":
         args.scenarios = Number(next());
         break;
@@ -167,7 +179,7 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.arms = parseArms(next(), knownArms);
         break;
       case "--models":
-        args.models = next().split(",");
+        args.models = canonicalModelList(next());
         break;
       case "--runs":
         args.runs = Number(next());
@@ -208,7 +220,7 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.noAst = true;
         break;
       case "--judge-model":
-        args.judgeModelId = next();
+        args.judgeModelId = canonicalModelId(next());
         break;
       case "--max-output-tokens":
         args.maxOutputTokens = parseOutputCapFlag(flag, next());
@@ -320,7 +332,7 @@ export function parseRejudgeArgs(argv: string[]): RejudgeParsedArgs {
         args.corpus = next();
         break;
       case "--judge-model":
-        args.judgeModelId = next();
+        args.judgeModelId = canonicalModelId(next());
         break;
       case "--judge-prompt": {
         const v = next();

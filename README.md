@@ -29,6 +29,93 @@ Each run measures accuracy, input tokens, output tokens, cost, and latency. The 
 
 Full results: [benchmark.ratel.sh](https://benchmark.ratel.sh)
 
+## Full suite contract
+
+The version 1 request and result contracts are in
+[`agent/src/suite-contract.ts`](agent/src/suite-contract.ts). Shared producer/import
+fixtures are in [`fixtures/suite/`](fixtures/suite/). The committed
+[`models.json`](models.json) `run[]` list supplies exactly 16 Bedrock defaults;
+an explicit `runOnlyModels` list replaces them, and `excludeModels` applies
+afterward. Unqualified model IDs mean Bedrock. Model concurrency defaults to
+one (maximum 16). `campaignBudgetUsd` defaults to a $1,000 ceiling across all
+model/API attempts in the campaign; requested ceilings must fit from one 10^-10 USD
+tick through the maximum safe integer tick. Extra notification
+addresses are validated and deduplicated with the mandatory `dev@ratel.sh`
+recipient; recipients stay outside the public artifact.
+
+The frozen manifest includes one stable compatible SDK/core pair, all three
+retrievers (BM25, dense, hybrid), the fixed BFCL/SR scenario and arm design,
+immutable source and corpus provenance, and unique expected work-unit keys.
+The public result contains one reconciled stage for every requested model,
+benchmark and retriever, bounded reports and diagnostics, timing, provider and
+infrastructure accounting, and a checksum. BM25 stages own the shared controls;
+dense and hybrid stages own their Ratel cells. Attachment sizing uses serialized
+JSON bytes plus base64 encoding and is checked before spend and on the final JSON.
+See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact work matrix.
+
+Run the credential-free compatibility gate with:
+
+```bash
+pnpm test:provider-compatibility
+```
+
+It validates the shared synthetic fixture across `bedrock`, `anthropic`, `openai`, `gcp`
+(Gemini and Claude on Vertex), and direct `xai`; route-specific prices; provider-scoped
+cache keys; campaign admission; canonical work-unit coverage; provenance; and the sealed
+result checksum consumed by the website importer. It also pins the default to exactly 16
+Bedrock routes spanning Converse, Responses, and Mantle chat APIs. No provider credentials,
+Google ADC, or network access are read by this gate.
+
+Emit the deterministic, importer-ready public result JSON to standard output with
+`pnpm --silent provider-compatibility-fixture`. Its committed expected checksum makes fixture drift
+explicit; the artifact remains synthetic and non-publishable.
+
+The bounded live checks below are opt-in and were not executed by the offline gate.
+Before the Bedrock check, pin reviewed positive input, output, cache-read and
+cache-write prices in [`models.json`](models.json) for each selected source region and
+context tier. The selected routes are intentionally unpriced; credentials alone cannot
+pass funded preflight. Confirm model access and quota before running the check.
+
+```bash
+# Bedrock (after pricing): one model from each selected API family (Converse, Responses, Mantle chat)
+pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-sonnet-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+
+# Vertex: Gemini plus Claude, using GOOGLE_VERTEX_PROJECT/LOCATION and ADC
+pnpm -F @ratel-ai/benchmark start --models gcp/gemini-2.5-pro,gcp/claude-sonnet-4-5@20250929 --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+
+# Direct xAI, using XAI_API_KEY
+pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+```
+
+Credentialed Bedrock availability and the GCP/xAI live commands remain deferred; do not
+treat the synthetic result as measured benchmark evidence.
+
+### Launch from GitHub Actions
+
+The manual **Run benchmark campaign** Action submits the same selection contract as the
+campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`, `modelConcurrency` and
+`campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted selection uses the 16
+Bedrock defaults; exclusions win, concurrency defaults to one, the aggregate model/API
+budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL, SR-Agents and all
+three retrievers remain fixed parts of a full campaign.
+
+At submission the Action freezes its own commit, the deployed `ratel-bench-aws` commit from
+the request template, and the highest stable compatible SDK/core pair recorded in
+`.github/benchmark-release-metadata.json`. Inputs are validated and written as JSON rather
+than evaluated by a shell. The job assumes the repository-scoped OIDC launch role, calls
+`StartExecution`, prints the durable run ID plus workflow/execution/result links, and exits;
+it never waits for benchmark workers.
+
+Repository variables must provide `BENCHMARK_CAMPAIGN_TEMPLATE_JSON` (the deployed,
+versioned request template), `BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN`, `BENCHMARK_AWS_REGION`,
+`BENCHMARK_RESULTS_BUCKET`, `BENCHMARK_CAMPAIGN_STATE_MACHINE_ARN`,
+`BENCHMARK_CAMPAIGN_RUN_TABLE`, and the model/preparation/CodeBuild concurrency limits.
+Update release metadata only after the pair passes compatibility review. A failed launch
+reports a configuration/coordinator error without starting a watcher.
+
+Results are not deployed from this repository. After completion, use the separate manual
+website import flow to open and review a results PR; only merging that PR publishes data.
+
 ## Corpora
 
 Three datasets the arms run against:
@@ -39,7 +126,7 @@ Three datasets the arms run against:
 | **ToolRet** | 44k-tool public retrieval corpus, 35 sub-corpora | Apache 2.0 |
 | **BFCL** | Berkeley Function-Calling Leaderboard — measures right function + right arguments, not just tool selection | Apache 2.0 |
 
-Retrieval evals (does BM25 rank correctly?) are deterministic and free. Agent campaign evals (does the full agent do better with Ratel?) require at least one of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` — or a user-hosted OpenAI-compatible endpoint, which needs no cloud key (see Scenario 3/4).
+Retrieval evals (does BM25 rank correctly?) are deterministic and free. Agent campaign evals need credentials for the selected serving provider: AWS for the default Bedrock models, provider keys for direct Anthropic/OpenAI, Google ADC for Vertex Gemini or Claude, or a user-hosted OpenAI-compatible endpoint (see Scenario 3/4).
 
 ## Setup
 
@@ -55,6 +142,10 @@ API keys for the agent campaign (mode c only — place in `.env` at the repo roo
 ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 ```
+
+For an explicit Vertex route such as `gcp/gemini-2.5-pro` or `gcp/claude-sonnet-4-5@20250929`, configure `GOOGLE_VERTEX_PROJECT` and `GOOGLE_VERTEX_LOCATION` in `agent/.env` (or the process environment) and supply Google Application Default Credentials in the runtime. Gemini uses the Vertex Gemini adapter; Claude uses the Vertex Anthropic adapter with Google credentials, without `ANTHROPIC_API_KEY`. The catalog can override the location and exact Vertex model ID. GCP models are outside the 16-model Bedrock default; selecting one without a project/location fails before inference. Live Vertex model availability and access have not been verified; adapter tests use injected credentials and transport only. Vertex prices are not pinned yet, so these routes are not ready for funded campaigns.
+
+For an explicit direct xAI route, set `XAI_API_KEY` in `agent/.env` (optional `XAI_BASE_URL` for a custom API endpoint). For example, an opt-in smoke command is `pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --runs 1 --no-judge --ephemeral`. This uses the native xAI Responses adapter with stateless encrypted reasoning turns; it does not use `OPENAI_API_KEY`. The default 16-model Bedrock list does not read xAI credentials or call xAI. xAI live access and the smoke command have **not** been run; only fake-key, injected-transport tests have run. xAI prices are not pinned for funded campaigns. Rows use provider cost ticks when returned; otherwise they label the cost estimate or unknown while retaining token and cache counts.
 
 To benchmark a user-hosted (`<url>#<model>`) endpoint instead, no cloud key is needed; put the endpoint's bearer token in `agent/.env` (gitignored) as `AWS_BEDROCK_BEARER=...` — or pass `--model-api-key`. Unauthenticated endpoints need no token. See Scenario 3/4.
 
@@ -86,8 +177,8 @@ Every retrieval row and agent cell is **stamped with the Ratel version it was pr
 
 There are **two version knobs**, and which one matters depends on the eval:
 
-- **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). Swap it with the `version-set` / `version-reset` bookends below.
-- **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it; you bump it in `agent/package.json` (see Scenario 4).
+- **`ratel-ai-core` (Rust crate)** — governs every **retrieval** eval and the **SR-Agents LLM** eval (whose candidates are produced offline by the Rust retriever). The committed dependency pins `0.11.0`; swap it with the `version-set` / `version-reset` bookends below. The Rust corpus conversion selects the compatible Tool/Skill shape from the resolved crate version, so older core fixtures remain buildable.
+- **`@ratel-ai/sdk` (npm package)** — governs the **BFCL LLM** eval *only*, which retrieves **live** through the SDK's `search_tools` gateway. `version-set` does **not** change it. Select an installed exact release with `--sdk-version` (for example `0.12.0`); the default dependency remains `0.4.0` for historical runs. The SDK and core have independent release numbers (current stable pair: SDK `0.12.0`, core `0.11.0`).
 
 > **Pre-0.4.0 versions all run the identical experiment above — the commands don't change between them.** 0.4.0 is the first version that lets you **choose the retriever**, so its runs differ only slightly: pin the 0.4.0 SDK, tag the run with a method-suffixed label (`RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`), and add `--retriever bm25|semantic|hybrid`. Everything else — pools, top-k, arms, scenario counts — is unchanged. `control-baseline` and `control-oracle` are retriever-independent, so they're **reused from the canonical 0.2.0 cache** rather than re-run — but purge any stale/pre-fix cached cells (`--force` on the *first* method) so a gold-incomplete or poisoned 0.2.0 pool can't skew the 0.4.0 numbers. See [`EXPERIMENTS.md`](EXPERIMENTS.md) for the exact per-method commands.
 
@@ -103,6 +194,7 @@ pnpm version-reset                                               # restore the c
 - `version-set` snapshots `retrieval/Cargo.toml` + `Cargo.lock`, swaps the `ratel-ai-core` dependency to the requested source, then **asserts** the resolved version equals `--expect` — aborting and restoring if not, so a force-moved tag can't silently benchmark the wrong build. It refuses to run twice without a reset.
 - `version-reset` restores the snapshot and deletes it. **Always run it when done** so the tree builds against the released version again.
 - `--expect` is the version string Cargo resolves (the git tag `v0.3.0-rc.1` resolves to crate version `0.3.0-rc.1`).
+- Verify both supported core paths with `pnpm version-set --crate 0.2.0 --expect 0.2.0 && cargo test --manifest-path retrieval/Cargo.toml`, then `pnpm version-reset && cargo test --manifest-path retrieval/Cargo.toml` for the committed `0.11.0` pin. The `core_compatibility` fixtures rank a known tool and skill on both versions. The Rust retrieval rows stamp the actual crate release as `ratel_ai_core_version`; TypeScript rows additionally stamp `ratel_ai_core_resolved_version` from `Cargo.lock`, separate from the method-specific `ratel_ai_core_version` report label and SDK `ratel_version`.
 
 Each scenario below is self-contained: **reset → set → run → summarize → report → compare → reset**. The `v0.3.0-rc.1` pin is an example — substitute the version you're testing.
 
@@ -213,7 +305,7 @@ cargo run -p ratel-benchmark-retrieval --release -- skill-retrieval \
 pnpm -F @ratel-ai/benchmark sragents-select \
   --candidates results/raw/sragents/candidates.jsonl \
   --pool-size 50 --top-k 10 \
-  --models claude-haiku-4-5,gpt-5.4-mini \
+  --models anthropic/claude-haiku-4-5,openai/gpt-5.4-mini \
   --scenarios 600 --concurrency 8 --dollar-global 5
 
 # 3. summarize → report
@@ -226,11 +318,11 @@ pnpm version-reset
 **Detail:**
 - **The candidate-gen run is separate from Scenario 1.** It writes a *different* file (`candidates.jsonl`, not `retrieval-rows.jsonl`) with *different* slices (`--top-k 10,50 --pool-sizes 50`). The LLM arms need both the `k=10` slice (Ratel's shortlist → `ratel-full`) and the `k=50` slice (full pool → `control-baseline`). A quality-run file (`--top-k 1,3,5`) makes the LLM step **skip every scenario**.
 - "Parallelized" here is the same env-pin trick on the candidate-gen retrieval; the LLM step's own parallelism is `--concurrency`.
-- `sragents-select` — the LLM A/B. Reads `--candidates`, runs three arms (`control-baseline`, `ratel-full`, `control-oracle`) per scenario, writes `results/raw/sragents/agent.jsonl` (**overwritten** — copy aside to keep prior cells). **Version is stamped from the live `Cargo.lock`**, so keep the same pin as the candidate-gen run or the label won't match the retrieval it used.
-  - `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL (see below). Use a *different* list than Scenario 4 for per-benchmark models.
+- `sragents-select` — the LLM A/B. Reads `--candidates`, runs three arms (`control-baseline`, `ratel-full`, `control-oracle`) per scenario, writes `results/raw/sragents/agent.jsonl` (resumable; `--force` overwrites it). **Version is stamped from the live `Cargo.lock`**, so keep the same pin as the candidate-gen run or the label won't match the retrieval it used.
+  - `--models` — comma-separated; provider-qualified (`bedrock/`, `anthropic/`, `openai/`, `gcp/`, `xai/`), `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Bare names mean Bedrock. Bedrock, direct Anthropic/OpenAI/xAI and both Vertex families use native adapters. Use a *different* list than Scenario 4 for per-benchmark models.
   - `--pool-size 50 --top-k 10` — **must** match the candidate-gen slices.
-  - **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Put the endpoint's bearer token in `agent/.env` as `AWS_BEDROCK_BEARER` (or pass `--model-api-key`); unauthenticated endpoints need no token. The endpoint is auto-warmed (`POST /warm`, polled until ready) before the run. Cells record `$0` cost and keep the full URL as the model id. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
-  - `--concurrency 8` — parallel LLM calls. `--dollar-global 5` — hard USD cost cap for the run. `--scenarios 600` — cap; `--runs 1` repeats per cell.
+  - **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Put the endpoint's bearer token in `agent/.env` as `AWS_BEDROCK_BEARER` (or pass `--model-api-key`); unauthenticated endpoints need no token. The endpoint is auto-warmed (`POST /warm`, polled until ready) before the run. Cells keep the full URL as the model id; without a configured rate their cost is unknown (`null`), rather than `$0`. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
+  - `--concurrency 8` — parallel LLM calls. `--dollar-global 5` — best-effort cap on known model costs for this command; in-flight calls can overshoot it. `--scenarios 600` — cap; `--runs 1` repeats per cell.
 - summarize/report fold the cells into the task-completion section of `report.json`; the task-completion numbers live in `report.json` / the website. Errored cells: see "Errored cells" under Scenario 4 (same rules).
 
 > **Cost:** the model is called 3× per scenario (3 arms): `600 × 3 × N_models` cells. The `control-baseline` and `control-oracle` arms are version-independent, so re-running them per version is redundant spend.
@@ -239,38 +331,39 @@ pnpm version-reset
 
 ### Scenario 4 — LLM eval · BFCL
 
-> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` only sets the `ratel_ai_core_version` **label** on the cells — to actually measure a version's retrieval you must bump the **SDK**. Do both so the label and the retriever agree. **Needs an API key.**
+> **Different version knob.** BFCL's agent retrieves **live through `@ratel-ai/sdk`** (npm), *not* the Rust core. `version-set` changes the actual core dependency and default `ratel_ai_core_version` label; `RATEL_VERSION_LABEL` can override the label without changing the dependency. `ratel_ai_core_resolved_version` records the actual crate release. `--sdk-version` selects the SDK independently. **Needs an API key.**
 
 ```bash
 # 1. pin the core (sets the ratel_ai_core_version label)
 pnpm version-reset
 pnpm version-set --crate 0.3.0 --expect 0.3.0
 
-# 2. bump the SDK to the matching release so retrieval is ACTUALLY 0.3.0
-#    edit agent/package.json:  "@ratel-ai/sdk": "npm:@ratel-ai/sdk@<0.3.0-sdk-version>"
-pnpm install
+# 2. install pinned aliases; select one on each BFCL command
+pnpm install --frozen-lockfile
 
 # 3. agent campaign — normal
 pnpm -F @ratel-ai/benchmark start \
   --corpus test-data/bfcl-all.jsonl \
+  --sdk-version 0.4.0 \
   --output results/raw/bfcl/agent.jsonl \
   --arms control-baseline,control-oracle,ratel-full \
-  --models claude-sonnet-4-6 \
+  --models anthropic/claude-sonnet-4-6 \
   --pool-sizes 100 --runs 1 --no-judge --concurrency 4
 
 # 3b. agent campaign — parallelized (raise in-flight API calls)
 pnpm -F @ratel-ai/benchmark start \
   --corpus test-data/bfcl-all.jsonl \
+  --sdk-version 0.4.0 \
   --output results/raw/bfcl/agent.jsonl \
   --arms control-baseline,control-oracle,ratel-full \
-  --models claude-sonnet-4-6 \
+  --models anthropic/claude-sonnet-4-6 \
   --pool-sizes 100 --runs 1 --no-judge --concurrency 12
 
 # 4. summarize → report
 pnpm -F @ratel-ai/benchmark bfcl-summarize
 pnpm -F @ratel-ai/benchmark bfcl-report
 
-# 5. restore baseline (and revert the package.json SDK bump if not shipping it)
+# 5. restore the core baseline
 pnpm version-reset
 ```
 
@@ -278,9 +371,10 @@ pnpm version-reset
 - `start` (`agent/src/cli.ts`) — the BFCL agent runner. The `ratel-full` arm builds a live `ToolCatalog` from `@ratel-ai/sdk` and calls `catalog.search()` + the `search_tools` / `invoke_tool` gateway during the agent loop, so **the SDK version is the retriever** (recorded as `ratel_version`).
 - `--corpus test-data/bfcl-all.jsonl` — operates on the corpus directly (no candidates file). `--arms` — the three arms. `--pool-sizes 100` — catalog size per scenario. `--no-judge` — skip the LLM judge (use AST / programmatic verdicts). `--runs 1` — one run per cell.
 - **Normal vs parallelized:** the BFCL agent doesn't use the Rust thread-pool; it's network-latency-bound, so parallelism is just `--concurrency` (raise it to overlap more in-flight API calls — mind provider rate limits).
-- `--models` — comma-separated; `claude-*`, `gpt-*`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Set a *different* list than Scenario 3 for per-benchmark models.
-- **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Bearer token → `agent/.env` as `AWS_BEDROCK_BEARER` (or `--model-api-key`), unauthenticated endpoints need none; the endpoint is auto-warmed before the run; cells record `$0` and keep the full URL as the model id. Use a longer `--timeout-ms` (e.g. 120000) for cold/remote models. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
-- summarize/report fold the cells into `report.json`. Because both `ratel_version` (SDK) and `ratel_ai_core_version` (core, from the lock) are recorded, the report can refuse to merge layers whose versions disagree — which is why steps 1 and 2 must target the same 0.3.0. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
+- **Live spend and coverage:** `start`, `sragents-select`, and paid `rejudge` write a fsynced attempt journal beside their output as `<output>.spend.jsonl`. Each provider call, retry, and optional judge call has its own dispatch and settlement with raw usage and a route-price snapshot; cached control rows keep their historical row cost but create no paid attempt. Totals include resumed attempts for the current benchmark/version and exclude older comparison versions. An interrupted dispatch, absent usage/rate, or older live row without a journal marks accounting partial; the printed dollar figure is then a known lower bound. Keep the journal with the JSONL output when resuming. Both runners print a `coverage:` line with terminal status and reconciled requested/completed/failed/reused/skipped cells. Budget stops, interruptions, failures, and incomplete accounting cannot report completed coverage; these runs exit nonzero. SIGINT/SIGTERM stop new cells and drain in-flight work before the summary. The legacy `--dollar-global` cap remains best-effort; campaign-wide admission is a separate coordinator feature.
+- `--models` — comma-separated serving routes: `bedrock/<model>`, `anthropic/<model>`, `openai/<model>`, `gcp/<model>`, `xai/<model>`, `ollama:<tag>`, or a user-hosted `<baseURL>#<model>` URL. Bare names mean Bedrock. Bedrock, direct Anthropic/OpenAI/xAI and both Vertex families use native adapters. Set a *different* list than Scenario 3 for per-benchmark models.
+- **User-hosted model** (OpenAI-compatible endpoint you run — vLLM/TGI/LM Studio, or a self-hosted model fronted by AWS API Gateway): pass the URL as the model id, e.g. `--models 'https://<your-gateway>.execute-api.<region>.amazonaws.com/prod/v1#qwen3-4b'`. Bearer token → `agent/.env` as `AWS_BEDROCK_BEARER` (or `--model-api-key`), unauthenticated endpoints need none; the endpoint is auto-warmed before the run; cells keep the full URL as the model id and show unknown cost unless priced. Use a longer `--timeout-ms` (e.g. 120000) for cold/remote models. Setting up the gateway: see [ratel-inference-gateway](https://github.com/ratel-ai/ratel-inference-gateway).
+- summarize/report fold the cells into `report.json`. `ratel_version` records the selected SDK; `ratel_ai_core_version` records the independently selected core label. Check both before combining layers. `agent.jsonl` is **overwritten**; copy it aside to keep prior cells.
 - **Errored cells** (both summarizers and `report`): rows are superseded per cell (the last final row wins, so a re-run replaces a transient error and duplicates count once). Final infra errors (`transient|access`) are excluded from every metric and counted in `excluded_cells`; `request|timeout|outcome` errors stay scored fails (`errored_cells`); output-limit cut-offs are kept and scored on their verdict (counted in `truncated_cells`). Token/cost/latency means cover non-errored rows only (`—` / null when none). In the summaries a group with no kept rows emits null metrics; in `REPORT.md` such a group has no row. The control cache never serves `transient|access|request` rows. `--label L` summarizes one `ratel_ai_core_version` label only. BFCL cells key on the SDK `ratel_version` too, so a control re-drain must pass `--ratel-version` equal to the `ratel_version` of the rows it replaces (the audit prints it per label); otherwise both versions count and `bfcl-summarize` / `report` warn. Before summarizing or migrating, audit with `pnpm -F @ratel-ai/benchmark results-audit --bench bfcl|sragents --agent <file> [--cache a,b,…]` (read-only unless `--drop-infra-errors --out <path>`, which drops only superseded `transient|access` rows). See [`EXPERIMENTS.md`](EXPERIMENTS.md) Rule 1.
 
 ---

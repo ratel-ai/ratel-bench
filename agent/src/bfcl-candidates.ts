@@ -26,7 +26,7 @@ import { buildToolCatalog } from "./sdk/adapter.js";
 import { parseEmbedding } from "./sdk/embedding.js";
 import { selectVersion } from "./sdk/resolve.js";
 import type { RetrievalMethod, Scenario } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 interface RetrievedHit {
   id: string;
@@ -146,6 +146,7 @@ async function main(): Promise<void> {
             run_id: runId,
             generated_at: generatedAt,
             ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+            ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
             scenario_id: sc.id,
             query: sc.prompt,
             golden_answer: sc.gold_tools,

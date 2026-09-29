@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isInfraError } from "./cell-errors.js";
 import { providerOf } from "./metering.js";
+import { canonicalModelId, parseModelIdentity } from "./model-identity.js";
 import { modelsJsonPath } from "./pricing.js";
 import type { AttemptRow } from "./rerun.js";
 import type { ResolvedModel, RunnerModel } from "./types.js";
@@ -22,9 +23,22 @@ import type { ResolvedModel, RunnerModel } from "./types.js";
 /** The models.json fields caps read (the file carries more, e.g. pricing). */
 export interface ModelCatalogEntry {
   id: string;
+  displayName?: string;
+  publisher?: string;
+  /** Alternate route IDs retained for historical callers. */
+  aliases?: string[];
   /** `<baseURL>#<model-name>` for self-hosted models; matched against the run's id. */
   endpoint?: string;
   bedrockProfile?: string;
+  bedrockRegion?: string;
+  bedrockApi?: "converse" | "responses" | "chat";
+  bedrockEndpoint?: "bedrock-runtime" | "bedrock-mantle";
+  /** Exact Vertex API model ID; the serving identity remains gcp/<model>. */
+  vertexModelId?: string;
+  /** Optional model-specific Vertex location override. */
+  vertexLocation?: string;
+  /** Direct xAI Responses reasoning setting; absent leaves the model default. */
+  xaiReasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   /** Positive integer; absent = no cap sent. */
   maxOutputTokens?: number;
 }
@@ -38,7 +52,10 @@ const LEGACY_LABEL = "legacy (no recorded cap)";
 /** The cache-relevant harness a row was produced under. */
 export interface Harness {
   provider?: string;
+  serving_provider?: string;
   max_output_tokens?: number | null;
+  resolved_model?: string;
+  vertex_location?: string;
 }
 
 /** A row as `checkResumeCaps` sees it (BFCL `CellResult` and SR cells both fit). */
@@ -61,7 +78,7 @@ export function resolveOutputCap(
   if (override !== undefined) {
     return positiveInt(override, `--max-output-tokens must be a positive integer or "none"`);
   }
-  const entry = catalog.find((e) => e.id === modelId || e.endpoint === modelId);
+  const entry = findModelCatalogEntry(modelId, catalog);
   if (entry?.maxOutputTokens === undefined) return null;
   return positiveInt(
     entry.maxOutputTokens,
@@ -69,19 +86,65 @@ export function resolveOutputCap(
   );
 }
 
+/** Look up a catalog entry by serving identity, alias, or hosted endpoint. */
+export function findModelCatalogEntry(
+  modelId: string,
+  catalog: readonly ModelCatalogEntry[],
+): ModelCatalogEntry | undefined {
+  const canonical = canonicalModelId(modelId);
+  return catalog.find(
+    (entry) =>
+      canonicalModelId(entry.id) === canonical ||
+      entry.aliases?.some((alias) => canonicalModelId(alias) === canonical) ||
+      entry.endpoint === canonical,
+  );
+}
+
 /**
- * models.json `run[]` entries. A missing catalog is empty (every id → no cap);
+ * models.json `run[]` plus `historical[]` entries. Only `run[]` is the default campaign;
+ * historical routes remain available for explicit overrides and old results.
+ * A missing catalog is empty (every id → no cap);
  * an unparseable one throws, since it would otherwise drop every cap silently.
  */
 export function loadModelCatalog(path: string = modelsJsonPath()): ModelCatalogEntry[] {
   if (!existsSync(path)) return [];
-  let catalog: { run?: ModelCatalogEntry[] };
+  let catalog: { run?: ModelCatalogEntry[]; historical?: ModelCatalogEntry[] };
   try {
     catalog = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
     throw new Error(`models.json at ${path} is not valid JSON: ${(err as Error).message}`);
   }
-  return (catalog.run ?? []).filter((e) => typeof e?.id === "string");
+  if (!Array.isArray(catalog.run)) {
+    if (catalog.run === undefined) return [];
+    throw new Error(`models.json at ${path}: run must be an array`);
+  }
+  if (catalog.historical !== undefined && !Array.isArray(catalog.historical)) {
+    throw new Error(`models.json at ${path}: historical must be an array`);
+  }
+  const entries = [...catalog.run, ...(catalog.historical ?? [])];
+  const owners = new Map<string, number>();
+  for (const [index, entry] of entries.entries()) {
+    if (!entry || typeof entry.id !== "string") {
+      throw new Error(`models.json at ${path}: every run entry needs a model id`);
+    }
+    if (entry.aliases !== undefined && !Array.isArray(entry.aliases)) {
+      throw new Error(`models.json at ${path}: ${entry.id}.aliases must be an array`);
+    }
+    const routes = [
+      entry.id,
+      ...(entry.aliases ?? []),
+      ...(entry.endpoint ? [entry.endpoint] : []),
+    ];
+    for (const route of routes) {
+      const canonical = canonicalModelId(route);
+      const owner = owners.get(canonical);
+      if (owner !== undefined && owner !== index) {
+        throw new Error(`models.json at ${path}: duplicate catalog route ${canonical}`);
+      }
+      owners.set(canonical, index);
+    }
+  }
+  return entries;
 }
 
 /**
@@ -97,13 +160,47 @@ export function buildRunnerModels(
   opts: { catalog: readonly ModelCatalogEntry[]; override: OutputCapOverride | undefined },
 ): RunnerModel[] {
   return modelIds.map((modelId) => {
-    const { id, model } = resolve(modelId);
-    return { id, model, maxOutputTokens: resolveOutputCap(id, opts.catalog, opts.override) };
+    const canonicalId = canonicalModelId(modelId);
+    const resolved = resolve(canonicalId);
+    const identity = parseModelIdentity(canonicalId);
+    const entry = findModelCatalogEntry(canonicalId, opts.catalog);
+    return {
+      id: canonicalId,
+      model: resolved.model,
+      maxOutputTokens: resolveOutputCap(canonicalId, opts.catalog, opts.override),
+      ...(identity.kind === "provider"
+        ? {
+            servingProvider: resolved.servingProvider ?? identity.provider,
+            publisher:
+              resolved.publisher ??
+              entry?.publisher ??
+              (identity.provider === "gcp"
+                ? vertexPublisher(entry?.vertexModelId ?? identity.model)
+                : undefined),
+            resolvedModel:
+              resolved.resolvedModel ??
+              (identity.provider === "gcp"
+                ? (entry?.vertexModelId ?? identity.model)
+                : identity.provider === "bedrock"
+                  ? (entry?.bedrockProfile ?? identity.model)
+                  : identity.model),
+            ...(identity.provider === "gcp" && (resolved.vertexLocation ?? entry?.vertexLocation)
+              ? { vertexLocation: resolved.vertexLocation ?? entry?.vertexLocation }
+              : {}),
+          }
+        : {}),
+    };
   });
 }
 
+function vertexPublisher(model: string): "Google" | "Anthropic" | undefined {
+  if (model.startsWith("gemini-")) return "Google";
+  if (model.startsWith("claude-")) return "Anthropic";
+  return undefined;
+}
+
 /**
- * Startup log line, e.g. `caps: claude-haiku-4-5=4096, ollama:qwen3.5=none (no
+ * Startup log line, e.g. `caps: bedrock/claude-haiku-4-5=4096, ollama:qwen3.5=none (no
  * models.json cap)`. Uncapped models are called out, never implied.
  */
 export function capsLine(models: readonly RunnerModel[], override?: OutputCapOverride): string {
@@ -115,8 +212,19 @@ export function capsLine(models: readonly RunnerModel[], override?: OutputCapOve
 }
 
 /** The harness a model runs under now: its SDK provider id and requested cap. */
-export function harnessOf(m: Pick<RunnerModel, "model" | "maxOutputTokens">): Harness {
-  return { provider: providerOf(m.model), max_output_tokens: m.maxOutputTokens };
+export function harnessOf(
+  m: Pick<
+    RunnerModel,
+    "model" | "maxOutputTokens" | "servingProvider" | "resolvedModel" | "vertexLocation"
+  >,
+): Harness {
+  return {
+    provider: providerOf(m.model),
+    ...(m.servingProvider ? { serving_provider: m.servingProvider } : {}),
+    max_output_tokens: m.maxOutputTokens,
+    ...(m.resolvedModel ? { resolved_model: m.resolvedModel } : {}),
+    ...(m.vertexLocation ? { vertex_location: m.vertexLocation } : {}),
+  };
 }
 
 /** `harnessOf` for every model of a run, keyed by model id. */
@@ -141,6 +249,14 @@ export function cacheTier(
   current: Harness | undefined,
   allowLegacy = true,
 ): "exact" | "legacy" | null {
+  if (
+    current?.serving_provider &&
+    row.serving_provider &&
+    row.serving_provider !== current.serving_provider
+  )
+    return null;
+  if (current?.resolved_model && row.resolved_model !== current.resolved_model) return null;
+  if (current?.vertex_location && row.vertex_location !== current.vertex_location) return null;
   if (row.max_output_tokens === undefined) {
     if (row.provider !== undefined && current && row.provider !== current.provider) return null;
     if (row.provider !== undefined && current?.max_output_tokens === null) return "exact";
@@ -198,12 +314,32 @@ export function checkResumeCaps(
 ): { legacy: number } {
   let legacy = 0;
   const conflicts = new Map<string, Set<string>>();
+  const identityConflicts: string[] = [];
   const conflict = (model: string, found: string) => {
     (conflicts.get(model) ?? conflicts.set(model, new Set()).get(model))?.add(found);
   };
   for (const r of rows) {
     const current = harness.get(r.model);
     if (!current || isInfraError(r)) continue;
+    if (
+      current.serving_provider &&
+      r.serving_provider &&
+      r.serving_provider !== current.serving_provider
+    ) {
+      identityConflicts.push(
+        `${r.model}: serving_provider ${r.serving_provider} != ${current.serving_provider}`,
+      );
+    }
+    if (current.resolved_model && r.resolved_model !== current.resolved_model) {
+      identityConflicts.push(
+        `${r.model}: resolved_model ${r.resolved_model ?? "unset"} != ${current.resolved_model}`,
+      );
+    }
+    if (current.vertex_location && r.vertex_location !== current.vertex_location) {
+      identityConflicts.push(
+        `${r.model}: vertex_location ${r.vertex_location ?? "unset"} != ${current.vertex_location}`,
+      );
+    }
     if (r.max_output_tokens === undefined) {
       if (r.cache_source !== "reused") legacy++;
       else if (!allowLegacy && cacheTier(r, current, false) === null) {
@@ -214,6 +350,11 @@ export function checkResumeCaps(
     if (r.max_output_tokens !== current.max_output_tokens) {
       conflict(r.model, capLabel(r.max_output_tokens));
     }
+  }
+  if (identityConflicts.length > 0) {
+    throw new Error(
+      `resume: output model identity differs from this run (${identityConflicts.join("; ")}); use a fresh --output or --force`,
+    );
   }
   if (conflicts.size > 0) {
     const detail = [...conflicts]

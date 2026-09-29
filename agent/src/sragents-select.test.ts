@@ -4,10 +4,12 @@ import { join, resolve } from "node:path";
 import { APICallError, NoObjectGeneratedError, RetryError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { FatalProviderError } from "./cell-errors.js";
 import { type RetrySettings, sleep as realSleep } from "./llm-retry.js";
 import { REPO_ROOT } from "./paths.js";
 import { formatDoneLine } from "./rerun.js";
+import { openSpendLedger } from "./spend-ledger.js";
 import {
   armCandidates,
   buildCandidateSets,
@@ -22,6 +24,7 @@ import {
   selectForCell,
   sragentsCachePaths,
   sragentsCapOptions,
+  sragentsModels,
   sragentsRerunOptions,
   sragentsTimeoutMs,
   stratifiedSample,
@@ -30,8 +33,21 @@ import {
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
+describe("sragentsModels", () => {
+  it("defaults to Bedrock and keeps explicit historical direct routes", () => {
+    expect(sragentsModels([])).toHaveLength(16);
+    expect(sragentsModels([])[0]).toBe("bedrock/openai.gpt-6-astra");
+    expect(sragentsModels([]).at(-1)).toBe("bedrock/nvidia.nemotron-super-3-120b");
+    expect(sragentsModels(["--models", "gpt-5.4-mini,openai/gpt-5.4-mini"])).toEqual([
+      "bedrock/gpt-5.4-mini",
+      "openai/gpt-5.4-mini",
+    ]);
+  });
+});
+
 // Fixed price so cost assertions don't depend on models.json / MODELS_JSON.
-vi.mock("./pricing.js", () => ({
+vi.mock("./pricing.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./pricing.js")>()),
   loadModelPricing: () => ({
     "claude-haiku-4-5": {
       inputPer1M: 1,
@@ -382,6 +398,52 @@ describe("drainControlCache", () => {
           .filter(Boolean)
           .map((l) => JSON.parse(l) as SragentsSelectCell)
       : [];
+
+  it("keeps Bedrock, direct Anthropic and Vertex controls apart", () => {
+    const output = join(dir, "out.jsonl");
+    const source = join(dir, "cache.jsonl");
+    writeCells(source, [
+      cached({
+        model: "bedrock/claude-sonnet-5",
+        provider: "amazon-bedrock",
+        max_output_tokens: null,
+        selected_skill_ids: ["bedrock"],
+      }),
+      cached({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        max_output_tokens: null,
+        selected_skill_ids: ["direct"],
+      }),
+      cached({
+        model: "gcp/claude-sonnet-5",
+        provider: "vertex.anthropic.messages",
+        max_output_tokens: null,
+        selected_skill_ids: ["vertex"],
+      }),
+      cached({ model: "claude-sonnet-5", selected_skill_ids: ["ambiguous"] }),
+    ]);
+    const tasks = [
+      ["bedrock/claude-sonnet-5", "amazon-bedrock"],
+      ["anthropic/claude-sonnet-5", "anthropic.messages"],
+      ["gcp/claude-sonnet-5", "vertex.anthropic.messages"],
+    ].map(([id, provider]) => ({
+      ...task("control-baseline"),
+      model: { id, model: { provider } as never, maxOutputTokens: null },
+    }));
+    const result = drainControlCache(tasks, {
+      outputPath: output,
+      cachePaths: [source],
+      force: false,
+      allowLegacyCache: true,
+    });
+    expect(result.reused).toBe(3);
+    expect(readCells(output).map((row) => [row.model, row.selected_skill_ids[0]])).toEqual([
+      ["bedrock/claude-sonnet-5", "bedrock"],
+      ["anthropic/claude-sonnet-5", "direct"],
+      ["gcp/claude-sonnet-5", "vertex"],
+    ]);
+  });
 
   it("appends reused controls re-stamped with cache_source 'reused'; the rest run live", () => {
     const output = join(dir, "out.jsonl");
@@ -967,6 +1029,30 @@ describe("selectForCell", () => {
     timeoutMs: 300_000,
   });
 
+  it("uses default retry settings when a direct metered selection omits overrides", async () => {
+    const ai = await import("ai");
+    const actual = await vi.importActual<typeof import("ai")>("ai");
+    vi.mocked(ai.generateObject).mockImplementationOnce(actual.generateObject);
+    const dir = mkdtempSync(join(tmpdir(), "sr-default-retry-"));
+    const spendLedger = openSpendLedger(join(dir, "attempts.jsonl"));
+    const input = args();
+    input.model.model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: '{"selected_skill_ids":["g1"]}' }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const cell = await selectForCell({ ...input, spendLedger });
+    expect(cell.error).toBeNull();
+    expect(spendLedger.summary().attempts).toBe(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("records usage, finish_reason 'length', error_class 'outcome' from NoObjectGeneratedError", async () => {
     const ai = await import("ai");
     vi.mocked(ai.generateObject).mockRejectedValueOnce(
@@ -1045,7 +1131,8 @@ describe("selectForCell", () => {
     expect(cell.error_class).toBe("access");
     expect(cell.finish_reason).toBe("error");
     expect(cell.input_tokens).toBe(0);
-    expect(cell.dollar_cost).toBe(0);
+    expect(cell.dollar_cost).toBeNull();
+    expect(cell.cost_source).toBe("unknown");
     expect(cell.provider).toBe("anthropic.messages");
   });
 
@@ -1425,6 +1512,49 @@ describe("planCells", () => {
   }
   const overloaded = { error: "Overloaded" };
 
+  it("reconciles resumed and reused cells without charging historical control cost", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-summary-"));
+    const spend = openSpendLedger(join(dir, "attempts.jsonl")).summary();
+    const tasks = [task("control-baseline"), task("ratel-full"), task("control-oracle")];
+    const rows = [
+      prior("control-baseline", { cache_source: "reused", dollar_cost: 0.5 }),
+      prior("ratel-full"),
+    ];
+    const summary = campaignDoneSummary(
+      {
+        cells_run: 0,
+        total_dollars: 0,
+        spend,
+        stopped_reason: "completed",
+        cap_hit: false,
+        retries: 0,
+        throttled_retries: 0,
+        errors: 0,
+        requeued: 0,
+        exhausted: 0,
+        aborted: {},
+      },
+      {
+        reused: 1,
+        skipped: 1,
+        resume: { requeued: {}, exhausted: 0 },
+        requestedTasks: tasks,
+        rows,
+        spend,
+      },
+    );
+    expect(summary.spend).toMatchObject({ attempts: 0, knownUsd: 0 });
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 1,
+      skipped: 1,
+      status: "partial",
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("planCells resumes all arms incl. ratel-full", () => {
     const tasks = [
       task("control-baseline"),
@@ -1616,6 +1746,94 @@ describe("runCampaign", () => {
 });
 
 describe("runCampaign: breaker, rounds and cap", () => {
+  it("marks unfunded SR work budget_limited before another provider call", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return answer;
+      },
+    });
+    const tasks = [taskOf("bedrock/m", model, 0), taskOf("bedrock/m", model, 1)];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: { "bedrock/m": price },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+      expect(calls).toBe(1);
+      expect(result.coverage).toMatchObject({ requested: 2, skipped: 1, status: "budget_limited" });
+      expect(result.campaignBudget).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+      expect(await store.snapshot()).toMatchObject({ spentTicks: 1100000, reservedTicks: 0 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops picking cheaper SR work after confirmed budget exhaustion", async () => {
+    const calls = [0, 0, 0];
+    const models = calls.map(
+      (_, i) =>
+        new MockLanguageModelV3({
+          doGenerate: async () => {
+            calls[i]++;
+            return answer;
+          },
+        }),
+    );
+    const tasks = [
+      taskOf("bedrock/first", models[0], 0),
+      taskOf("bedrock/expensive", models[1], 1),
+      taskOf("bedrock/cheap", models[2], 2),
+    ];
+    for (const task of tasks) task.model.maxOutputTokens = 10;
+    const standard = {
+      inputPer1M: 1,
+      outputPer1M: 2,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    const cheap = {
+      inputPer1M: 0.1,
+      outputPer1M: 0.1,
+      cachedInputPer1M: 0.1,
+      cacheCreationPer1M: 0.1,
+    };
+    const store = createMemoryBudgetStore(0.00015);
+    const dir = mkdtempSync(join(tmpdir(), "sr-budget-stop-"));
+    try {
+      const { result } = await campaign(tasks, {
+        spendLedger: openSpendLedger(join(dir, "attempts.jsonl")),
+        pricing: {
+          "bedrock/first": standard,
+          "bedrock/expensive": standard,
+          "bedrock/cheap": cheap,
+        },
+        campaignBudget: createCampaignBudget(store, {
+          "bedrock/first": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/expensive": { price: standard, maxInputTokens: 100, maxOutputTokens: 10 },
+          "bedrock/cheap": { price: cheap, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+      });
+
+      expect(calls).toEqual([1, 0, 0]);
+      expect(result.coverage).toMatchObject({
+        requested: 3,
+        completed: 1,
+        skipped: 2,
+        status: "budget_limited",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   const sc = (i: number) => ({
     scenarioId: `sragents-toolqa_${i}`,
     category: "sragents-toolqa",
@@ -1704,6 +1922,205 @@ describe("runCampaign: breaker, rounds and cap", () => {
       mock.mockReset();
     }
   }
+
+  it("journals each physical SR call and keeps retry spend after an error row", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        if (calls === 1) {
+          throw Object.assign(
+            new APICallError({
+              message: "busy",
+              url: "https://api.test/v1",
+              requestBodyValues: {},
+              statusCode: 503,
+              isRetryable: true,
+            }),
+            {
+              usage: { inputTokens: 10, outputTokens: 2 },
+            },
+          );
+        }
+        return answer;
+      },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "sr-spend-"));
+    const path = join(dir, "sr.spend.jsonl");
+    const ledger = openSpendLedger(path);
+    ledger.dispatch({
+      id: "historical",
+      kind: "sragents",
+      scope: "sragents/old",
+      cellKey: "old",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("historical", {
+      status: "completed",
+      usage: { inputTokens: 500, outputTokens: 0 },
+    });
+    const task = taskOf("bedrock/m", model, 0);
+    task.model.servingProvider = "bedrock";
+    task.model.publisher = "example";
+    task.model.resolvedModel = "global.example.m";
+    const { result } = await campaign([task], {
+      spendLedger: ledger,
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    });
+    expect(result.spend).toMatchObject({ attempts: 2, unresolved: 0, knownUsd: 0.000124 });
+    const dispatches = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "dispatch");
+    expect(dispatches).toHaveLength(3);
+    expect(dispatches[1].value).toMatchObject({
+      kind: "sragents",
+      model: "bedrock/m",
+      servingProvider: "bedrock",
+      publisher: "example",
+      resolvedModel: "global.example.m",
+      adapterProvider: model.provider,
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("starts fresh SR spend on force and keeps that generation on resume", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-force-spend-"));
+    const path = join(dir, "attempts.jsonl");
+    const ledger = openSpendLedger(path);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 0,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "prior-generation",
+      kind: "sragents",
+      scope: `sragents/${RATEL_AI_CORE_VERSION}`,
+      cellKey: "old",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("prior-generation", {
+      status: "completed",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return answer;
+      },
+    });
+    const task = taskOf("bedrock/m", model, 0);
+
+    const forced = await campaign([task], {
+      spendLedger: ledger,
+      pricing: { "bedrock/m": price },
+      dollarCap: 0.0000005,
+      force: true,
+    });
+
+    expect(calls).toBe(1);
+    expect(forced.result.cells_run).toBe(1);
+    expect(forced.result.spend).toMatchObject({ attempts: 1, knownUsd: 0.0001 });
+    const journal = readFileSync(path, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(journal.some((event) => event.type === "generation")).toBe(true);
+    const resumedLedger = openSpendLedger(path);
+    expect(resumedLedger.summary()).toMatchObject({ attempts: 2, knownUsd: 0.000101 });
+    const resumed = await campaign([task], {
+      spendLedger: resumedLedger,
+      pricing: { "bedrock/m": price },
+      dollarCap: 0.0000005,
+    });
+    expect(calls).toBe(1);
+    expect(resumed.result.cells_run).toBe(0);
+    expect(resumed.result.spend).toMatchObject({ attempts: 1, knownUsd: 0.0001 });
+    expect(resumed.result.stopped_reason).toBe("global_cap");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps SR spend from a fatal request with no result row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sr-fatal-spend-"));
+    const spendLedger = openSpendLedger(join(dir, "attempts.jsonl"));
+    const gated = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw Object.assign(apiError(403, "model not available for this account"), {
+          usage: { inputTokens: 12, outputTokens: 2 },
+        });
+      },
+    });
+    const { result, rows } = await campaign([taskOf("bedrock/m", gated, 0)], {
+      spendLedger,
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    });
+    expect(rows).toEqual([]);
+    expect(result.spend).toMatchObject({ attempts: 1, knownUsd: 0.000016 });
+    expect(result.coverage).toMatchObject({ requested: 1, skipped: 1, status: "failed" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports all-error, budget-limited, and interrupted SR coverage truthfully", async () => {
+    const bad = scriptedModel(() => apiError(400, "bad request"));
+    const allError = await campaign([taskOf("bad", bad, 0)], {
+      rerun: { rounds: 0 },
+    });
+    expect(allError.result.coverage).toEqual({
+      requested: 1,
+      completed: 0,
+      failed: 1,
+      reused: 0,
+      skipped: 0,
+      status: "failed",
+    });
+
+    const priced = scriptedModel(() => null);
+    const limited = await campaign(
+      [0, 1, 2].map((i) => taskOf("claude-haiku-4-5", priced, i)),
+      { dollarCap: 0.0001 },
+    );
+    expect(limited.result.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "budget_limited",
+    });
+
+    const controller = new AbortController();
+    const interrupted = await campaign(
+      [0, 1, 2].map((i) =>
+        taskOf(
+          "ok",
+          scriptedModel(() => null),
+          i,
+        ),
+      ),
+      {
+        signal: controller.signal,
+        onCell: () => controller.abort(),
+      },
+    );
+    expect(interrupted.result.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "cancelled",
+    });
+  });
 
   it("K consecutive transport errors abort the model; its cells get no retry round", async () => {
     const down = scriptedModel(() => apiError(529, "Overloaded"));

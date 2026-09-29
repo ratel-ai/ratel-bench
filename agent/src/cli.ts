@@ -2,8 +2,7 @@
 // corpus is the ingested MetaTool snapshot, which `pnpm -F @ratel-ai/benchmark
 // run-all` produces from a clean clone.
 //
-// Required env: at least one of OPENAI_API_KEY (for gpt-*) or
-// ANTHROPIC_API_KEY (for claude-* + the default LLM judge). Local models via
+// Direct OpenAI and Anthropic routes require their respective API keys. Local models via
 // Ollama need no key — the `ollama:` prefix routes through the local server's
 // OpenAI-compatible endpoint (http://localhost:11434/v1 by default). Examples:
 //   --models ollama:qwen3.5,ollama:gemma4
@@ -18,10 +17,9 @@
 //   --models 'https://models.example.com/v1#llama-3.1-70b' --model-api-key $TOKEN
 
 import { existsSync } from "node:fs";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createOpenAI, openai } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { config as loadEnv } from "dotenv";
+import { preflightBedrockModels } from "./bedrock-preflight.js";
 import { type ParsedArgs, parseArgs, parseRejudgeArgs, resolveRunTarget } from "./cli-args.js";
 import type { JudgePromptVariant } from "./judges/llm.js";
 import {
@@ -30,18 +28,19 @@ import {
   retrySettingsFromEnv,
   retrySettingsLine,
 } from "./llm-retry.js";
-import { type CustomEndpoint, parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import { DEFAULT_JUDGE_MODEL } from "./model-defaults.js";
+import { warmUpModels } from "./model-endpoint.js";
+import { resolveModel } from "./model-factory.js";
+import { parseModelIdentity } from "./model-identity.js";
 import { buildRunnerModels, capsLine, loadModelCatalog } from "./output-limits.js";
 import { resolveRepoPath } from "./paths.js";
 import { loadModelPricing } from "./pricing.js";
 import { rejudge } from "./rejudge.js";
 import { doneLines, rerunSettingsLine, runExitCode } from "./rerun.js";
-import { loadAgentRegistry, type RunnerConfig, run } from "./runner.js";
-import type { ResolvedModel } from "./types.js";
+import { loadAgentRegistry, type RunnerConfig, type RunnerSummary, run } from "./runner.js";
+import { selectVersion, validateSdk } from "./sdk/resolve.js";
 
 loadEnv();
-
-const OLLAMA_PREFIX = "ollama:";
 
 interface ResolveOpts {
   ollamaBaseURL: string;
@@ -50,74 +49,9 @@ interface ResolveOpts {
 }
 
 /**
- * Resolve an Ollama model id (e.g. `ollama:qwen3.5`) into a Vercel AI SDK
- * `LanguageModel` that talks to the local Ollama server via its OpenAI-
- * compatible endpoint. The model id stored on the cell row keeps the
- * `ollama:` prefix so reports clearly distinguish local vs cloud models.
- *
- * Tool calling depends on the underlying model's native function-calling
- * support — Qwen / Llama families work well; Gemma is hit-or-miss. If a
- * local-model cell consistently logs zero tool calls, the model likely
- * isn't function-calling and the run is mainly measuring "did the model
- * write a coherent answer." That's still informative — just call it out
- * when reading the report.
- */
-function resolveOllama(modelTag: string, baseURL: string): ResolvedModel {
-  // `.chat(...)` forces the legacy `/v1/chat/completions` wire format. The
-  // default factory call uses OpenAI's newer Responses API (typed items like
-  // `item_reference`), which Ollama's OpenAI-compat endpoint doesn't speak.
-  const provider = createOpenAI({ baseURL, apiKey: "ollama" });
-  return { id: `${OLLAMA_PREFIX}${modelTag}`, model: provider.chat(modelTag) };
-}
-
-/**
- * Resolve a user-hosted model addressed as `<baseURL>#<model-name>` (e.g. a
- * vLLM/TGI/LM Studio server on EC2). Reuses the OpenAI-compatible SDK client
- * pointed at the caller's URL, exactly like {@link resolveOllama}, with
- * `.chat(...)` to force the legacy `/v1/chat/completions` wire format that
- * self-hosted servers implement (they rarely speak OpenAI's Responses API).
- *
- * The full `<url>#<model>` string is kept as the id so report rows are
- * unambiguous. Auth is optional: a bearer token from --model-api-key /
- * AWS_BEDROCK_BEARER when set, else a dummy key (unauthenticated endpoints).
- */
-function resolveCustomEndpoint(raw: string, ep: CustomEndpoint, opts: ResolveOpts): ResolvedModel {
-  const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: opts.modelApiKey ?? "none" });
-  return { id: raw, model: provider.chat(ep.modelName) };
-}
-
-function resolveModel(modelId: string, opts: ResolveOpts): ResolvedModel {
-  const ep = parseCustomEndpoint(modelId);
-  if (ep) {
-    return resolveCustomEndpoint(modelId, ep, opts);
-  }
-  if (modelId.startsWith(OLLAMA_PREFIX)) {
-    return resolveOllama(modelId.slice(OLLAMA_PREFIX.length), opts.ollamaBaseURL);
-  }
-  if (modelId.startsWith("claude")) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY (set in .env or shell)`);
-    }
-    return { id: modelId, model: anthropic(modelId) };
-  }
-  if (modelId.startsWith("gpt")) {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error(`model ${modelId} requires OPENAI_API_KEY`);
-    }
-    return { id: modelId, model: openai(modelId) };
-  }
-  throw new Error(
-    `unknown model provider for: ${modelId} ` +
-      `(expected gpt-*, claude-*, ${OLLAMA_PREFIX}<tag>, or a user-hosted ` +
-      `<baseURL>#<model-name> URL)`,
-  );
-}
-
-/**
  * Pick the LLM judge model. `--no-judge` always wins. With `--judge-model X`
  * the user picks any provider (including `ollama:*`); without it the default
- * is Sonnet when ANTHROPIC_API_KEY is set, else no LLM judge (programmatic
- * judge still runs).
+ * Bedrock judge is enabled only when the Bedrock backend is configured.
  */
 function resolveJudge(parsed: ParsedArgs): LanguageModel | undefined {
   if (parsed.noJudge) return undefined;
@@ -127,7 +61,12 @@ function resolveJudge(parsed: ParsedArgs): LanguageModel | undefined {
       modelApiKey: parsed.modelApiKey,
     }).model;
   }
-  if (process.env.ANTHROPIC_API_KEY) return anthropic("claude-sonnet-4-6");
+  if (process.env.RATEL_LLM_BACKEND === "bedrock") {
+    return resolveModel(DEFAULT_JUDGE_MODEL, {
+      ollamaBaseURL: parsed.ollamaBaseURL,
+      modelApiKey: parsed.modelApiKey,
+    }).model;
+  }
   return undefined;
 }
 
@@ -152,7 +91,7 @@ function defaultRejudgeOutput(input: string, variant: JudgePromptVariant): strin
 async function rejudgeMain(argv: string[]): Promise<void> {
   const parsed = parseRejudgeArgs(argv);
   // `--no-judge`: AST-only re-score — no LLM model resolved or called.
-  const judgeModelId = parsed.noJudge ? undefined : (parsed.judgeModelId ?? "claude-sonnet-4-6");
+  const judgeModelId = parsed.noJudge ? undefined : (parsed.judgeModelId ?? DEFAULT_JUDGE_MODEL);
   const judgeModel = judgeModelId
     ? resolveModel(judgeModelId, {
         ollamaBaseURL: parsed.ollamaBaseURL,
@@ -166,6 +105,10 @@ async function rejudgeMain(argv: string[]): Promise<void> {
   );
   const corpusPath = resolveRepoPath(parsed.corpus);
 
+  if (judgeModelId && isBedrock(judgeModelId)) {
+    await preflightBedrockModels([judgeModelId], { requirePricing: true });
+  }
+
   console.log(
     judgeModelId
       ? `rejudging ${inputPath} with ${judgeModelId} (${parsed.promptVariant}) + AST → ${outputPath}`
@@ -176,6 +119,8 @@ async function rejudgeMain(argv: string[]): Promise<void> {
     outputPath,
     corpusPath,
     judgeModel,
+    judgeModelId,
+    pricing: loadModelPricing(),
     promptVariant: parsed.promptVariant,
     judgeMaxOutputTokens: parsed.judgeMaxOutputTokens,
   });
@@ -189,6 +134,8 @@ async function runMain(): Promise<void> {
   const registry = await loadAgentRegistry();
   const knownArms = [...registry.keys()];
   const parsed = parseArgs(process.argv.slice(2), knownArms);
+  selectVersion(parsed.sdkVersion ?? "");
+  await validateSdk();
   // Output path, control-cache sources and tiers (reuse is ON by default),
   // --ratel-version and the judge cap.
   const target = resolveRunTarget(parsed, {
@@ -218,10 +165,17 @@ async function runMain(): Promise<void> {
   // a cold start (no-op for cloud/ollama model ids).
   await warmUpModels(parsed.models, parsed.modelApiKey);
   const judgeModel = resolveJudge(parsed);
+  const bedrockIds = [
+    ...parsed.models,
+    ...(judgeModel ? [parsed.judgeModelId ?? DEFAULT_JUDGE_MODEL] : []),
+  ].filter(isBedrock);
+  if (bedrockIds.length) {
+    await preflightBedrockModels([...new Set(bedrockIds)], { requirePricing: true });
+  }
 
   if (!parsed.noJudge && !judgeModel) {
     console.warn(
-      "warn: no LLM judge configured (set ANTHROPIC_API_KEY or pass --judge-model); " +
+      "warn: no LLM judge configured (select a Bedrock backend or pass --judge-model); " +
         "programmatic judge still active.",
     );
   }
@@ -247,6 +201,7 @@ async function runMain(): Promise<void> {
     pricing: loadModelPricing(),
     force: parsed.force,
     judgeModel,
+    judgeModelId: judgeModel ? (parsed.judgeModelId ?? DEFAULT_JUDGE_MODEL) : undefined,
     noAst: parsed.noAst,
     seed: parsed.seed,
     concurrency: parsed.concurrency,
@@ -266,7 +221,17 @@ async function runMain(): Promise<void> {
   if (judgeModel && parsed.judgeMaxOutputTokens !== undefined) {
     console.log(`caps: judge=${parsed.judgeMaxOutputTokens}`);
   }
-  const summary = await run(cfg);
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  let summary: RunnerSummary;
+  try {
+    summary = await run({ ...cfg, signal: controller.signal });
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+  }
   for (const line of doneLines(summary)) console.log(line);
   // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
   const exitCode = runExitCode(summary);
@@ -286,3 +251,8 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+function isBedrock(modelId: string): boolean {
+  const identity = parseModelIdentity(modelId);
+  return identity.kind === "provider" && identity.provider === "bedrock";
+}

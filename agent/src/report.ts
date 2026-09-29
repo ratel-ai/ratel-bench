@@ -5,7 +5,7 @@
 // testable. The CLI wrapper (`report-cli.ts`) handles file reads/writes.
 
 import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
-import { cellKeyOf } from "./cell-key.js";
+import { cellKeyOf, modelRouteOfRow } from "./cell-key.js";
 import type { Arm, CellResult } from "./types.js";
 
 export interface RetrievalRow {
@@ -21,6 +21,7 @@ export interface RetrievalRow {
   actual_pool_size: number;
   /** BM25 engine version (= `ratel-ai-core` crate) this row was scored with. */
   ratel_ai_core_version?: string;
+  ratel_ai_core_resolved_version?: string;
   k: number;
   pool_size: number;
   gold_count: number;
@@ -131,6 +132,40 @@ export function provenance<T extends number | string>(values: Array<T | null>): 
   return distinct.values().next().value ?? null;
 }
 
+/** A report group must never average aliases that invoked different provider models. */
+export function assertSingleModelProvenance(
+  rows: readonly {
+    serving_provider?: string | null;
+    publisher?: string | null;
+    resolved_model?: string | null;
+    vertex_location?: string | null;
+  }[],
+  model: string,
+): void {
+  for (const field of [
+    "serving_provider",
+    "publisher",
+    "resolved_model",
+    "vertex_location",
+  ] as const) {
+    if (new Set(rows.map((row) => row[field] ?? null)).size > 1) {
+      throw new Error(
+        `report group ${model} has conflicting ${field}; split the runs by resolved route`,
+      );
+    }
+  }
+}
+
+function assertModelGroups(rows: readonly (CellResult & { model: string })[]): void {
+  const groups = new Map<string, CellResult[]>();
+  for (const row of rows) {
+    const group = groups.get(row.model) ?? [];
+    group.push(row);
+    groups.set(row.model, group);
+  }
+  for (const [model, group] of groups) assertSingleModelProvenance(group, model);
+}
+
 /**
  * A row's wall-clock time net of its retry backoff (`wall_ms − retry_wait_ms`):
  * only the backoff slept is removed; failed attempts' own call time (throttled,
@@ -208,6 +243,8 @@ export interface ArmModelStats {
   mean_total_tokens: number | null;
   mean_turns: number | null;
   mean_dollar_cost: number | null;
+  /** Non-errored cells with no known provider bill or route rate. */
+  unknown_cost_cells: number;
   /** Wall-clock, retry backoff included (what the savings compare). */
   mean_wall_ms: number | null;
   /** Same, net of retry backoff (`wall_ms − retry_wait_ms`; legacy rows: no wait). */
@@ -230,6 +267,7 @@ interface ScenarioStats {
   mean_total: number | null;
   mean_turns: number | null;
   mean_dollar: number | null;
+  unknown_costs: number;
   mean_wall: number | null;
   mean_wall_net: number | null;
   /** Number of runs aggregated for this scenario. */
@@ -260,9 +298,11 @@ interface ScenarioStats {
 export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelStats[] {
   const cat = (c: Pick<CellResult, "category">): string =>
     coarsen ? coarseCategory(categoryOf(c)) : categoryOf(c);
+  const routed = cells.map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
+  assertModelGroups(routed);
   // Stage 1: per (scenario, arm, model, pool_size) → per-scenario means.
   const byScenario = new Map<string, CellResult[]>();
-  for (const c of cells) {
+  for (const c of routed) {
     const key = `${c.scenario_id}::${c.arm}::${c.model}::${cat(c)}::${c.pool_size}`;
     const arr = byScenario.get(key) ?? [];
     arr.push(c);
@@ -294,7 +334,10 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       mean_input: meanOrNull(clean.map((c) => c.input_tokens)),
       mean_total: meanOrNull(clean.map((c) => c.total_tokens)),
       mean_turns: meanOrNull(clean.map((c) => c.turns)),
-      mean_dollar: meanOrNull(clean.map((c) => c.dollar_cost)),
+      mean_dollar: meanOrNull(
+        clean.map((c) => c.dollar_cost).filter((cost): cost is number => cost !== null),
+      ),
+      unknown_costs: clean.filter((c) => c.dollar_cost === null).length,
       mean_wall: meanOrNull(clean.map((c) => c.wall_ms)),
       mean_wall_net: meanOrNull(clean.map(netWallMs)),
       runs: arr.length,
@@ -329,6 +372,7 @@ export function statsByArmModel(cells: CellResult[], coarsen = true): ArmModelSt
       mean_total_tokens: meanOfPresent(ps.map((p) => p.mean_total)),
       mean_turns: meanOfPresent(ps.map((p) => p.mean_turns)),
       mean_dollar_cost: meanOfPresent(ps.map((p) => p.mean_dollar)),
+      unknown_cost_cells: ps.reduce((total, p) => total + p.unknown_costs, 0),
       mean_wall_ms: meanOfPresent(ps.map((p) => p.mean_wall)),
       mean_wall_net_ms: meanOfPresent(ps.map((p) => p.mean_wall_net)),
     });
@@ -620,7 +664,8 @@ export interface FailureCounts {
 
 export function failureTaxonomy(cells: CellResult[]): FailureCounts[] {
   const groups = new Map<string, CellResult[]>();
-  for (const c of cells) {
+  for (const source of cells) {
+    const c = { ...source, model: modelRouteOfRow(source) };
     const key = `${c.arm}::${c.model}::${coarseCategory(categoryOf(c))}::${c.pool_size}`;
     const arr = groups.get(key) ?? [];
     arr.push(c);
@@ -700,7 +745,9 @@ export function renderReport(args: {
   generatedAt?: Date;
 }): string {
   const date = (args.generatedAt ?? new Date()).toISOString();
-  const latest = supersede(args.cells, labelledCellKeyOf);
+  const routed = args.cells.map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
+  assertModelGroups(routed.filter((cell) => !isInfraError(cell)));
+  const latest = supersede(routed, labelledCellKeyOf);
   const cells = latest.filter((c) => !isInfraError(c));
   const stats = statsByArmModel(cells);
   const savings = savingsByModel(cells);
@@ -714,14 +761,14 @@ export function renderReport(args: {
   lines.push("");
   lines.push(`Cells: **${cells.length}**, retrieval rows: **${args.retrieval.length}**.`);
   const excluded = latest.length - cells.length;
-  const superseded = args.cells.length - latest.length;
+  const superseded = routed.length - latest.length;
   if (excluded > 0 || superseded > 0) {
     lines.push(
       `Not counted: **${excluded}** infra-errored (transient/access) excluded, ` +
         `**${superseded}** superseded by a later row of the same cell.`,
     );
   }
-  const split = versionSplitCells(args.cells).length;
+  const split = versionSplitCells(routed).length;
   if (split > 0) {
     lines.push(
       `Warning: **${split}** ${split === 1 ? "cell appears" : "cells appear"} under more than one ` +
@@ -750,6 +797,14 @@ export function renderReport(args: {
     );
   }
   lines.push("");
+  const unknownCost = stats.filter((s) => s.unknown_cost_cells > 0);
+  if (unknownCost.length > 0) {
+    lines.push("Cost unknown for non-errored cells:");
+    for (const s of unknownCost) {
+      lines.push(`- ${s.model} / ${s.arm} / ${s.category}: ${s.unknown_cost_cells}`);
+    }
+    lines.push("");
+  }
 
   // 2. Token + wall savings
   lines.push("## Token savings (ratel vs control)");

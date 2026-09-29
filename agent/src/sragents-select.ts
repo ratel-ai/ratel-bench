@@ -18,20 +18,27 @@
 // agent.jsonl. Resume, retry rounds, the breaker and the final `done:` line work as
 // in `pnpm start` (see `rerun.ts`, `createBreaker`).
 
+import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { anthropic } from "@ai-sdk/anthropic";
-import { createOpenAI, openai } from "@ai-sdk/openai";
 import { generateObject, type LanguageModelUsage, NoObjectGeneratedError, RetryError } from "ai";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
+import { preflightBedrockModels } from "./bedrock-preflight.js";
+import {
+  BudgetContentionError,
+  BudgetLimitedError,
+  type BudgetSnapshot,
+  type CampaignBudget,
+} from "./campaign-budget.js";
 import {
   classifyError,
   FatalProviderError,
   isRerunnable,
   type RerunPolicy,
 } from "./cell-errors.js";
+import { modelRouteOfRow } from "./cell-key.js";
 import { parseOutputCapFlag } from "./cli-args.js";
 import { appendJsonl, readJsonl, truncateJsonl } from "./io.js";
 import {
@@ -39,11 +46,13 @@ import {
   breakerThresholdFromEnv,
   cellRetry,
   createBreaker,
+  DEFAULT_RETRY_SETTINGS,
   type RetrySettings,
   retrySettingsFromEnv,
   retrySettingsLine,
+  SpendJournalError,
 } from "./llm-retry.js";
-import { dollarCost, providerOf } from "./metering.js";
+import { dollarCost, type PricingTable, providerOf, xaiCostTicks } from "./metering.js";
 import {
   buildRunnerModels,
   cacheTier,
@@ -57,11 +66,14 @@ import {
 } from "./output-limits.js";
 import { loadModelPricing } from "./pricing.js";
 
-// Per-model rates from models.json (backend-aware, read once). Empty when
-// unpriced → $0 cells and the dollar cap simply doesn't bound the run.
+// Per-model rates from models.json (backend-aware, read once). Unpriced calls
+// remain unknown in the journal; the legacy dollar cap cannot bound them.
 const PRICING = loadModelPricing();
 
-import { parseCustomEndpoint, warmUpModels } from "./model-endpoint.js";
+import { DEFAULT_SRAGENTS_MODELS } from "./model-defaults.js";
+import { warmUpModels } from "./model-endpoint.js";
+import { resolveModel } from "./model-factory.js";
+import { canonicalModelList, parseModelIdentity } from "./model-identity.js";
 import { resolveRepoPath } from "./paths.js";
 import { parseTimerMs } from "./positive-int.js";
 import {
@@ -85,19 +97,27 @@ import {
   resumeLine,
   runExitCode,
   runRounds,
+  summarizeRunCoverage,
   tallyRow,
 } from "./rerun.js";
+import {
+  openSpendLedger,
+  reconcileCampaignBudget,
+  type SpendLedger,
+  type SpendSummary,
+  spendRecorder,
+} from "./spend-ledger.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
-import type { ResolvedModel, RunnerModel } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import type { RunnerModel } from "./types.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 loadEnv(); // pick up agent/.env (provider keys), mirroring cli.ts
 
-const OLLAMA_PREFIX = "ollama:";
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 const ALL_ARMS: SragentsArm[] = ["control-baseline", "ratel-full", "control-oracle"];
 /** `--timeout-ms` default: active time per selection call (retry sleeps don't count). */
 const DEFAULT_TIMEOUT_MS = 300_000;
+const SR_SPEND_SCOPE = `sragents/${RATEL_AI_CORE_VERSION}`;
 /**
  * `RERUN_FLAGS`, spelled out (the type keeps them in sync): ratel-bench-aws
  * `bench-flags.mjs` passes a flag to SR only when this file holds it as a quoted
@@ -113,36 +133,6 @@ const SR_RERUN_FLAGS: typeof RERUN_FLAGS = [
 /** Control arms don't use Ratel retrieval, so their cells are version-independent
  *  and reusable across ratel versions (re-stamped to the current version). */
 const CACHEABLE_ARMS = new Set<SragentsArm>(["control-baseline", "control-oracle"]);
-
-// ── Model resolution (mirrors cli.ts:resolveModel, kept local to avoid importing
-//    the campaign CLI). Output caps are attached afterwards (`buildRunnerModels`). ──
-
-function resolveModel(modelId: string, ollamaBaseURL: string, modelApiKey?: string): ResolvedModel {
-  // User-hosted `<baseURL>#<model>` endpoint (mirrors cli.ts:resolveCustomEndpoint).
-  const ep = parseCustomEndpoint(modelId);
-  if (ep) {
-    const provider = createOpenAI({ baseURL: ep.baseURL, apiKey: modelApiKey || "none" });
-    return { id: modelId, model: provider.chat(ep.modelName) };
-  }
-  if (modelId.startsWith(OLLAMA_PREFIX)) {
-    const provider = createOpenAI({ baseURL: ollamaBaseURL, apiKey: "ollama" });
-    return { id: modelId, model: provider.chat(modelId.slice(OLLAMA_PREFIX.length)) };
-  }
-  if (modelId.startsWith("claude")) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error(`model ${modelId} requires ANTHROPIC_API_KEY`);
-    }
-    return { id: modelId, model: anthropic(modelId) };
-  }
-  if (modelId.startsWith("gpt")) {
-    if (!process.env.OPENAI_API_KEY) throw new Error(`model ${modelId} requires OPENAI_API_KEY`);
-    return { id: modelId, model: openai(modelId) };
-  }
-  throw new Error(
-    `unknown model provider for: ${modelId} ` +
-      `(expected gpt-*, claude-*, ollama:<tag>, or a user-hosted <baseURL>#<model-name> URL)`,
-  );
-}
 
 // ── Deterministic shuffle (so the baseline's neutral order doesn't leak BM25 rank) ──
 
@@ -331,12 +321,18 @@ export interface SelectArgs {
   query: string;
   model: RunnerModel;
   runIndex: number;
+  attempt?: number;
   seed: number;
   catalog: Map<string, { name: string; description: string }>;
   /** `--timeout-ms`: the call's active-time deadline (abortable; retry sleeps don't count). */
   timeoutMs: number;
   /** Retry policy + backstop grace; defaults to `DEFAULT_RETRY_SETTINGS`. */
   retry?: RetrySettings;
+  spendLedger?: SpendLedger;
+  campaignBudget?: CampaignBudget;
+  spendRunId?: string;
+  spendScope?: string;
+  pricing?: PricingTable;
 }
 
 /**
@@ -348,6 +344,8 @@ export interface SelectArgs {
  * metering, carrying the call's spend (`dollarCost`).
  */
 export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCell> {
+  if (args.campaignBudget && !args.spendLedger)
+    throw new Error("campaign preflight: spend journal is required");
   const { ids, poolSize } = armCandidates(args.arm, args.sc, args.seed);
   const candidates = ids
     .map((id) => ({ id, ...(args.catalog.get(id) ?? { name: id, description: "" }) }))
@@ -358,11 +356,16 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     run_type: "skill_selection",
     generated_at: new Date().toISOString(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+    ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
     scenario_id: args.sc.scenarioId,
     category: args.sc.category,
     arm: args.arm,
     model: args.model.id,
     provider: providerOf(args.model.model),
+    serving_provider: args.model.servingProvider,
+    publisher: args.model.publisher,
+    resolved_model: args.model.resolvedModel,
+    vertex_location: args.model.vertexLocation,
     run_index: args.runIndex,
     pool_size: poolSize,
     candidate_count: candidates.length,
@@ -371,22 +374,46 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     input_tokens: 0,
     output_tokens: 0,
     total_tokens: 0,
-    dollar_cost: 0,
+    dollar_cost: null,
+    cost_source: "unknown",
     wall_ms: 0,
     error: null,
     cache_source: "live",
     max_output_tokens: args.model.maxOutputTokens,
   };
 
+  const retrySettings: RetrySettings = { ...(args.retry ?? DEFAULT_RETRY_SETTINGS) };
+  if (args.spendLedger) {
+    retrySettings.attempt = spendRecorder(
+      args.spendLedger,
+      {
+        runId: args.spendRunId,
+        scope: args.spendScope ?? SR_SPEND_SCOPE,
+        kind: "sragents",
+        attemptOrdinal: args.attempt ?? 1,
+        cellKey: taskKey(args),
+        model: args.model.id,
+        servingProvider: args.model.servingProvider,
+        publisher: args.model.publisher,
+        resolvedModel: args.model.resolvedModel,
+        vertexLocation: args.model.vertexLocation,
+        adapterProvider:
+          typeof args.model.model === "string" ? undefined : args.model.model.provider,
+        adapterModel: typeof args.model.model === "string" ? undefined : args.model.model.modelId,
+        price: (args.pricing ?? PRICING)[args.model.id] ?? null,
+      },
+      args.campaignBudget,
+    );
+  }
   const retry = cellRetry(
     args.model.model,
     args.timeoutMs,
-    args.retry,
+    args.spendLedger ? retrySettings : args.retry,
     `${args.sc.scenarioId} · ${args.arm} · ${args.model.id} · #${args.runIndex}`,
   );
   const startedAt = Date.now();
   try {
-    const { object, usage, finishReason } = await retry.run(() =>
+    const { object, usage, finishReason, providerMetadata } = await retry.run(() =>
       generateObject({
         model: retry.model,
         schema: SelectionSchema,
@@ -402,11 +429,17 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       ...retry.rowFields(),
       // Drop hallucinated ids the model wasn't shown.
       selected_skill_ids: object.selected_skill_ids.filter((id) => candidateIdSet.has(id)),
-      ...usageFields(args.model.id, usage),
+      ...usageFields(args.model.id, usage, providerMetadata),
       finish_reason: finishReason,
       wall_ms: Date.now() - startedAt,
     };
   } catch (err) {
+    if (
+      err instanceof SpendJournalError ||
+      err instanceof BudgetLimitedError ||
+      err instanceof BudgetContentionError
+    )
+      throw err;
     // An unparseable/invalid object still cost a full call: NoObjectGeneratedError
     // carries its usage and finish reason (`length` = truncated at the output cap:
     // an `outcome` error, final — never re-run or excluded). generateObject raises
@@ -429,7 +462,8 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
     };
     if (retry.stats.fatal) {
       const fatal = err instanceof FatalProviderError ? err : new FatalProviderError(err);
-      fatal.dollarCost = row.dollar_cost;
+      fatal.dollarCost = row.dollar_cost ?? 0;
+      fatal.unknownCost = row.dollar_cost === null;
       throw fatal;
     }
     return row;
@@ -440,16 +474,44 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
 function usageFields(
   modelId: string,
   usage: LanguageModelUsage | undefined,
-): Pick<SragentsSelectCell, "input_tokens" | "output_tokens" | "total_tokens" | "dollar_cost"> {
+  providerMetadata?: unknown,
+): Pick<
+  SragentsSelectCell,
+  | "input_tokens"
+  | "output_tokens"
+  | "total_tokens"
+  | "cached_input_tokens"
+  | "cache_creation_tokens"
+  | "dollar_cost"
+  | "provider_cost_ticks"
+  | "cost_source"
+> {
   const input = usage?.inputTokens ?? 0;
   const output = usage?.outputTokens ?? 0;
-  const cachedInput = usage?.cachedInputTokens ?? 0;
+  const cachedInput = usage?.inputTokenDetails?.cacheReadTokens ?? usage?.cachedInputTokens ?? 0;
+  const cacheCreation = usage?.inputTokenDetails?.cacheWriteTokens ?? 0;
+  const ticks = modelId.startsWith("xai/") ? xaiCostTicks(providerMetadata, usage) : undefined;
   return {
     input_tokens: input,
     output_tokens: output,
     total_tokens: usage?.totalTokens ?? input + output,
-    // generateObject's usage doesn't surface cache-creation tokens separately.
-    dollar_cost: dollarCost(modelId, { input, output, cachedInput, cacheCreation: 0 }, PRICING),
+    cached_input_tokens: cachedInput,
+    cache_creation_tokens: cacheCreation,
+    dollar_cost:
+      ticks === undefined
+        ? dollarCost(modelId, { input, output, cachedInput, cacheCreation }, PRICING)
+        : ticks / 10_000_000_000,
+    cost_source:
+      ticks !== undefined
+        ? "provider"
+        : PRICING[modelId] || modelId.startsWith("ollama:")
+          ? "estimate"
+          : "unknown",
+    ...(modelId.startsWith("xai/")
+      ? {
+          ...(ticks === undefined ? {} : { provider_cost_ticks: ticks }),
+        }
+      : {}),
   };
 }
 
@@ -468,6 +530,8 @@ export interface Task {
 export interface CampaignOptions {
   concurrency: number;
   dollarCap: number;
+  /** Optional stricter command cap for a funded campaign. */
+  campaignLocalCapUsd?: number;
   seed: number;
   quiet: boolean;
   onCell: (c: SragentsSelectCell) => void;
@@ -478,10 +542,21 @@ export interface CampaignOptions {
   rerun: RerunSettings;
   /** The breaker's streak (`RATEL_ABORT_AFTER_CONSECUTIVE_ERRORS`; 0 = off). */
   abortAfterConsecutiveErrors: number;
+  spendLedger?: SpendLedger;
+  campaignBudget?: CampaignBudget;
+  spendRunId?: string;
+  /** Start a new append-only spend generation, ignoring prior cap spend. */
+  force?: boolean;
+  /** Explicit generation selected by the CLI shell. */
+  spendScope?: string;
+  pricing?: PricingTable;
+  signal?: AbortSignal;
 }
 
 /** The campaign's share of the `done:` counts (the cache and resume add the rest). */
-export type CampaignSummary = Omit<DoneSummary, "cells_cached" | "cells_skipped">;
+export type CampaignSummary = Omit<DoneSummary, "cells_cached" | "cells_skipped"> & {
+  campaignBudget?: BudgetSnapshot;
+};
 
 type QueuedTask = Task & { attempt: number };
 
@@ -494,24 +569,56 @@ type QueuedTask = Task & { attempt: number };
  * rounds re-run the rerunnable cells under the same cap.
  */
 export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise<CampaignSummary> {
+  if (
+    opts.campaignLocalCapUsd !== undefined &&
+    (!Number.isFinite(opts.campaignLocalCapUsd) || opts.campaignLocalCapUsd <= 0)
+  )
+    throw new Error("campaign local cap must be positive and finite");
+  if (opts.campaignBudget && !opts.spendLedger)
+    throw new Error("campaign preflight: spend journal is required");
+  opts.campaignBudget?.preflight(
+    tasks.map((task) => ({
+      model: task.model.id,
+      price: (opts.pricing ?? PRICING)[task.model.id] ?? null,
+      requestedOutputTokens: task.model.maxOutputTokens ?? undefined,
+    })),
+  );
+  if (opts.campaignBudget && opts.spendLedger)
+    await reconcileCampaignBudget(opts.spendLedger, opts.campaignBudget);
   const breaker = createBreaker(opts.abortAfterConsecutiveErrors);
   const retry = { ...opts.retry, rerunLabel: rerunLabel(opts.rerun) };
+  const runId = opts.spendRunId ?? randomUUID();
+  const spendScope =
+    opts.spendScope ??
+    (opts.force
+      ? opts.spendLedger?.startGeneration(SR_SPEND_SCOPE)
+      : opts.spendLedger?.currentScope(SR_SPEND_SCOPE)) ??
+    SR_SPEND_SCOPE;
   const tally = newRunTally();
-  let dollars = 0;
+  let dollars = opts.spendLedger?.summary(spendScope).knownUsd ?? 0;
+  let unknownCostCells = 0;
   let capHit = false;
+  const effectiveDollarCap = opts.campaignBudget
+    ? (opts.campaignLocalCapUsd ?? Number.POSITIVE_INFINITY)
+    : opts.dollarCap;
   let done = 0;
   let total = tasks.length;
+  const emitted: SragentsSelectCell[] = [];
 
   const spend = (dollarCost: number): void => {
-    dollars += dollarCost;
-    if (dollars >= opts.dollarCap) capHit = true;
+    dollars = opts.spendLedger
+      ? opts.spendLedger.summary(spendScope).knownUsd
+      : dollars + dollarCost;
+    if (dollars >= effectiveDollarCap) capHit = true;
   };
 
   const runPass = async (queue: QueuedTask[]): Promise<QueuedTask[]> => {
     const retryable: QueuedTask[] = [];
     let i = 0;
+    let dispatchStopped = false;
     const pick = (): QueuedTask | null => {
-      if (dollars >= opts.dollarCap) {
+      if (dispatchStopped || capHit || opts.signal?.aborted) return null;
+      if (dollars >= effectiveDollarCap) {
         capHit = true;
         return null;
       }
@@ -523,56 +630,79 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
     };
 
     async function worker(): Promise<void> {
-      while (true) {
-        const t = pick();
-        if (!t) return;
-        let cell: SragentsSelectCell;
-        try {
-          cell = await selectForCell({
-            ...t,
-            seed: opts.seed,
-            catalog: opts.catalog,
-            timeoutMs: opts.timeoutMs,
-            retry,
-          });
-        } catch (err) {
-          if (!(err instanceof FatalProviderError)) throw err;
-          breaker.fatal(t.model.id, err);
-          spend(err.dollarCost);
+      try {
+        while (true) {
+          const t = pick();
+          if (!t) return;
+          let cell: SragentsSelectCell;
+          try {
+            cell = await selectForCell({
+              ...t,
+              seed: opts.seed,
+              catalog: opts.catalog,
+              timeoutMs: opts.timeoutMs,
+              retry,
+              spendLedger: opts.spendLedger,
+              campaignBudget: opts.campaignBudget,
+              spendRunId: runId,
+              spendScope,
+              pricing: opts.pricing,
+            });
+          } catch (err) {
+            if (err instanceof BudgetLimitedError) {
+              capHit = true;
+              continue;
+            }
+            if (!(err instanceof FatalProviderError)) throw err;
+            breaker.fatal(t.model.id, err);
+            if (err.unknownCost) unknownCostCells++;
+            spend(err.dollarCost);
+            if (!opts.quiet) {
+              console.log(
+                `${t.sc.scenarioId} ${t.arm}/${t.model.id} → FATAL ${err.message} (no row; model aborted)`,
+              );
+            }
+            continue;
+          }
+          // A peer cell may have aborted this model while this call was in flight.
+          // Charge its spend, but leave the aborted model's output untouched.
+          if (breaker.isAborted(t.model.id)) {
+            if (cell.dollar_cost === null) unknownCostCells++;
+            spend(cell.dollar_cost ?? 0);
+            continue;
+          }
+          cell.attempt = t.attempt;
+          cell.run_id = runId;
+          if (cell.dollar_cost === null) unknownCostCells++;
+          spend(cell.dollar_cost ?? 0);
+          opts.onCell(cell);
+          emitted.push(cell);
+          done++;
+          tallyRow(tally, cell);
+          breaker.record(t.model.id, cell);
+          const outcome = rerunOutcome(cell, t.attempt, opts.rerun);
+          if (outcome === "retry") retryable.push(t);
+          else if (outcome === "exhausted") tally.exhausted++;
           if (!opts.quiet) {
+            const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
             console.log(
-              `${t.sc.scenarioId} ${t.arm}/${t.model.id} → FATAL ${err.message} (no row; model aborted)`,
+              `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
+                `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
+                `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
             );
           }
-          continue;
         }
-        // A peer cell may have aborted this model while this call was in flight.
-        // Charge its spend, but leave the aborted model's output untouched.
-        if (breaker.isAborted(t.model.id)) {
-          spend(cell.dollar_cost);
-          continue;
-        }
-        cell.attempt = t.attempt;
-        spend(cell.dollar_cost);
-        opts.onCell(cell);
-        done++;
-        tallyRow(tally, cell);
-        breaker.record(t.model.id, cell);
-        const outcome = rerunOutcome(cell, t.attempt, opts.rerun);
-        if (outcome === "retry") retryable.push(t);
-        else if (outcome === "exhausted") tally.exhausted++;
-        if (!opts.quiet) {
-          const hit = cell.selected_skill_ids.some((id) => cell.gold_skill_ids.includes(id));
-          console.log(
-            `[${done}/${total}] ${t.sc.scenarioId} ${t.arm}/${t.model.id} ` +
-              `→ ${cell.selected_skill_ids.length} picked, gold=${cell.gold_skill_ids.length} ` +
-              `${cell.error ? `ERROR ${cell.error}` : hit ? "hit" : "miss"} ($${dollars.toFixed(3)})`,
-          );
-        }
+      } catch (error) {
+        dispatchStopped = true;
+        throw error;
       }
     }
 
-    await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()));
+    const workers = await Promise.allSettled(
+      Array.from({ length: Math.max(1, opts.concurrency) }, () => worker()),
+    );
+    const failed = workers.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
     return retryable;
   };
 
@@ -583,13 +713,27 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
       total += queue.length;
       return runPass(queue);
     },
-    (t) => !capHit && !breaker.isAborted(t.model.id),
+    (t) => !capHit && !opts.signal?.aborted && !breaker.isAborted(t.model.id),
   );
 
+  const spendSummary = opts.spendLedger?.summary(spendScope);
+  const stoppedReason = opts.signal?.aborted
+    ? "interrupted"
+    : (breaker.stopped() ?? (capHit ? "global_cap" : "completed"));
   return {
     cells_run: done,
+    ...(opts.campaignBudget ? { campaignBudget: await opts.campaignBudget.snapshot() } : {}),
     total_dollars: dollars,
-    stopped_reason: breaker.stopped() ?? (capHit ? "global_cap" : "completed"),
+    ...(spendSummary ? { spend: spendSummary } : {}),
+    coverage: summarizeRunCoverage(
+      tasks.map(taskKey),
+      emitted,
+      rowKey,
+      stoppedReason,
+      spendSummary,
+    ),
+    unknown_cost_cells: unknownCostCells,
+    stopped_reason: stoppedReason,
     cap_hit: capHit,
     ...tally,
     aborted: breaker.aborted(),
@@ -602,10 +746,30 @@ export async function runCampaign(tasks: Task[], opts: CampaignOptions): Promise
  */
 export function campaignDoneSummary(
   result: CampaignSummary,
-  drained: { reused: number; skipped: number; resume: ResumeCounts },
+  drained: {
+    reused: number;
+    skipped: number;
+    resume: ResumeCounts;
+    requestedTasks?: readonly Task[];
+    rows?: readonly SragentsSelectCell[];
+    spend?: SpendSummary;
+  },
 ): DoneSummary {
+  const spend = drained.spend ?? result.spend;
   return {
     ...result,
+    ...(spend ? { spend } : {}),
+    ...(drained.requestedTasks && drained.rows
+      ? {
+          coverage: summarizeRunCoverage(
+            drained.requestedTasks.map(taskKey),
+            drained.rows,
+            rowKey,
+            result.stopped_reason,
+            spend,
+          ),
+        }
+      : {}),
     cells_cached: drained.reused,
     cells_skipped: drained.skipped,
     requeued: result.requeued + requeuedTotal(drained.resume),
@@ -618,6 +782,14 @@ export function campaignDoneSummary(
 function arg(name: string, fallback: string): string {
   const idx = process.argv.indexOf(name);
   return idx >= 0 && process.argv[idx + 1] ? process.argv[idx + 1] : fallback;
+}
+
+export function sragentsModels(argv: readonly string[]): string[] {
+  const index = argv.indexOf("--models");
+  if (index < 0) return [...DEFAULT_SRAGENTS_MODELS];
+  const raw = argv[index + 1];
+  if (raw === undefined || raw.startsWith("--")) throw new Error("--models requires model IDs");
+  return canonicalModelList(raw);
 }
 
 /** Version-agnostic identity for a control cell (reused across ratel versions). */
@@ -660,8 +832,9 @@ export function readControlIndex(
     for (const c of readJsonl<SragentsSelectCell>(path)) {
       if (!CACHEABLE_ARMS.has(c.arm as SragentsArm)) continue;
       if (isRerunnable(c) || isRerunnable(c, policy)) continue;
-      const key = rowKey(c);
-      const best = preferCacheRow(reuse.get(key), c, harness.get(c.model), allowLegacy);
+      const route = harness.has(c.model) ? c.model : modelRouteOfRow(c);
+      const key = controlKey(c.scenario_id, c.arm, route, c.pool_size, c.run_index);
+      const best = preferCacheRow(reuse.get(key), c, harness.get(route), allowLegacy);
       if (best) reuse.set(key, best);
     }
   }
@@ -732,6 +905,7 @@ export function drainControlCache(
     force: boolean;
     allowLegacyCache: boolean;
     rerun?: Pick<RerunSettings, "policy" | "maxAttempts">;
+    runId?: string;
   },
 ): { liveTasks: Task[]; reused: number; legacy: number; skipped: number; resume: ResumeCounts } {
   if (opts.force) {
@@ -746,7 +920,8 @@ export function drainControlCache(
   const { pending, skipped, resume, requeued } = planCells(tasks, current, rerun);
   checkOutputCaps(capGuardRows(current, rowKey, requeued), tasks, allowLegacy);
   const harness = harnessByModel(tasks.map((t) => t.model));
-  const tierOf = (c: SragentsSelectCell) => cacheTier(c, harness.get(c.model), allowLegacy);
+  const tierOf = (c: SragentsSelectCell) =>
+    cacheTier(c, harness.get(harness.has(c.model) ? c.model : modelRouteOfRow(c)), allowLegacy);
   const reuseIndex = readControlIndex([opts.outputPath], harness, allowLegacy, rerun.policy);
   const ext = readControlIndex(
     opts.cachePaths.filter((p) => p !== opts.outputPath),
@@ -768,8 +943,11 @@ export function drainControlCache(
       if (prior) {
         appendJsonl(opts.outputPath, {
           ...prior,
+          model: t.model.id,
           ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+          ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
           generated_at: new Date().toISOString(),
+          ...(opts.runId ? { run_id: opts.runId } : {}),
           cache_source: "reused",
         });
         reused++;
@@ -884,8 +1062,9 @@ async function main(): Promise<void> {
   );
   const catalogPath = resolveRepoPath(arg("--catalog", "test-data/sragents-skills.jsonl"));
   const outputPath = resolveRepoPath(arg("--output", "results/raw/sragents/agent.jsonl"));
+  const spendLedger = openSpendLedger(`${outputPath}.spend.jsonl`);
   const arms = arg("--arms", ALL_ARMS.join(",")).split(",") as SragentsArm[];
-  const models = arg("--models", "gpt-5.4-mini").split(",");
+  const models = sragentsModels(process.argv);
   const poolSize = Number(arg("--pool-size", "50"));
   const ratelTopK = Number(arg("--top-k", "10"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all
@@ -922,10 +1101,19 @@ async function main(): Promise<void> {
   }
 
   // Caps are attached after resolution, so no resolver branch can skip them.
-  const resolved = buildRunnerModels(models, (m) => resolveModel(m, ollamaBaseURL, modelApiKey), {
-    catalog: loadModelCatalog(),
-    override: caps.override,
+  const resolved = buildRunnerModels(
+    models,
+    (m) => resolveModel(m, { ollamaBaseURL, modelApiKey }),
+    {
+      catalog: loadModelCatalog(),
+      override: caps.override,
+    },
+  );
+  const bedrockIds = models.filter((id) => {
+    const identity = parseModelIdentity(id);
+    return identity.kind === "provider" && identity.provider === "bedrock";
   });
+  if (bedrockIds.length) await preflightBedrockModels(bedrockIds, { requirePricing: true });
   console.log(capsLine(resolved, caps.override));
   console.log(retrySettingsLine(retry, timeoutMs));
   console.log(breakerLine(abortAfterConsecutiveErrors));
@@ -959,6 +1147,7 @@ async function main(): Promise<void> {
   // results); `--cache-source a,b,…` overrides them. `--force`/`--fresh` truncates the
   // output, disables reuse and re-runs everything.
   const force = process.argv.includes("--force") || process.argv.includes("--fresh");
+  const runId = randomUUID();
   const cachePaths = sragentsCachePaths(
     process.argv.includes("--cache-source") ? arg("--cache-source", "") : undefined,
     outputPath,
@@ -969,7 +1158,11 @@ async function main(): Promise<void> {
     force,
     allowLegacyCache: caps.allowLegacyCache,
     rerun,
+    runId,
   });
+  const spendScope = force
+    ? spendLedger.startGeneration(SR_SPEND_SCOPE)
+    : spendLedger.currentScope(SR_SPEND_SCOPE);
 
   console.log(
     `sragents-select: ${tasks.length} cells ` +
@@ -984,19 +1177,33 @@ async function main(): Promise<void> {
   const resumed = resumeLine(resume);
   if (resumed) console.log(resumed);
 
-  const result = await runCampaign(liveTasks, {
-    concurrency,
-    dollarCap,
-    seed,
-    quiet,
-    catalog,
-    timeoutMs,
-    // One line per retry, unless --quiet.
-    retry: quiet ? retry : { ...retry, log: console.log },
-    rerun,
-    abortAfterConsecutiveErrors,
-    onCell: (c) => appendJsonl(outputPath, c),
-  });
+  const controller = new AbortController();
+  const interrupt = () => controller.abort();
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", interrupt);
+  let result: CampaignSummary;
+  try {
+    result = await runCampaign(liveTasks, {
+      concurrency,
+      dollarCap,
+      seed,
+      quiet,
+      catalog,
+      timeoutMs,
+      // One line per retry, unless --quiet.
+      retry: quiet ? retry : { ...retry, log: console.log },
+      rerun,
+      abortAfterConsecutiveErrors,
+      onCell: (c) => appendJsonl(outputPath, c),
+      spendLedger,
+      spendRunId: runId,
+      spendScope,
+      signal: controller.signal,
+    });
+  } finally {
+    process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
+  }
 
   const capped = result.cap_hit;
   console.log(
@@ -1005,7 +1212,33 @@ async function main(): Promise<void> {
       `($${result.total_dollars.toFixed(3)}${capped ? `, STOPPED at $${dollarCap} cap` : ""})`,
   );
   // The same `done:` line (and `aborted:` lines) as `pnpm start`, for the AWS runner.
-  const summary = campaignDoneSummary(result, { reused, skipped, resume });
+  const outputRows = readJsonl<SragentsSelectCell>(outputPath).filter(
+    (row) => row.ratel_ai_core_version === RATEL_AI_CORE_VERSION,
+  );
+  const requestedKeys = new Set(tasks.map(taskKey));
+  const untrackedRows = outputRows.filter(
+    (row) =>
+      requestedKeys.has(rowKey(row)) &&
+      row.cache_source !== "reused" &&
+      (!row.run_id || !spendLedger.hasRun(row.run_id, spendScope)),
+  ).length;
+  const ledgerSummary = spendLedger.summary(spendScope);
+  const spend = {
+    ...ledgerSummary,
+    untrackedRows,
+    completeness:
+      ledgerSummary.completeness === "partial" || untrackedRows > 0
+        ? ("partial" as const)
+        : ("complete" as const),
+  };
+  const summary = campaignDoneSummary(result, {
+    reused,
+    skipped,
+    resume,
+    requestedTasks: tasks,
+    rows: outputRows,
+    spend,
+  });
   for (const line of doneLines(summary)) console.log(line);
   // A model the breaker aborted (gated, daily cap, outage) fails the run, after the summary.
   const exitCode = runExitCode(summary);

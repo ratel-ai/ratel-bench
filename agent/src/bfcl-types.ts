@@ -28,6 +28,7 @@ export interface GoldSimilarity {
 export interface BfclRetrievalRow {
   generated_at: string;
   ratel_ai_core_version?: string;
+  ratel_ai_core_resolved_version?: string;
   scenario_id: string;
   category?: string;
   query: string;
@@ -54,6 +55,7 @@ export interface BfclRetrievalRow {
 export interface RetrievalSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "retriever_evaluation";
   type: BfclType;
   pool_size: number;
@@ -75,9 +77,15 @@ export interface RetrievalSummaryRow {
 /** Task-completion per-row record (`results/raw/bfcl/task-completion-rows.jsonl`). */
 export interface TaskRow {
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   generated_at: string;
   type: BfclType;
   model: string; // LLM name
+  serving_provider?: string | null;
+  publisher?: string | null;
+  resolved_model?: string | null;
+  vertex_location?: string | null;
+  cost_source?: "provider" | "partial" | "estimate" | "unknown";
   arm: string;
   scenario_id: string;
   query: string;
@@ -91,7 +99,7 @@ export interface TaskRow {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  dollar_cost: number;
+  dollar_cost: number | null;
   wall_ms: number;
   turns: number;
   /**
@@ -128,8 +136,13 @@ export interface TaskRow {
 export interface TaskSummaryRow {
   timestamp: string;
   ratel_ai_core_version: string;
+  ratel_ai_core_resolved_version?: string | null;
   source: "task_completion";
   model: string; // LLM name
+  serving_provider?: string | "mixed" | null;
+  publisher?: string | "mixed" | null;
+  resolved_model?: string | "mixed" | null;
+  vertex_location?: string | "mixed" | null;
   arm: string; // control-baseline | control-oracle | ratel-full | …
   type: BfclType;
   scenarios: number; // n (denominator): kept rows, excluded ones not counted

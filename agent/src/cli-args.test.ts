@@ -18,6 +18,10 @@ const KNOWN_ARMS = [
 const parse = (...argv: string[]) => parseArgs(argv, KNOWN_ARMS);
 
 describe("parseArgs", () => {
+  it("accepts an exact SDK release independently of the control-row label", () => {
+    expect(parse("--sdk-version", "0.12.0").sdkVersion).toBe("0.12.0");
+    expect(() => parse("--sdk-version", "")).toThrow(/--sdk-version/);
+  });
   it("defaults", () => {
     const args = parse();
     expect(args).toMatchObject({
@@ -43,6 +47,23 @@ describe("parseArgs", () => {
     // No flag defaults: models.json supplies the agent cap, the judge gets none.
     expect(args.maxOutputTokens).toBeUndefined();
     expect(args.judgeMaxOutputTokens).toBeUndefined();
+    expect(args.models).toHaveLength(16);
+    expect(args.models[0]).toBe("bedrock/openai.gpt-6-astra");
+    expect(args.models.at(-1)).toBe("bedrock/nvidia.nemotron-super-3-120b");
+  });
+
+  it("canonicalizes user models while retaining explicit direct routes", () => {
+    expect(parse("--models", "gpt-5.4-mini,openai/gpt-5.4-mini").models).toEqual([
+      "bedrock/gpt-5.4-mini",
+      "openai/gpt-5.4-mini",
+    ]);
+    expect(() => parse("--models", "future/model")).toThrow(/unknown model provider/);
+    expect(parse("--judge-model", "anthropic/claude-sonnet-4-6").judgeModelId).toBe(
+      "anthropic/claude-sonnet-4-6",
+    );
+    expect(parse("--judge-model", "claude-sonnet-4-6").judgeModelId).toBe(
+      "bedrock/claude-sonnet-4-6",
+    );
   });
 
   it("parses the campaign flags", () => {
@@ -65,7 +86,7 @@ describe("parseArgs", () => {
       output: "out.jsonl",
       outputExplicit: true,
       arms: ["control-baseline", "ratel-full"],
-      models: ["claude-haiku-4-5", "gpt-5.4-mini"],
+      models: ["bedrock/claude-haiku-4-5", "bedrock/gpt-5.4-mini"],
       poolSizes: [30, 100],
       retriever: "hybrid",
       noJudge: true,
@@ -193,6 +214,14 @@ describe("rerun flags", () => {
 });
 
 describe("parseRejudgeArgs", () => {
+  it("keeps explicit historical judges and canonicalizes bare judge IDs", () => {
+    expect(
+      parseRejudgeArgs(["in.jsonl", "--judge-model", "anthropic/claude-sonnet-4-6"]).judgeModelId,
+    ).toBe("anthropic/claude-sonnet-4-6");
+    expect(parseRejudgeArgs(["in.jsonl", "--judge-model", "claude-sonnet-4-6"]).judgeModelId).toBe(
+      "bedrock/claude-sonnet-4-6",
+    );
+  });
   it("parses --judge-max-output-tokens N; unset by default", () => {
     expect(
       parseRejudgeArgs(["in.jsonl", "--judge-max-output-tokens", "256"]).judgeMaxOutputTokens,

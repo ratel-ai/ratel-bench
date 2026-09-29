@@ -5,8 +5,11 @@ import { APICallError } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { descriptor as controlBaseline } from "./agents/control-baseline.js";
+import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { FatalProviderError } from "./cell-errors.js";
-import { DEFAULT_RETRY_SETTINGS, type RetrySettings } from "./llm-retry.js";
+import { DEFAULT_RETRY_SETTINGS, type RetrySettings, SpendJournalError } from "./llm-retry.js";
+import { resolveModel } from "./model-factory.js";
+import { buildRunnerModels } from "./output-limits.js";
 import { DEFAULT_RERUN_SETTINGS } from "./rerun.js";
 import {
   appendRow,
@@ -16,7 +19,9 @@ import {
   type RunnerSummary,
   run,
 } from "./runner.js";
+import { openSpendLedger } from "./spend-ledger.js";
 import type { AgentDescriptor, CellResult, Scenario } from "./types.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
 /** Stub descriptor — `runCell` is what the runner actually invokes; this only carries flags (e.g. `poolSizeAgnostic`). */
 function stubDescriptor(over: Partial<AgentDescriptor> & { id: string }): AgentDescriptor {
@@ -125,6 +130,463 @@ function readRows(path: string): CellResult[] {
 }
 
 describe("runner", () => {
+  it("stops BFCL coverage before an unaffordable physical request", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((s) => JSON.stringify(s)).join("\n"),
+    );
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return {
+          content: [{ type: "text", text: "done" }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 50, noCache: 50, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 5, text: 5, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const store = createMemoryBudgetStore(0.00015);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: 10 }],
+      pricing: { "bedrock/m": price },
+      campaignBudget: createCampaignBudget(store, {
+        "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+      }),
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(calls).toBe(1);
+    expect(summary.coverage).toMatchObject({ requested: 2, skipped: 1, status: "budget_limited" });
+    expect(summary.campaignBudget).toMatchObject({ spentTicks: 600000, reservedTicks: 0 });
+    expect(await store.snapshot()).toMatchObject({ spentTicks: 600000, reservedTicks: 0 });
+  });
+
+  it("keeps an explicit local cap stricter than campaign admission", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((s) => JSON.stringify(s)).join("\n"),
+    );
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const called: string[] = [];
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model: {} as never, maxOutputTokens: 10 }],
+      pricing: { "bedrock/m": price },
+      campaignBudget: createCampaignBudget(createMemoryBudgetStore(1), {
+        "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+      }),
+      campaignLocalCapUsd: 0.001,
+      runCell: makeFakeRunCell(0.001, called),
+    });
+    expect(called).toHaveLength(1);
+    expect(summary.coverage).toMatchObject({ status: "budget_limited" });
+  });
+
+  it("fails campaign preflight before BFCL inference when the selected route lacks a price", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const calls: string[] = [];
+    await expect(
+      run({
+        ...baseConfig(corpus, output),
+        arms: ["control-baseline"],
+        models: [{ id: "bedrock/m", model: {} as never, maxOutputTokens: 10 }],
+        campaignBudget: createCampaignBudget(createMemoryBudgetStore(1), {
+          "bedrock/m": { price, maxInputTokens: 100, maxOutputTokens: 10 },
+        }),
+        runCell: makeFakeRunCell(0, calls),
+      }),
+    ).rejects.toThrow(/price snapshot/);
+    expect(calls).toEqual([]);
+  });
+  it("drains in-flight cells and starts no more after a journal failure", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      Array.from({ length: 5 }, (_, i) => JSON.stringify({ ...scenario, id: `s-${i}` })).join("\n"),
+    );
+    const called: string[] = [];
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      concurrency: 2,
+      runCell: async ({ scenario: current }) => {
+        called.push(current.id);
+        if (current.id === "s-0") throw new SpendJournalError(new Error("disk full"));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return makeFakeRunCell(
+          0.01,
+          [],
+        )({
+          scenario: current,
+          arm: "control-baseline",
+          model: config.models[0],
+          runIndex: 0,
+          pool: current.candidate_pool,
+          poolSize: 1,
+          config,
+        });
+      },
+    };
+    await expect(run(config)).rejects.toThrow(SpendJournalError);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(called).toEqual(["s-0", "s-1"]);
+  });
+
+  it("retains billed usage when a fatal BFCL request aborts without a cell row", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw Object.assign(
+          new APICallError({
+            message: "denied",
+            url: "https://example.test",
+            requestBodyValues: {},
+            statusCode: 403,
+          }),
+          {
+            usage: { inputTokens: 12, outputTokens: 2 },
+          },
+        );
+      },
+    });
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.cells_run).toBe(0);
+    expect(summary.spend).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.000016,
+      completeness: "complete",
+    });
+    expect(summary.coverage).toEqual({
+      requested: 1,
+      completed: 0,
+      failed: 0,
+      reused: 0,
+      skipped: 1,
+      status: "failed",
+    });
+  });
+
+  it("marks resumed live rows without an attempt journal as incomplete accounting", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const previous = await makeFakeRunCell(
+      0.01,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: { id: "fake-model", model: {} as never, maxOutputTokens: null },
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config: baseConfig(corpus, output),
+    });
+    writeRows(output, [{ ...previous, run_id: "before-journal", cache_source: "live" }]);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.spend).toMatchObject({ untrackedRows: 1, completeness: "partial" });
+  });
+
+  it("retains legacy paid spend and an ambiguous crash in a BFCL resume summary", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const config = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    };
+    const previous = await makeFakeRunCell(
+      0.5,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: config.models[0],
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config,
+    });
+    writeRows(output, [{ ...previous, run_id: "legacy-paid", cache_source: "live" }]);
+    const ledger = openSpendLedger(`${output}.spend.jsonl`);
+    ledger.dispatch({
+      id: "phase10-paid",
+      runId: "legacy-paid",
+      kind: "bfcl",
+      cellKey: "test::fs-001::control-baseline::fake-model::0::p1",
+      model: "fake-model",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    ledger.settle("phase10-paid", {
+      status: "completed",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    ledger.dispatch({
+      id: "phase10-crashed",
+      kind: "bfcl",
+      cellKey: "test::untrusted",
+      model: "fake-model",
+      price: null,
+    });
+
+    const summary = await run(config);
+
+    expect(summary.spend).toMatchObject({
+      attempts: 1,
+      knownUsd: 0.00002,
+      unattributedAttempts: 1,
+      untrackedRows: 0,
+      completeness: "partial",
+    });
+    expect(summary.coverage).toEqual({
+      requested: 1,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 0,
+      status: "partial",
+    });
+  });
+
+  it("starts fresh BFCL spend on force and keeps that generation on resume", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }].map((item) => JSON.stringify(item)).join("\n"),
+    );
+    writeFileSync(output, "stale output\n");
+    const ledger = openSpendLedger(`${output}.spend.jsonl`);
+    const price = {
+      inputPer1M: 1,
+      outputPer1M: 0,
+      cachedInputPer1M: 1,
+      cacheCreationPer1M: 1,
+    };
+    ledger.dispatch({
+      id: "prior-generation",
+      kind: "bfcl",
+      scope: "bfcl/test",
+      cellKey: "test::old::control-baseline::bedrock/m::0::p1",
+      model: "bedrock/m",
+      price,
+    });
+    ledger.settle("prior-generation", {
+      status: "completed",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    let calls = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        calls++;
+        return {
+          content: [{ type: "text", text: "done" }],
+          finishReason: { unified: "stop", raw: "end_turn" },
+          usage: {
+            inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+            outputTokens: { total: 0, text: 0, reasoning: 0 },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      pricing: { "bedrock/m": price },
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+      dollarGlobalCap: 0.0000005,
+    };
+
+    const forced = await run({ ...config, force: true });
+
+    expect(calls).toBe(1);
+    expect(forced.cells_run).toBe(1);
+    expect(forced.spend).toMatchObject({ attempts: 1, knownUsd: 0.000001 });
+    const journal = readFileSync(`${output}.spend.jsonl`, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    expect(journal.some((event) => event.type === "generation")).toBe(true);
+    expect(openSpendLedger(`${output}.spend.jsonl`).summary()).toMatchObject({
+      attempts: 2,
+      knownUsd: 0.000002,
+    });
+    const resumed = await run(config);
+    expect(calls).toBe(1);
+    expect(resumed.cells_run).toBe(0);
+    expect(resumed.spend).toMatchObject({ attempts: 1, knownUsd: 0.000001 });
+    expect(resumed.stopped_reason).toBe("global_cap");
+  });
+
+  it("does not advance BFCL spend generation when force fails before output reset", async () => {
+    const output = join(tempDir, "agent.jsonl");
+    const spendLedgerPath = `${output}.spend.jsonl`;
+
+    await expect(
+      run({
+        ...baseConfig(join(tempDir, "missing-corpus.jsonl"), output),
+        spendLedgerPath,
+        force: true,
+      }),
+    ).rejects.toThrow();
+
+    expect(openSpendLedger(spendLedgerPath).currentScope("bfcl/test")).toBe("bfcl/test");
+  });
+
+  it("persists agent and judge attempts and reuses them on resume without new spend", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [{ type: "text", text: "I cannot read files." }],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 5, text: 5, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const judge = new MockLanguageModelV3({
+      doGenerate: async () => ({
+        content: [
+          { type: "text", text: JSON.stringify({ verdict: "fail", explanation: "no answer" }) },
+        ],
+        finishReason: { unified: "stop", raw: "end_turn" },
+        usage: {
+          inputTokens: { total: 8, noCache: 8, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 4, text: 4, reasoning: 0 },
+        },
+        warnings: [],
+      }),
+    });
+    const config: RunnerConfig = {
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [
+        {
+          id: "bedrock/m",
+          model,
+          maxOutputTokens: null,
+          servingProvider: "bedrock",
+          publisher: "example",
+          resolvedModel: "global.example.m",
+        },
+      ],
+      judgeModel: judge,
+      judgeModelId: "bedrock/j",
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+      pricing: {
+        "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+        "bedrock/j": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+      },
+    };
+    const first = await run(config);
+    expect(first.spend).toMatchObject({ attempts: 2, unresolved: 0, completeness: "complete" });
+    const dispatch = readFileSync(`${output}.spend.jsonl`, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find((event) => event.type === "dispatch" && event.value.kind === "bfcl");
+    expect(dispatch.value).toMatchObject({
+      model: "bedrock/m",
+      servingProvider: "bedrock",
+      publisher: "example",
+      resolvedModel: "global.example.m",
+      adapterProvider: model.provider,
+    });
+    const second = await run(config);
+    expect(second.spend).toEqual(first.spend);
+    expect(model.doGenerateCalls).toHaveLength(1);
+    expect(judge.doGenerateCalls).toHaveLength(1);
+  });
+
+  it("keeps historical control-cache cost separate from current live spend", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const canonical = join(tempDir, "canonical.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const model = new MockLanguageModelV3({
+      doGenerate: async () => {
+        throw new Error("cache should serve this cell");
+      },
+    });
+    const historical = await makeFakeRunCell(
+      0.5,
+      [],
+    )({
+      scenario,
+      arm: "control-baseline",
+      model: { id: "bedrock/m", model, maxOutputTokens: null },
+      runIndex: 0,
+      pool: scenario.candidate_pool,
+      poolSize: 1,
+      config: baseConfig(corpus, canonical),
+    });
+    writeRows(canonical, [historical]);
+    writeRows(output, [{ ...historical, ratel_version: "old", run_id: "historical" }]);
+    const oldLedger = openSpendLedger(`${output}.spend.jsonl`);
+    oldLedger.dispatch({
+      id: "old-control",
+      runId: "historical",
+      kind: "bfcl",
+      scope: "bfcl/old",
+      cellKey: "old-cell",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 1, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    oldLedger.settle("old-control", {
+      status: "completed",
+      usage: { inputTokens: 500, outputTokens: 0 },
+    });
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models: [{ id: "bedrock/m", model, maxOutputTokens: null }],
+      ratelVersion: "next",
+      cacheSourcePaths: [canonical],
+      registry: new Map([[controlBaseline.id, controlBaseline]]),
+    });
+    expect(summary.cells_cached).toBe(1);
+    expect(summary.spend).toMatchObject({ attempts: 0, knownUsd: 0, completeness: "complete" });
+    expect(readRows(output)[1].dollar_cost).toBe(0.5);
+    expect(model.doGenerateCalls).toHaveLength(0);
+  });
+
   it("runs every (arm, model, run) cell for each scenario", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
@@ -173,6 +635,46 @@ describe("runner", () => {
     expect(new Set(rows.map((r) => r.run_id)).size).toBe(1);
   });
 
+  it("stamps factory-resolved Vertex provenance on emitted rows", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+    const output = join(tempDir, "agent.jsonl");
+    const catalog = [
+      {
+        id: "gcp/gemini-alias",
+        publisher: "Google",
+        vertexModelId: "gemini-2.5-pro",
+      },
+    ];
+    const models = buildRunnerModels(
+      ["gcp/gemini-alias"],
+      (id) =>
+        resolveModel(id, {
+          catalog,
+          env: {},
+          gcpProject: "offline-project",
+          gcpLocation: "europe-west4",
+          gcpAccessToken: async () => "offline-token",
+        }),
+      { catalog, override: undefined },
+    );
+
+    await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      models,
+      runCell: makeFakeRunCell(0.001, []),
+    });
+
+    expect(readRows(output)[0]).toMatchObject({
+      model: "gcp/gemini-alias",
+      serving_provider: "gcp",
+      publisher: "Google",
+      resolved_model: "gemini-2.5-pro",
+      vertex_location: "europe-west4",
+    });
+  });
+
   it("stamps live cells with config.ratelVersion and cache_source 'live'", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
@@ -188,6 +690,8 @@ describe("runner", () => {
 
     const cell = JSON.parse(readFileSync(output, "utf-8").trim()) as CellResult;
     expect(cell.ratel_version).toBe("9.9.9");
+    expect(cell.ratel_ai_core_version).toBe(RATEL_AI_CORE_VERSION);
+    expect(cell.ratel_ai_core_resolved_version).toBe(RATEL_AI_CORE_RESOLVED_VERSION);
     expect(cell.cache_source).toBe("live");
 
     // The stamped version is the resume key: a re-run at "9.9.9" skips the cell.
@@ -631,6 +1135,7 @@ describe("runner", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].ratel_version).toBe("9.9.9");
     expect(rows[0].cache_source).toBe("reused");
+    expect(readFileSync(canonical, "utf-8")).toContain('"ratel_version":"test"');
   });
 
   it("appendRow writes one valid JSON line per call without quadratic rewrites", () => {
@@ -800,6 +1305,45 @@ describe("runner", () => {
     });
     expect(summary.stopped_reason).toBe("global_cap");
     expect(summary.cells_run).toBeLessThan(3);
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 2,
+      failed: 0,
+      reused: 0,
+      skipped: 1,
+      status: "budget_limited",
+    });
+  });
+
+  it("drains an interrupted BFCL run and marks unfinished cells cancelled", async () => {
+    const corpus = join(tempDir, "corpus.jsonl");
+    const output = join(tempDir, "agent.jsonl");
+    writeFileSync(
+      corpus,
+      [scenario, { ...scenario, id: "fs-002" }, { ...scenario, id: "fs-003" }]
+        .map((s) => JSON.stringify(s))
+        .join("\n"),
+    );
+    const controller = new AbortController();
+    const fake = makeFakeRunCell(0.001, []);
+    const summary = await run({
+      ...baseConfig(corpus, output),
+      arms: ["control-baseline"],
+      signal: controller.signal,
+      runCell: async (args) => {
+        const row = await fake(args);
+        controller.abort();
+        return row;
+      },
+    });
+    expect(summary.coverage).toEqual({
+      requested: 3,
+      completed: 1,
+      failed: 0,
+      reused: 0,
+      skipped: 2,
+      status: "cancelled",
+    });
   });
 });
 
@@ -868,6 +1412,44 @@ describe("control cache", () => {
     });
     return { summary, called };
   }
+
+  it("serves only matching Claude provider routes, including evidenced historical rows", async () => {
+    const output = join(tempDir, "out.jsonl");
+    const source = join(tempDir, "cache.jsonl");
+    writeRows(source, [
+      cachedRow({
+        model: "bedrock/claude-sonnet-5",
+        provider: "amazon-bedrock",
+        max_output_tokens: null,
+        final_text: "bedrock",
+      }),
+      cachedRow({
+        model: "claude-sonnet-5",
+        provider: "anthropic.messages",
+        max_output_tokens: null,
+        final_text: "direct",
+      }),
+      cachedRow({
+        model: "gcp/claude-sonnet-5",
+        provider: "vertex.anthropic.messages",
+        max_output_tokens: null,
+        final_text: "vertex",
+      }),
+      cachedRow({ model: "claude-sonnet-5", final_text: "ambiguous" }),
+    ]);
+    const models = [
+      ["bedrock/claude-sonnet-5", "amazon-bedrock"],
+      ["anthropic/claude-sonnet-5", "anthropic.messages"],
+      ["gcp/claude-sonnet-5", "vertex.anthropic.messages"],
+    ].map(([id, provider]) => ({ id, model: { provider } as never, maxOutputTokens: null }));
+    const { summary } = await runBaseline(output, { models, cacheSourcePaths: [source] });
+    expect(summary.cells_cached).toBe(3);
+    expect(readRows(output).map((r) => [r.model, r.final_text])).toEqual([
+      ["bedrock/claude-sonnet-5", "bedrock"],
+      ["anthropic/claude-sonnet-5", "direct"],
+      ["gcp/claude-sonnet-5", "vertex"],
+    ]);
+  });
 
   it("skips a transient-error control row and serves a later good row", async () => {
     const canonical = join(tempDir, "canonical.jsonl");
@@ -1743,6 +2325,21 @@ describe("breaker, resume re-queue and retry rounds", () => {
   }
 
   const noRounds = { ...DEFAULT_RERUN_SETTINGS, rounds: 0 };
+
+  it("reports unknown cost from a fatal call that wrote no row", async () => {
+    const output = join(tempDir, "fatal-unknown.jsonl");
+    const err = Object.assign(fatal(0), { unknownCost: true });
+    const summary = await run({
+      ...baseConfig(corpusOf(1), output),
+      arms: ["ratel-full"],
+      models: [model("B")],
+      runCell: async () => {
+        throw err;
+      },
+    });
+    expect(summary.unknown_cost_cells).toBe(1);
+    expect(summary.cells_run).toBe(0);
+  });
 
   it.each([
     1, 4,
