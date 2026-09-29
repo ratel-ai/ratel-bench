@@ -1,6 +1,7 @@
 # Jev vs Ratel — retrieval eval results
 
-Run 2026-09-28 on branch `test/jev-as-tool-selection`. Retrieval eval only (no LLM eval).
+Run 2026-09-28 (BM25 arms, both benchmarks) and 2026-09-29 (semantic arms, BFCL only) on branch
+`test/jev-as-tool-selection`. Retrieval eval only (no LLM eval).
 
 ## Systems
 
@@ -9,6 +10,8 @@ Run 2026-09-28 on branch `test/jev-as-tool-selection`. Retrieval eval only (no L
 | **Ratel BM25** | `@ratel-ai/sdk@0.13.0-rc.7`, `--retriever bm25` | `0.13.0-rc.7-bm25` |
 | **Jev** | TypeSafe Jev `jev-1.13.0`, one `choice` question over the whole pool, options sorted by probability | `jev-1.13.0` |
 | **Ratel→Jev** | Ratel BM25 top 20, re-ranked by Jev | `ratel-0.13.0-rc.7-bm25+jev-1.13.0` |
+| **Ratel semantic** (BFCL only) | `@ratel-ai/sdk@0.13.0-rc.7`, `--retriever semantic`, default embedding model | `0.13.0-rc.7-semantic` |
+| **Semantic→Jev** (BFCL only) | Ratel semantic top 20, re-ranked by Jev | `ratel-0.13.0-rc.7-semantic+jev-1.13.0` |
 
 Design is the fixed retrieval eval from EXPERIMENTS.md: BFCL 599 scenarios, pools 30/100;
 SR-Agents 600 scenarios (100 × 6 datasets), pools 50/100 from
@@ -53,6 +56,29 @@ with a fixed seed because pools list gold first.
 Paired top-1 hits (pool 100): Jev-only wins vs Ratel-only wins — BFCL 55 vs 4
 (McNemar p ≈ 2e-12), SR-Agents 217 vs 11 (p ≈ 8e-51).
 
+## BFCL — all five arms
+
+Recall@k (MRR row = MRR@5; top-1 MRR equals recall@1).
+
+| Pool | k | BM25 | Semantic | Jev | BM25→Jev | Semantic→Jev |
+|---|---|---|---|---|---|---|
+| 30 | 1 | 0.955 | 0.967 | **0.997** | 0.985 | 0.995 |
+| 30 | 3 | 0.988 | 0.998 | **1.000** | 0.988 | **1.000** |
+| 30 | 5 | 0.988 | **1.000** | **1.000** | 0.988 | **1.000** |
+| 30 | MRR@5 | 0.970 | 0.982 | **0.998** | 0.987 | 0.997 |
+| 100 | 1 | 0.893 | 0.915 | 0.978 | 0.963 | **0.982** |
+| 100 | 3 | 0.972 | 0.987 | **1.000** | 0.988 | **1.000** |
+| 100 | 5 | 0.983 | 0.998 | **1.000** | 0.988 | **1.000** |
+| 100 | MRR@5 | 0.932 | 0.952 | 0.989 | 0.976 | **0.991** |
+
+Paired top-1 hits: Jev vs Semantic — pool 30: 19 vs 1 (p ≈ 4e-5), pool 100: 41 vs 3
+(p ≈ 2e-9). Semantic→Jev vs Jev — pool 30: 1 vs 2, pool 100: 5 vs 3 (p = 0.73, a tie).
+Semantic→Jev vs Semantic — pool 100: 42 vs 2 (p ≈ 1e-10).
+
+Semantic's top 20 almost always contains the gold (recall@5 already 0.998–1.000), so unlike
+BM25 it does not cap the re-ranker: Semantic→Jev matches standalone Jev while sending Jev
+~1.7k input tokens per query regardless of pool size (vs 2.4k / 7.3k for Jev alone).
+
 ## Tokens and latency
 
 Average tokens per query (Ratel BM25 runs locally with no model call: 0 tokens).
@@ -64,13 +90,19 @@ Average tokens per query (Ratel BM25 runs locally with no model call: 0 tokens).
 | SR-Agents | 50 | 3,633 / ~556 | 1,214 / ~150 |
 | SR-Agents | 100 | 6,820 / ~1,079 | 1,508 / ~180 |
 
+Semantic→Jev (BFCL): 1,727 input tokens per query at pool 30 and 1,737 at pool 100 (every
+query calls Jev: semantic always returns 20 candidates).
+
 Totals for the full run (~2,400 queries): Jev ≈ 12.1M input + ~1.85M output tokens;
 Ratel→Jev ≈ 3.0M input + ~0.36M output. Output tokens scale with the option count (Jev returns
 a probability per option). Ratel→Jev skips the call when Ratel returns < 2 candidates (~6% of
 queries, counted as 0).
 
 Time per query: Ratel BM25 ~5 ms in-process; Jev ~280 ms median (p95 ~380 ms) network
-round-trip; Ratel→Jev ≈ Ratel + one Jev call. Jev spend for everything above ≈ $0.65.
+round-trip; Ratel→Jev ≈ Ratel + one Jev call (Semantic→Jev Jev call: ~310–360 ms median).
+Ratel semantic here cost ~14.5 s per scenario, dominated by embedding each fresh pool on the
+Mac's CPU; a deployed catalog embeds its tools once, so per-query cost would be one query
+embedding. Jev spend for everything above ≈ $0.74.
 
 ## Takeaways
 
@@ -80,6 +112,9 @@ round-trip; Ratel→Jev ≈ Ratel + one Jev call. Jev spend for everything above
 2. Ratel→Jev is capped by Ratel's shortlist: BM25 top 20 contains the gold 98.8% of the time on
    BFCL but only ~77% on SR-Agents, so re-ranking cannot reach standalone Jev there.
 3. Ratel→Jev uses ~4× fewer Jev tokens than Jev alone; it does not save latency.
+4. On BFCL, Ratel semantic beats BM25 but trails Jev (top-1 at pool 100: 0.915 vs 0.978).
+   Semantic→Jev ties standalone Jev (0.982 vs 0.978, not significant) at ~4× fewer tokens on
+   the 100-tool pool — the best quality/cost trade-off measured.
 
 ## Caveats
 
@@ -87,12 +122,12 @@ round-trip; Ratel→Jev ≈ Ratel + one Jev call. Jev spend for everything above
   0.90 vs 0.95 on a 20-scenario smoke. Results use one fixed seed (42).
 - Latency during the Ratel→Jev run was inflated by a TypeSafe API slowdown (4–5 s/call for a
   while); latency figures come from the Jev-only run.
-- Not yet compared: Ratel semantic/hybrid, and semantic→Jev. On this Mac, rc.7 semantic takes
-  ~16 s/scenario (BFCL) and ~31 s/scenario (SR-Agents), i.e. ~5–8 h for the full design.
+- Semantic arms were run on BFCL only. SR-Agents semantic takes ~31 s/scenario on this Mac
+  (~5 h); hybrid was not run.
 
 ## Reproduce
 
 Commands are in EXPERIMENTS.md → "Competitor: TypeSafe Jev" (`--selector ratel|jev|ratel+jev`,
-`--rerank-depth 20`). Raw rows are under `results/raw/{bfcl,sragents}/` (gitignored per
+`--rerank-depth 20`; BFCL `--ratel-output` writes the plain Ratel arm from the same pass). Raw rows are under `results/raw/{bfcl,sragents}/` (gitignored per
 ADR-0007); every Jev response is cached in `results/raw/jev-cache/`, so reruns replay with no
 API calls.

@@ -106,6 +106,13 @@ async function main(): Promise<void> {
     throw new Error(`--selector must be ratel, jev, or ratel+jev (got "${selector}")`);
   }
   const rerankDepth = Number(arg("--rerank-depth", "20")); // ratel+jev: Ratel shortlist size
+  // ratel+jev only: also write Ratel's own (pre-rerank) rows — the exact rows `--selector ratel`
+  // would produce — so one pass yields both arms and slow (semantic) catalogs are built once.
+  const ratelOutput = arg("--ratel-output", "");
+  const ratelLabel = arg("--ratel-label", "");
+  if (ratelOutput && (selector !== "ratel+jev" || !ratelLabel)) {
+    throw new Error("--ratel-output requires --selector ratel+jev and --ratel-label");
+  }
   const method = arg("--retriever", "bm25") as RetrievalMethod;
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
     throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
@@ -148,11 +155,41 @@ async function main(): Promise<void> {
   const runId = `sdk-bfcl-ret-${Date.now()}`;
   const generatedAt = new Date().toISOString();
   const lines: string[] = [];
+  const ratelLines: string[] = [];
   const t0 = Date.now();
   for (const sc of scenarios) {
     const category = bfclCategory(sc);
     for (const poolSize of poolSizes) {
       const pool = expandPool(sc, universe, poolSize, seed);
+      const emit = (
+        out: string[],
+        label: string,
+        ranked: RetrievedHit[],
+        meta?: JevRankMeta | RerankMeta,
+      ): void => {
+        for (const k of kSlices) {
+          if (k > poolSize) continue;
+          out.push(
+            JSON.stringify({
+              run_type: "retrieval",
+              run_id: runId,
+              generated_at: generatedAt,
+              ratel_ai_core_version: label,
+              scenario_id: sc.id,
+              query: sc.prompt,
+              golden_answer: sc.gold_tools,
+              category,
+              target_pool_size: poolSize,
+              actual_pool_size: pool.length,
+              k,
+              pool_size: poolSize,
+              retrieved: ranked.slice(0, k),
+              ...metrics(sc.gold_tools, ranked, k),
+              ...(meta ? { selector, ...meta } : {}),
+            }),
+          );
+        }
+      };
       let hits: RetrievedHit[];
       let jevMeta: JevRankMeta | RerankMeta | undefined;
       if (jev && selector === "jev") {
@@ -181,6 +218,7 @@ async function main(): Promise<void> {
           score: h.score,
         }));
         if (jev) {
+          if (ratelOutput) emit(ratelLines, ratelLabel, hits);
           const reranked = await rerankWithJev(jev, sc.prompt, pool, hits, rerankDepth, {
             scenarioId: sc.id,
             poolSize,
@@ -191,28 +229,7 @@ async function main(): Promise<void> {
         }
       }
 
-      for (const k of kSlices) {
-        if (k > poolSize) continue;
-        lines.push(
-          JSON.stringify({
-            run_type: "retrieval",
-            run_id: runId,
-            generated_at: generatedAt,
-            ratel_ai_core_version: RATEL_AI_CORE_VERSION,
-            scenario_id: sc.id,
-            query: sc.prompt,
-            golden_answer: sc.gold_tools,
-            category,
-            target_pool_size: poolSize,
-            actual_pool_size: pool.length,
-            k,
-            pool_size: poolSize,
-            retrieved: hits.slice(0, k),
-            ...metrics(sc.gold_tools, hits, k),
-            ...(jevMeta ? { selector, ...jevMeta } : {}),
-          }),
-        );
-      }
+      emit(lines, RATEL_AI_CORE_VERSION, hits, jevMeta);
     }
   }
 
@@ -222,6 +239,14 @@ async function main(): Promise<void> {
     `  wrote ${lines.length} rows (${scenarios.length} scenarios × ${poolSizes.length} pool(s) × ` +
       `${kSlices.length} k) in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
   );
+  if (ratelOutput) {
+    const ratelPath = resolveRepoPath(ratelOutput);
+    mkdirSync(dirname(ratelPath), { recursive: true });
+    writeFileSync(ratelPath, `${ratelLines.join("\n")}\n`, "utf-8");
+    console.log(
+      `  wrote ${ratelLines.length} pre-rerank Ratel rows (${ratelLabel}) → ${ratelPath}`,
+    );
+  }
   if (jev) console.log(jev.summary());
 }
 

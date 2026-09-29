@@ -286,6 +286,14 @@ RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+jev-1.13.0 pnpm -F @ratel-ai/benchmar
   --pool-sizes 50,100 --pool-from results/raw/sragents/candidates.jsonl \
   --output results/raw/sragents/candidates-ratel+jev.jsonl
 
+# Semantic + Semantic→Jev in ONE pass (BFCL only): --ratel-output writes the plain Ratel rows
+# (byte-identical to --selector ratel) so the slow semantic catalogs are built once (~2.4 h).
+RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-semantic+jev-1.13.0 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector ratel+jev --rerank-depth 20 --sdk-version 0.13.0-rc.7 --retriever semantic \
+  --pool-sizes 30,100 --output results/raw/bfcl/retrieval-semantic+jev.jsonl \
+  --ratel-output results/raw/bfcl/retrieval-0.13.0-rc.7-semantic.jsonl \
+  --ratel-label 0.13.0-rc.7-semantic
+
 # summarize each label (bfcl-summarize / sragents-summarize --label <L> --retrieval-rows <file>)
 ```
 Results: docs/jev-vs-ratel-results.md. Jev rows add `selector`, `jev_model`, `latency_ms` (network round-trip — report separately,
