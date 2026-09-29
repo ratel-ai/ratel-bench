@@ -294,6 +294,20 @@ RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-semantic+jev-1.13.0 pnpm -F @ratel-ai/benc
   --ratel-output results/raw/bfcl/retrieval-0.13.0-rc.7-semantic.jsonl \
   --ratel-label 0.13.0-rc.7-semantic
 
+# Laya (open-source, Jev-compatible) — self-hosted, no API key. Server (separate venv):
+#   LAYA_MODELS=english LAYA_REVISION=reviewed LAYA_DEVICE=mps LAYA_PORT=8000 LAYA_HOST=127.0.0.1 laya-serve
+# --jev-base-url targets any /v1/systemone server; --jev-body-extra adds server fields (e.g. laya
+# head_max_len). Long single-pass runs can be split with --shard i/n and concatenated in order.
+RATEL_VERSION_LABEL=laya-english-55cf4c4 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector jev --jev-base-url http://127.0.0.1:8000 --jev-model english \
+  --jev-cache results/raw/jev-cache/bfcl-laya.jsonl --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-laya.jsonl
+RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+laya-english-55cf4c4 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector ratel+jev --sdk-version 0.13.0-rc.7 --retriever bm25 --rerank-depth 20 \
+  --jev-base-url http://127.0.0.1:8000 --jev-model english \
+  --jev-cache results/raw/jev-cache/bfcl-laya.jsonl --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-bm25+laya.jsonl
+
 # summarize each label (bfcl-summarize / sragents-summarize --label <L> --retrieval-rows <file>)
 ```
 Results: docs/jev-vs-ratel-results.md. Jev rows add `selector`, `jev_model`, `latency_ms` (network round-trip — report separately,

@@ -12,6 +12,7 @@ import {
   type JevItem,
   JevRanker,
   type JevResponse,
+  jevConfigFromArgs,
   optionText,
   rankFromProbabilities,
   rerankWithJev,
@@ -272,5 +273,67 @@ describe("rerankWithJev", () => {
     expect(one.hits).toEqual([ratelHits[0]]);
     expect(one.meta).toEqual({ rerank_depth: 20, ratel_candidates: 1 });
     expect(none.hits).toEqual([]);
+  });
+});
+
+describe("jevConfigFromArgs + self-hosted servers", () => {
+  const args = (m: Record<string, string>) => (name: string, fallback: string) =>
+    m[name] ?? fallback;
+
+  it("defaults reproduce TypeSafe Jev (pinned model, key required, no extras)", () => {
+    expect(jevConfigFromArgs(args({}))).toEqual({
+      model: JEV_MODEL,
+      extraBody: undefined,
+      requireApiKey: true,
+      client: undefined,
+    });
+  });
+
+  it("--jev-base-url targets /v1/systemone keylessly; --jev-body-extra must be an object", () => {
+    const cfg = jevConfigFromArgs(
+      args({
+        "--jev-base-url": "http://localhost:8000/",
+        "--jev-model": "english",
+        "--jev-body-extra": '{"head_max_len":1024}',
+      }),
+    );
+    expect(cfg).toEqual({
+      model: "english",
+      extraBody: { head_max_len: 1024 },
+      requireApiKey: false,
+      client: { endpoint: "http://localhost:8000/v1/systemone" },
+    });
+    expect(() => jevConfigFromArgs(args({ "--jev-body-extra": "[1]" }))).toThrow(/JSON object/);
+  });
+
+  it("sends no Authorization header and includes extras in the body", async () => {
+    const cachePath = join(mkdtempSync(join(tmpdir(), "jev-")), "cache.jsonl");
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(choiceResponse({ a: 0.6, b: 0.4 })));
+    const ranker = new JevRanker({
+      kind: "tool",
+      cache: new JevCache(cachePath),
+      seed: 42,
+      model: "english",
+      extraBody: { head_max_len: 1024 },
+      requireApiKey: false,
+      apiKey: () => undefined,
+      client: { endpoint: "http://localhost:8000/v1/systemone", fetchImpl, sleep: noSleep },
+    });
+    const saved = process.env.TYPESAFE_API_KEY;
+    delete process.env.TYPESAFE_API_KEY;
+    try {
+      await ranker.rank("q", [item("a"), item("b")], {
+        scenarioId: "s",
+        poolSize: 2,
+        seedKey: "k",
+      });
+    } finally {
+      if (saved !== undefined) process.env.TYPESAFE_API_KEY = saved;
+    }
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:8000/v1/systemone");
+    expect(init.headers).not.toHaveProperty("Authorization");
+    const sent = JSON.parse(init.body as string);
+    expect(sent).toMatchObject({ model: "english", head_max_len: 1024 });
   });
 });

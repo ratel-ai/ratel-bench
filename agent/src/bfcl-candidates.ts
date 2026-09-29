@@ -36,6 +36,7 @@ import {
   JevCache,
   JevRanker,
   type JevRankMeta,
+  jevConfigFromArgs,
   type RerankMeta,
   rerankWithJev,
 } from "./selectors/jev.js";
@@ -136,7 +137,7 @@ async function main(): Promise<void> {
     const cache = new JevCache(
       resolveRepoPath(arg("--jev-cache", "results/raw/jev-cache/bfcl.jsonl")),
     );
-    jev = new JevRanker({ kind: "tool", cache, seed });
+    jev = new JevRanker({ kind: "tool", cache, seed, ...jevConfigFromArgs(arg) });
     console.log(
       `bfcl-candidates: selector=${selector}` +
         (selector === "ratel+jev" ? ` rerank-depth=${rerankDepth}` : "") +
@@ -147,6 +148,19 @@ async function main(): Promise<void> {
   let scenarios = loadScenarios(corpusPath);
   if (scenarioLimit > 0) scenarios = scenarios.slice(0, scenarioLimit);
   const universe = buildToolUniverse(scenarios);
+  // --shard i/n: run the i-th of n contiguous scenario slices (1-based). Applied AFTER the
+  // universe is built, so pools are identical to an unsharded run; concatenating shard
+  // outputs 1..n reproduces the unsharded file (modulo run_id/generated_at).
+  const shard = arg("--shard", "");
+  if (shard) {
+    const [i, n] = shard.split("/").map(Number);
+    if (!Number.isInteger(i) || !Number.isInteger(n) || n < 1 || i < 1 || i > n) {
+      throw new Error(`--shard must be i/n with 1 ≤ i ≤ n (got "${shard}")`);
+    }
+    const size = Math.ceil(scenarios.length / n);
+    scenarios = scenarios.slice((i - 1) * size, i * size);
+    console.log(`bfcl-candidates: shard ${i}/${n} → ${scenarios.length} scenarios`);
+  }
   console.log(
     `bfcl-candidates: method=${method} pools=[${poolSizes.join(",")}] k=[${kSlices.join(",")}] ` +
       `over ${scenarios.length} scenarios (universe=${universe.length} tools) → ${outputPath}`,

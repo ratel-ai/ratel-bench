@@ -40,6 +40,7 @@ import {
   JevCache,
   JevRanker,
   type JevRankMeta,
+  jevConfigFromArgs,
   type RerankMeta,
   rerankWithJev,
 } from "./selectors/jev.js";
@@ -228,7 +229,7 @@ async function main(): Promise<void> {
     const cache = new JevCache(
       resolveRepoPath(arg("--jev-cache", "results/raw/jev-cache/sragents.jsonl")),
     );
-    jev = new JevRanker({ kind: "skill", cache, seed });
+    jev = new JevRanker({ kind: "skill", cache, seed, ...jevConfigFromArgs(arg) });
     console.log(
       `sragents-candidates: selector=${selector}` +
         (selector === "ratel+jev" ? ` rerank-depth=${rerankDepth}` : "") +

@@ -147,6 +147,8 @@ export interface JevRequest {
     string,
     { type: "choice"; instructions: string; criteria: Record<string, string> }
   >;
+  /** Server-specific extras (e.g. laya-serve's `head_max_len` / `max_len` token budget). */
+  [extra: string]: unknown;
 }
 
 export interface JevResponse {
@@ -168,7 +170,8 @@ export class JevHttpError extends Error {
 }
 
 export interface JevClientOptions {
-  apiKey: string;
+  /** Omitted for keyless self-hosted servers (laya-serve, simple-jev). */
+  apiKey?: string;
   endpoint?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
@@ -184,22 +187,29 @@ function defaultEndpoint(): string {
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
 
-/** POST one request; retries 429/529/5xx/timeouts with exponential backoff. */
+/**
+ * POST one request; retries 429/529/5xx/timeouts with exponential backoff (1 s doubling,
+ * capped at 60 s). Defaults ride out a ~9-minute outage — a multi-hour semantic/hybrid run
+ * must not die on a brief API blip (it did at 6 × 10 s).
+ */
 export async function callJev(
   body: JevRequest,
   opts: JevClientOptions,
 ): Promise<{ response: JevResponse; latencyMs: number }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const maxAttempts = opts.maxAttempts ?? 6;
-  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const maxAttempts = opts.maxAttempts ?? 10;
+  const timeoutMs = opts.timeoutMs ?? 30_000;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const t0 = performance.now();
     try {
       const res = await fetchImpl(opts.endpoint ?? defaultEndpoint(), {
         method: "POST",
-        headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json" },
+        headers: {
+          ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {}),
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -214,7 +224,12 @@ export async function callJev(
       if (err instanceof JevHttpError && !RETRYABLE.has(err.status)) throw err;
       lastErr = err;
     }
-    if (attempt < maxAttempts) await sleep(Math.min(30_000, 500 * 2 ** (attempt - 1)));
+    if (attempt < maxAttempts) {
+      console.warn(
+        `  jev: attempt ${attempt}/${maxAttempts} failed (${String(lastErr)}); retrying`,
+      );
+      await sleep(Math.min(60_000, 1_000 * 2 ** (attempt - 1)));
+    }
   }
   throw new Error(`Jev request failed after ${maxAttempts} attempts: ${String(lastErr)}`);
 }
@@ -276,8 +291,12 @@ export interface JevRankerOptions {
   cache: JevCache;
   seed: number;
   model?: string;
+  /** Merged into every request body after the standard fields (part of the cache key). */
+  extraBody?: Record<string, unknown>;
   /** Resolved lazily — a fully cached rerun needs no key. */
   apiKey?: () => string | undefined;
+  /** False for self-hosted Jev-compatible servers that take no key. Default true. */
+  requireApiKey?: boolean;
   client?: Omit<JevClientOptions, "apiKey">;
 }
 
@@ -321,13 +340,14 @@ export class JevRanker {
           criteria: options.criteria,
         },
       },
+      ...(this.opts.extraBody ?? {}),
     };
     const key = requestKey(body);
     let entry = this.opts.cache.get(key);
     const cacheHit = entry !== undefined;
     if (!entry) {
       const apiKey = this.opts.apiKey?.() ?? process.env.TYPESAFE_API_KEY;
-      if (!apiKey) {
+      if (!apiKey && this.opts.requireApiKey !== false) {
         throw new Error("TYPESAFE_API_KEY is not set (needed for uncached Jev requests)");
       }
       const { response, latencyMs } = await callJev(body, { apiKey, ...this.opts.client });
@@ -404,4 +424,33 @@ export async function rerankWithJev<T extends JevItem>(
   if (candidates.length < 2) return { hits: [...shortlist], meta: base };
   const ranked = await jev.rank(query, candidates, ctx);
   return { hits: ranked.hits, meta: { ...base, ...ranked.meta } };
+}
+
+// ---------- CLI wiring (shared by the candidate generators) ----------
+
+/**
+ * Decision-model flags: `--jev-base-url` points the selector at any server speaking
+ * TypeSafe's `/v1/systemone` protocol (laya-serve, simple-jev); `--jev-model` names the
+ * model sent; `--jev-body-extra '<json>'` adds server-specific request fields. Defaults
+ * reproduce the TypeSafe Jev requests exactly, so existing caches still hit.
+ */
+export function jevConfigFromArgs(
+  arg: (name: string, fallback: string) => string,
+): Pick<JevRankerOptions, "model" | "extraBody" | "requireApiKey" | "client"> {
+  const baseUrl = arg("--jev-base-url", "");
+  const extraRaw = arg("--jev-body-extra", "");
+  let extraBody: Record<string, unknown> | undefined;
+  if (extraRaw) {
+    const parsed = JSON.parse(extraRaw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`--jev-body-extra must be a JSON object (got ${extraRaw})`);
+    }
+    extraBody = parsed as Record<string, unknown>;
+  }
+  return {
+    model: arg("--jev-model", JEV_MODEL),
+    extraBody,
+    requireApiKey: !baseUrl,
+    client: baseUrl ? { endpoint: `${baseUrl.replace(/\/+$/, "")}/v1/systemone` } : undefined,
+  };
 }

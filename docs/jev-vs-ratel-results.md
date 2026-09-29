@@ -14,6 +14,8 @@ Run 2026-09-28 (BM25 arms, both benchmarks) and 2026-09-29 (semantic and hybrid 
 | **Semantic→Jev** (BFCL only) | Ratel semantic top 20, re-ranked by Jev | `ratel-0.13.0-rc.7-semantic+jev-1.13.0` |
 | **Ratel hybrid** (BFCL only) | `@ratel-ai/sdk@0.13.0-rc.7`, `--retriever hybrid` (default dense weight 0.7) | `0.13.0-rc.7-hybrid` |
 | **Hybrid→Jev** (BFCL only) | Ratel hybrid top 20, re-ranked by Jev | `ratel-0.13.0-rc.7-hybrid+jev-1.13.0` |
+| **Laya** (BFCL only) | open-source Jev-compatible model (`convaiinnovations/laya` English, ModernBERT-large 421M, revision `55cf4c4`), self-hosted `laya-serve` on the Mac GPU, whole pool | `laya-english-55cf4c4` |
+| **BM25→Laya** (BFCL only) | Ratel BM25 top 20, re-ranked by laya | `ratel-0.13.0-rc.7-bm25+laya-english-55cf4c4` |
 
 Design is the fixed retrieval eval from EXPERIMENTS.md: BFCL 599 scenarios, pools 30/100;
 SR-Agents 600 scenarios (100 × 6 datasets), pools 50/100 from
@@ -100,6 +102,43 @@ BM25 they do not cap the re-ranker: Semantic→Jev and Hybrid→Jev both tie sta
 sending Jev ~1.7k input tokens per query regardless of pool size (vs 2.4k / 7.3k for Jev alone).
 Hybrid and semantic are statistically indistinguishable on BFCL.
 
+## BFCL — open-source alternative: laya
+
+Laya is used as shipped (default 192-token option budget). Same pools, option text, seeded
+shuffle and scoring as Jev; requests go to a local `laya-serve` via `--jev-base-url`.
+
+Recall@k
+
+| Pool | k | BM25 | Semantic | Hybrid | Jev | Laya | BM25→Jev | BM25→Laya |
+|---|---|---|---|---|---|---|---|---|
+| 30 | 1 | 0.955 | 0.967 | 0.972 | **0.997** | 0.846 | 0.985 | 0.885 |
+| 30 | 3 | 0.988 | 0.998 | 0.997 | **1.000** | 0.947 | 0.988 | 0.970 |
+| 30 | 5 | 0.988 | **1.000** | **1.000** | **1.000** | 0.962 | 0.988 | 0.980 |
+| 100 | 1 | 0.893 | 0.915 | 0.925 | **0.978** | 0.514 | 0.963 | 0.775 |
+| 100 | 3 | 0.972 | 0.987 | 0.985 | **1.000** | 0.694 | 0.988 | 0.935 |
+| 100 | 5 | 0.983 | 0.998 | 0.995 | **1.000** | 0.741 | 0.988 | 0.955 |
+
+MRR@k
+
+| Pool | k | BM25 | Semantic | Hybrid | Jev | Laya | BM25→Jev | BM25→Laya |
+|---|---|---|---|---|---|---|---|---|
+| 30 | 1 | 0.955 | 0.967 | 0.972 | **0.997** | 0.846 | 0.985 | 0.885 |
+| 30 | 3 | 0.970 | 0.982 | 0.983 | **0.998** | 0.893 | 0.987 | 0.923 |
+| 30 | 5 | 0.970 | 0.982 | 0.984 | **0.998** | 0.897 | 0.987 | 0.926 |
+| 100 | 1 | 0.893 | 0.915 | 0.925 | **0.978** | 0.514 | 0.963 | 0.775 |
+| 100 | 3 | 0.929 | 0.949 | 0.954 | **0.989** | 0.595 | 0.976 | 0.849 |
+| 100 | 5 | 0.932 | 0.952 | 0.956 | **0.989** | 0.605 | 0.976 | 0.853 |
+
+Paired top-1 hits (pool 100): BM25 vs Laya 255 vs 28 (p ≈ 5e-47); BM25 vs BM25→Laya 101 vs 30
+(p ≈ 4e-10) — laya often overturns a correct BM25 top-1; BM25→Jev vs BM25→Laya 118 vs 5.
+
+Why laya underperforms here: its option head has a 192-token budget for *all* options, so each
+option is cut to ~4 tokens (100 options), ~5 (30) or ~8 (20) — essentially the tool name, with
+no description (laya averaged 185–431 input tokens per request vs 1.7k–7.3k for Jev). Raising
+the budget to 1,024 (full descriptions) made it worse on a 20-scenario smoke (top-1 0.60 → 0.25),
+consistent with the English checkpoint being trained on ≤512-token inputs. Latency on the Mac
+GPU (MPS): BM25→Laya ~175 ms median, Laya alone 263 ms (pool 30) / 620 ms (pool 100); $0.
+
 ## Tokens and latency
 
 Average tokens per query (Ratel BM25 runs locally with no model call: 0 tokens).
@@ -140,6 +179,10 @@ embedding. Jev spend for everything above ≈ $0.78.
    the 100-tool pool — the best quality/cost trade-off measured.
 5. Ratel hybrid is Ratel's best standalone method on BFCL (top-1 at pool 100: 0.925) but is
    statistically tied with semantic and still clearly behind Jev; Hybrid→Jev ties Jev (0.980).
+6. Laya (open-source, as shipped) is the weakest arm — below plain BM25 both standalone (0.514
+   at pool 100) and as a BM25 re-ranker (0.775 vs 0.893). Its fixed 192-token option budget
+   reduces options to their names; fine-tuning with a longer budget would be needed before it
+   could be useful as a Ratel re-rank stage.
 
 ## Caveats
 
@@ -156,6 +199,7 @@ embedding. Jev spend for everything above ≈ $0.78.
 ## Reproduce
 
 Commands are in EXPERIMENTS.md → "Competitor: TypeSafe Jev" (`--selector ratel|jev|ratel+jev`,
-`--rerank-depth 20`; BFCL `--ratel-output` writes the plain Ratel arm from the same pass). Raw rows are under `results/raw/{bfcl,sragents}/` (gitignored per
+`--rerank-depth 20`; BFCL `--ratel-output` writes the plain Ratel arm from the same pass; laya
+via `--jev-base-url http://127.0.0.1:8000 --jev-model english` against a local `laya-serve`). Raw rows are under `results/raw/{bfcl,sragents}/` (gitignored per
 ADR-0007); every Jev response is cached in `results/raw/jev-cache/`, so reruns replay with no
 API calls.
