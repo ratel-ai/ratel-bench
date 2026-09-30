@@ -90,6 +90,21 @@ export function optionText(item: JevItem): string {
   return text;
 }
 
+/**
+ * `compact` option text for servers with a small shared context (OpenJev/Verdict: 512
+ * tokens, options first, query last, and the option *key* is dropped): the name plus the
+ * description's first sentence, so ~15 options still leave room for the query.
+ */
+export function compactOptionText(item: JevItem): string {
+  const first = item.description
+    .split("\n")[0]
+    .split(/(?<=\.)\s/)[0]
+    .trim();
+  return `${item.name || item.id}: ${first}`;
+}
+
+export type OptionTextMode = "standard" | "compact";
+
 // ---------- options (shuffle + keys) ----------
 
 export interface JevOptions {
@@ -105,7 +120,12 @@ export interface JevOptions {
  * name. Duplicate names within a pool get `#2`, `#3`… so every option stays
  * addressable and maps back to its id.
  */
-export function buildOptions(items: readonly JevItem[], seedKey: string, seed: number): JevOptions {
+export function buildOptions(
+  items: readonly JevItem[],
+  seedKey: string,
+  seed: number,
+  mode: OptionTextMode = "standard",
+): JevOptions {
   const shuffled = [...items];
   shuffleInPlace(shuffled, mixSeed(seedKey, seed));
   const criteria: Record<string, string> = {};
@@ -117,7 +137,7 @@ export function buildOptions(items: readonly JevItem[], seedKey: string, seed: n
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     const key = n === 1 ? base : `${base}#${n}`;
-    criteria[key] = optionText(item);
+    criteria[key] = mode === "compact" ? compactOptionText(item) : optionText(item);
     keyToId.set(key, item.id);
     order.push(key);
   }
@@ -284,6 +304,9 @@ export interface JevRankMeta {
   latency_ms: number;
   input_tokens: number;
   cache_hit: boolean;
+  /** Tournament only: number of calls made for this ranking (latency/tokens are summed). */
+  calls?: number;
+  tournament?: boolean;
 }
 
 export interface JevRankerOptions {
@@ -298,7 +321,14 @@ export interface JevRankerOptions {
   /** False for self-hosted Jev-compatible servers that take no key. Default true. */
   requireApiKey?: boolean;
   client?: Omit<JevClientOptions, "apiKey">;
+  /** Option text format (default `standard`, what Ratel indexes). */
+  optionText?: OptionTextMode;
+  /** Server cap on options per question; larger pools are ranked by a tournament. */
+  maxOptions?: number;
 }
+
+/** Survivors kept per chunk in each tournament round (≥ the largest k we score). */
+const TOURNAMENT_KEEP = 5;
 
 function probabilitiesOf(
   response: JevResponse,
@@ -323,13 +353,100 @@ export class JevRanker {
     this.model = opts.model ?? JEV_MODEL;
   }
 
-  /** Rank every item in `pool` for `query`. `seedKey` must be unique per (scenario, pool). */
+  /**
+   * Rank every item in `pool` for `query`. `seedKey` must be unique per (scenario, pool).
+   * Within the server's option cap this is one call; above it, a tournament (see
+   * {@link JevRanker.tournament}).
+   */
   async rank(
     query: string,
     pool: readonly JevItem[],
     ctx: { scenarioId: string; poolSize: number; seedKey: string },
   ): Promise<{ hits: RankedHit[]; meta: JevRankMeta }> {
-    const options = buildOptions(pool, ctx.seedKey, this.opts.seed);
+    const cap = this.opts.maxOptions;
+    if (!cap || pool.length <= cap) return this.rankOnce(query, pool, ctx);
+    const acc = { calls: 0, latency: 0, tokens: 0, allHits: true, model: this.model };
+    const hits = await this.tournament(query, pool, ctx, cap, 0, acc);
+    return {
+      hits,
+      meta: {
+        jev_model: acc.model,
+        latency_ms: acc.latency,
+        input_tokens: acc.tokens,
+        cache_hit: acc.allHits,
+        calls: acc.calls,
+        tournament: true,
+      },
+    };
+  }
+
+  /**
+   * Multi-round tournament for pools above the option cap: seeded-shuffle into balanced
+   * chunks of ≤ cap, rank each chunk in one call, keep its top {@link TOURNAMENT_KEEP},
+   * and repeat on the survivors until they fit one final call. Final order = the final
+   * call's ranking, then each round's eliminated items by their in-chunk probability
+   * (later rounds first). Only ranks beyond the finalists (≥ 10) use cross-chunk scores.
+   */
+  private async tournament(
+    query: string,
+    items: readonly JevItem[],
+    ctx: { scenarioId: string; poolSize: number; seedKey: string },
+    cap: number,
+    level: number,
+    acc: { calls: number; latency: number; tokens: number; allHits: boolean; model: string },
+  ): Promise<RankedHit[]> {
+    const track = (meta: JevRankMeta) => {
+      acc.calls++;
+      acc.latency += meta.latency_ms;
+      acc.tokens += meta.input_tokens;
+      acc.allHits &&= meta.cache_hit;
+      acc.model = meta.jev_model;
+    };
+    if (items.length <= cap) {
+      const r = await this.rankOnce(query, items, {
+        ...ctx,
+        seedKey: `${ctx.seedKey}:L${level}:final`,
+      });
+      track(r.meta);
+      return r.hits;
+    }
+    const shuffled = [...items];
+    shuffleInPlace(shuffled, mixSeed(`${ctx.seedKey}:L${level}:chunks`, this.opts.seed));
+    const nChunks = Math.ceil(shuffled.length / cap);
+    const base = Math.floor(shuffled.length / nChunks);
+    const extra = shuffled.length % nChunks;
+    const byId = new Map(items.map((i) => [i.id, i]));
+    const survivors: JevItem[] = [];
+    const eliminated: { hit: RankedHit; chunk: number }[] = [];
+    let start = 0;
+    for (let c = 0; c < nChunks; c++) {
+      const size = base + (c < extra ? 1 : 0);
+      const chunk = shuffled.slice(start, start + size);
+      start += size;
+      const r = await this.rankOnce(query, chunk, {
+        ...ctx,
+        seedKey: `${ctx.seedKey}:L${level}:c${c}`,
+      });
+      track(r.meta);
+      r.hits.forEach((hit, i) => {
+        // keep ≤ size-1 per chunk so every round shrinks the field (guarantees termination)
+        if (i < Math.min(TOURNAMENT_KEEP, chunk.length - 1)) {
+          survivors.push(byId.get(hit.id) as JevItem);
+        } else eliminated.push({ hit, chunk: c });
+      });
+    }
+    const top = await this.tournament(query, survivors, ctx, cap, level + 1, acc);
+    eliminated.sort((a, b) => b.hit.score - a.hit.score || a.chunk - b.chunk);
+    return [...top, ...eliminated.map((e) => e.hit)];
+  }
+
+  /** One request: rank every item of `pool` (must fit the server's option cap). */
+  async rankOnce(
+    query: string,
+    pool: readonly JevItem[],
+    ctx: { scenarioId: string; poolSize: number; seedKey: string },
+  ): Promise<{ hits: RankedHit[]; meta: JevRankMeta }> {
+    const options = buildOptions(pool, ctx.seedKey, this.opts.seed, this.opts.optionText);
     const body: JevRequest = {
       model: this.model,
       state: query,
@@ -436,8 +553,23 @@ export async function rerankWithJev<T extends JevItem>(
  */
 export function jevConfigFromArgs(
   arg: (name: string, fallback: string) => string,
-): Pick<JevRankerOptions, "model" | "extraBody" | "requireApiKey" | "client"> {
+): Pick<
+  JevRankerOptions,
+  "model" | "extraBody" | "requireApiKey" | "client" | "optionText" | "maxOptions"
+> {
   const baseUrl = arg("--jev-base-url", "");
+  const optionTextRaw = arg("--jev-option-text", "standard");
+  if (optionTextRaw !== "standard" && optionTextRaw !== "compact") {
+    throw new Error(`--jev-option-text must be standard or compact (got "${optionTextRaw}")`);
+  }
+  const maxRaw = arg("--jev-max-options", "");
+  const maxOptions = maxRaw ? Number(maxRaw) : undefined;
+  if (
+    maxOptions !== undefined &&
+    (!Number.isInteger(maxOptions) || maxOptions <= TOURNAMENT_KEEP)
+  ) {
+    throw new Error(`--jev-max-options must be an integer > ${TOURNAMENT_KEEP} (got "${maxRaw}")`);
+  }
   const extraRaw = arg("--jev-body-extra", "");
   let extraBody: Record<string, unknown> | undefined;
   if (extraRaw) {
@@ -452,5 +584,7 @@ export function jevConfigFromArgs(
     extraBody,
     requireApiKey: !baseUrl,
     client: baseUrl ? { endpoint: `${baseUrl.replace(/\/+$/, "")}/v1/systemone` } : undefined,
+    ...(optionTextRaw === "compact" ? { optionText: "compact" as const } : {}),
+    ...(maxOptions ? { maxOptions } : {}),
   };
 }

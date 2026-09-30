@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildOptions,
   callJev,
+  compactOptionText,
   JEV_INSTRUCTIONS,
   JEV_MODEL,
   JevCache,
@@ -335,5 +336,107 @@ describe("jevConfigFromArgs + self-hosted servers", () => {
     expect(init.headers).not.toHaveProperty("Authorization");
     const sent = JSON.parse(init.body as string);
     expect(sent).toMatchObject({ model: "english", head_max_len: 1024 });
+  });
+});
+
+describe("tournament for option-capped servers (OpenJev/Verdict)", () => {
+  // Server mock: probability ∝ the number in the key, so `t{max}` is always the best option.
+  function scoringFetch() {
+    const sizes: number[] = [];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      const keys = Object.keys(body.questions.select.criteria);
+      sizes.push(keys.length);
+      const w = keys.map((k) => Number(k.slice(1)) + 1);
+      const total = w.reduce((a, b) => a + b, 0);
+      return jsonResponse(
+        choiceResponse(Object.fromEntries(keys.map((k, i) => [k, w[i] / total])), keys.length),
+      );
+    });
+    return { fetchImpl, sizes };
+  }
+  function ranker(fetchImpl: typeof fetch, maxOptions?: number) {
+    const cachePath = join(mkdtempSync(join(tmpdir(), "jev-")), "cache.jsonl");
+    return new JevRanker({
+      kind: "tool",
+      cache: new JevCache(cachePath),
+      seed: 42,
+      requireApiKey: false,
+      apiKey: () => undefined,
+      maxOptions,
+      client: { fetchImpl, sleep: noSleep },
+    });
+  }
+  const pool = (n: number) => Array.from({ length: n }, (_, i) => item(`t${i}`));
+  const ctx = (n: number) => ({ scenarioId: "sc", poolSize: n, seedKey: `sc:jev:${n}` });
+
+  it("pool 30, cap 15: 2 chunks + final = 3 calls, all within the cap, best first", async () => {
+    const { fetchImpl, sizes } = scoringFetch();
+    const { hits, meta } = await ranker(fetchImpl, 15).rank("q", pool(30), ctx(30));
+    expect(sizes).toEqual([15, 15, 10]);
+    expect(hits.map((h) => h.id).slice(0, 5)).toEqual(["t29", "t28", "t27", "t26", "t25"]);
+    expect(new Set(hits.map((h) => h.id)).size).toBe(30);
+    expect(meta).toMatchObject({ tournament: true, calls: 3, cache_hit: false, input_tokens: 40 });
+  });
+
+  it("pool 100, cap 15: 7 + 3 + 1 = 11 calls, every request ≤ 15 options", async () => {
+    const { fetchImpl, sizes } = scoringFetch();
+    const { hits, meta } = await ranker(fetchImpl, 15).rank("q", pool(100), ctx(100));
+    expect(sizes).toHaveLength(11);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(15);
+    expect(hits[0].id).toBe("t99");
+    expect(hits).toHaveLength(100);
+    expect(meta.calls).toBe(11);
+  });
+
+  it("is deterministic and a rerun is served from cache", async () => {
+    const { fetchImpl } = scoringFetch();
+    const r = ranker(fetchImpl, 15);
+    const a = await r.rank("q", pool(30), ctx(30));
+    const b = await r.rank("q", pool(30), ctx(30));
+    expect(b.hits).toEqual(a.hits);
+    expect(b.meta.cache_hit).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it("no cap, or a pool within the cap, is one plain call with no tournament fields", async () => {
+    const { fetchImpl, sizes } = scoringFetch();
+    const one = await ranker(fetchImpl, 24).rank("q", pool(20), ctx(20));
+    const none = await ranker(fetchImpl).rank("q", pool(30), ctx(30));
+    expect(sizes).toEqual([20, 30]);
+    expect(one.meta).not.toHaveProperty("tournament");
+    expect(none.meta).not.toHaveProperty("calls");
+  });
+
+  it("terminates even when chunks are barely above the keep size", async () => {
+    const { fetchImpl, sizes } = scoringFetch();
+    const { hits } = await ranker(fetchImpl, 6).rank("q", pool(7), ctx(7));
+    expect(hits[0].id).toBe("t6");
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(6);
+  });
+});
+
+describe("compact option text and flags", () => {
+  it("is name + first sentence, no parameters", () => {
+    expect(
+      compactOptionText(
+        item("calc", {
+          name: "geometry.area_triangle",
+          description: "Calculate the area of a triangle. Uses base and height.\nMore.",
+          input_schema: { properties: { base: { description: "the base" } } },
+        }),
+      ),
+    ).toBe("geometry.area_triangle: Calculate the area of a triangle.");
+  });
+
+  it("--jev-option-text / --jev-max-options parse and validate", () => {
+    const a = (m: Record<string, string>) => (n: string, f: string) => m[n] ?? f;
+    expect(
+      jevConfigFromArgs(a({ "--jev-option-text": "compact", "--jev-max-options": "15" })),
+    ).toMatchObject({ optionText: "compact", maxOptions: 15 });
+    expect(() => jevConfigFromArgs(a({ "--jev-option-text": "short" }))).toThrow(
+      /standard or compact/,
+    );
+    expect(() => jevConfigFromArgs(a({ "--jev-max-options": "5" }))).toThrow(/integer > 5/);
   });
 });
