@@ -308,6 +308,24 @@ RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+laya-english-55cf4c4 pnpm -F @ratel-a
   --jev-cache results/raw/jev-cache/bfcl-laya.jsonl --pool-sizes 30,100 \
   --output results/raw/bfcl/retrieval-bm25+laya.jsonl
 
+# OpenJev = Verdict (heman10x/rlcd-modernbert-151m @ 8af2496) via razorback16/openjev (@ dcd2094),
+# CPU, no API key. Verdict: ≤24 options, one 512-token window (options first, query last), so use
+# compact option text + ≤15 options per call (tournament for larger pools). Server (separate venv,
+# `pip install -e '.[verdict]'`):
+#   OPENJEV_BACKEND=verdict OPENJEV_DEVICE=cpu OPENJEV_VERDICT_MODEL=<local snapshot> \
+#   OPENJEV_HOST=127.0.0.1 OPENJEV_PORT=8080 python -m openjev
+RATEL_VERSION_LABEL=openjev-verdict-151m-8af2496 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector jev --jev-base-url http://127.0.0.1:8080 --jev-model verdict-1.4 \
+  --jev-option-text compact --jev-max-options 15 \
+  --jev-cache results/raw/jev-cache/bfcl-openjev.jsonl --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-openjev.jsonl
+RATEL_VERSION_LABEL=ratel-0.13.0-rc.7-bm25+openjev-verdict-151m-8af2496 pnpm -F @ratel-ai/benchmark bfcl-candidates \
+  --selector ratel+jev --sdk-version 0.13.0-rc.7 --retriever bm25 --rerank-depth 20 \
+  --jev-base-url http://127.0.0.1:8080 --jev-model verdict-1.4 \
+  --jev-option-text compact --jev-max-options 15 \
+  --jev-cache results/raw/jev-cache/bfcl-openjev.jsonl --pool-sizes 30,100 \
+  --output results/raw/bfcl/retrieval-bm25+openjev.jsonl
+
 # summarize each label (bfcl-summarize / sragents-summarize --label <L> --retrieval-rows <file>)
 ```
 Results: docs/jev-vs-ratel-results.md. Jev rows add `selector`, `jev_model`, `latency_ms` (network round-trip — report separately,
