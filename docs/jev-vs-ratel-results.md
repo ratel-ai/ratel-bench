@@ -190,6 +190,12 @@ Paired top-1 hits (first-named wins vs second-named wins):
 | BM25→OpenJev vs BM25→Laya | 52 vs 8 (p ≈ 5e-9) | 89 vs 20 (p ≈ 1e-11) |
 | BM25→Jev vs BM25→OpenJev | 18 vs 2 (p ≈ 4e-4) | 50 vs 6 (p ≈ 1e-9) |
 
+**Semantic→OpenJev (BFCL pool 100 only, 2026-10-01):** recall@1/3/5 = 0.888 / 0.990 / 0.998,
+MRR@5 0.938 — vs Semantic 0.915 / 0.987 / 0.998 and Semantic→Jev 0.982 / 1.000 / 1.000.
+Paired top-1: Semantic vs Semantic→OpenJev 41 vs 25 (p = 0.06); Semantic→Jev vs Semantic→OpenJev
+60 vs 4 (p ≈ 7e-14). OpenJev does not improve on any Ratel first stage it re-ranks. (The same pass
+reproduced the earlier semantic pool-100 rows byte-identically.)
+
 Cost and latency (Mac CPU, $0), per query: OpenJev pool 30 — 3 calls, ~1.1k input tokens,
 ~1.3 s median; pool 100 — 11 calls, ~4.2k tokens, ~4.8 s median. BM25→OpenJev — 1.1 / 2.3 calls,
 ~240 / ~640 tokens, ~174 / ~604 ms median (pool 30 / 100; BM25 often returns < 20 candidates
