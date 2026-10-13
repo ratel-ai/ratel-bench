@@ -28,11 +28,13 @@ import type {
   TaskSummaryRow,
 } from "./bfcl-types.js";
 import { errorClassOf, isInfraError, supersede } from "./cell-errors.js";
+import { modelRouteOfRow } from "./cell-key.js";
 import { appendJsonl, readJsonl } from "./io.js";
 import { astArgRecall } from "./judges/ast.js";
 import { effectiveCalls } from "./metering.js";
 import { resolveRepoPath } from "./paths.js";
 import {
+  assertSingleModelProvenance,
   corpusOf,
   isTruncated,
   labelledCellKeyOf,
@@ -92,12 +94,15 @@ export function summarizeBfcl(args: {
 }): SummarizeResult {
   const { arm, label } = args;
   const inLabel = (version: string | undefined) => !label || (version ?? "unknown") === label;
-  const cells = args.cells.filter(
-    (c) =>
-      bfclType(c.scenario_id) !== null &&
-      (!arm || c.arm === arm) &&
-      inLabel(c.ratel_ai_core_version),
-  );
+  const cells = args.cells
+    .filter(
+      (c) =>
+        bfclType(c.scenario_id) !== null &&
+        (!arm || c.arm === arm) &&
+        inLabel(c.ratel_ai_core_version),
+    )
+    .map((cell) => ({ ...cell, model: modelRouteOfRow(cell) }));
+  assertCellProvenance(cells);
   const taskRows = buildTaskRows(supersede(cells, labelledCellKeyOf), args.scenarios);
   return {
     retrievalSummary: summarizeRetrieval(
@@ -140,6 +145,9 @@ function summarizeRetrieval(rows: BfclRetrievalRow[]): RetrievalSummaryRow[] {
     out.push({
       timestamp,
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "retriever_evaluation",
       type: type as BfclType,
       pool_size: Number(poolStr),
@@ -177,9 +185,15 @@ function buildTaskRows(cells: CellResult[], scenarios: Scenario[]): TaskRow[] {
     const scenario = byId.get(c.scenario_id);
     out.push({
       ratel_ai_core_version: c.ratel_ai_core_version ?? "unknown",
+      ratel_ai_core_resolved_version: c.ratel_ai_core_resolved_version ?? null,
       generated_at: c.generated_at ?? "",
       type,
       model: c.model,
+      ...(c.serving_provider ? { serving_provider: c.serving_provider } : {}),
+      ...(c.publisher ? { publisher: c.publisher } : {}),
+      ...(c.resolved_model ? { resolved_model: c.resolved_model } : {}),
+      ...(c.vertex_location ? { vertex_location: c.vertex_location } : {}),
+      ...(c.cost_source ? { cost_source: c.cost_source } : {}),
       arm: c.arm,
       scenario_id: c.scenario_id,
       query: scenario?.prompt ?? "",
@@ -220,14 +234,30 @@ function summarizeTask(rows: TaskRow[], timestamps: Map<string, string>): TaskSu
   for (const [key, arr] of groups) {
     const [version, type, model, arm] = key.split("::");
     const kept = arr.filter((r) => !r.excluded);
+    assertSingleModelProvenance(kept, model);
     const clean = kept.filter((r) => r.error_class === null);
     const astRows = kept.filter((r) => r.task_completion_pass !== null);
     const recalls = kept.map((r) => r.recall).filter((x): x is number => x !== null);
     out.push({
       timestamp: timestamps.get(key) ?? "",
       ratel_ai_core_version: version,
+      ratel_ai_core_resolved_version: provenance(
+        arr.map((r) => r.ratel_ai_core_resolved_version ?? null),
+      ),
       source: "task_completion",
       model,
+      ...(kept.some((r) => r.serving_provider)
+        ? { serving_provider: provenance(kept.map((r) => r.serving_provider ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.publisher)
+        ? { publisher: provenance(kept.map((r) => r.publisher ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.resolved_model)
+        ? { resolved_model: provenance(kept.map((r) => r.resolved_model ?? null)) }
+        : {}),
+      ...(kept.some((r) => r.vertex_location)
+        ? { vertex_location: provenance(kept.map((r) => r.vertex_location ?? null)) }
+        : {}),
       arm,
       type: type as BfclType,
       scenarios: kept.length,
@@ -250,6 +280,26 @@ function summarizeTask(rows: TaskRow[], timestamps: Map<string, string>): TaskSu
     (a, b) =>
       a.type.localeCompare(b.type) || a.model.localeCompare(b.model) || a.arm.localeCompare(b.arm),
   );
+}
+
+/** Validate every non-infrastructure route before history supersession can hide a conflict. */
+function assertCellProvenance(cells: CellResult[]): void {
+  const groups = new Map<string, CellResult[]>();
+  for (const cell of cells) {
+    if (isInfraError(cell)) continue;
+    const type = bfclType(cell.scenario_id);
+    if (type === null) continue;
+    const key = groupKey({
+      ratel_ai_core_version: cell.ratel_ai_core_version ?? "unknown",
+      type,
+      model: cell.model,
+      arm: cell.arm,
+    });
+    (groups.get(key) ?? groups.set(key, []).get(key))?.push(cell);
+  }
+  for (const group of groups.values()) {
+    assertSingleModelProvenance(group, group[0]?.model ?? "unknown");
+  }
 }
 
 /** Summary group of a task row / cell: label × type × LLM × arm. */

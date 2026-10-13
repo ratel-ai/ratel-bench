@@ -49,7 +49,9 @@ function main(): void {
     }
 
     if (dryRun) {
-      console.log(`• ${rel}: would drop [${dropped.join(", ")}], keep [${kept.join(", ") || "none"}]`);
+      console.log(
+        `• ${rel}: would drop [${dropped.join(", ")}], keep [${kept.join(", ") || "none"}]`,
+      );
       continue;
     }
 

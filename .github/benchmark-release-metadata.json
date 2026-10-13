@@ -1,0 +1,15 @@
+{
+  "sdk": [
+    {
+      "version": "0.12.0",
+      "integrity": "sha512-7gapjM5oMpS5JEYstQMBltidT2eIDILHjLYQnkbvjVz9rdlRBh1uva5IyyBW/+6KEioiTBzgH5gIpQUsvkw03g=="
+    }
+  ],
+  "core": [
+    {
+      "version": "0.11.0",
+      "checksum": "718677ffc2cceecd5cd56ccee57fdfd1a7da0b7032750b808d2ca1a26f40dbf8"
+    }
+  ],
+  "compatible": [{ "sdk": "0.12.0", "core": "0.11.0" }]
+}

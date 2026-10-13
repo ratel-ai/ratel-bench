@@ -17,6 +17,7 @@ import {
   resumeLine,
   runExitCode,
   runRounds,
+  summarizeRunCoverage,
   tallyRow,
 } from "./rerun.js";
 
@@ -37,6 +38,28 @@ const summary = (over: Partial<DoneSummary> = {}): DoneSummary => ({
 });
 
 describe("formatDoneLine", () => {
+  it("labels known spend as a lower bound when attempt accounting is incomplete", () => {
+    const line = formatDoneLine(
+      summary({
+        spend: {
+          attempts: 3,
+          unresolved: 1,
+          unknown: 1,
+          untrackedRows: 0,
+          unattributedAttempts: 2,
+          knownUsd: 0.5,
+          completeness: "partial",
+        },
+      }),
+    );
+    expect(line).toContain("spent (known lower bound; 1 unresolved, 1 unknown");
+    expect(line).toContain("2 unattributed attempts");
+  });
+  it("labels a known subtotal when some cells have unknown cost", () => {
+    expect(formatDoneLine(summary({ unknown_cost_cells: 2 }))).toContain(
+      "$1.2346 spent, 2 unknown-cost cells, stopped=completed",
+    );
+  });
   it("matches /^done: \\d+ cells run/ and /, \\$([0-9.]+) spent/ and appends counts", () => {
     const line = formatDoneLine(summary());
     // The bench-run.sh contract: its grep and its sed on the spend.
@@ -73,6 +96,99 @@ describe("formatDoneLine", () => {
       "aborted: gpt-6-astra — fatal: model not available for this account",
       "aborted: haiku — error_circuit: 10 consecutive transient/access errors",
     ]);
+  });
+
+  it("prints structured terminal coverage and exits nonzero for incomplete work", () => {
+    const incomplete = summary({
+      stopped_reason: "global_cap",
+      cap_hit: true,
+      coverage: {
+        requested: 4,
+        completed: 2,
+        failed: 0,
+        reused: 1,
+        skipped: 1,
+        status: "budget_limited",
+      },
+    });
+    expect(doneLines(incomplete)[1]).toBe(
+      "coverage: status=budget_limited, requested=4, completed=2, failed=0, reused=1, skipped=1",
+    );
+    expect(runExitCode(incomplete)).toBe(2);
+  });
+});
+
+describe("summarizeRunCoverage", () => {
+  const key = (row: { key: string }) => row.key;
+
+  it("classifies final unique cells after retries and reconciles the request", () => {
+    const coverage = summarizeRunCoverage(
+      ["success", "failed", "reused", "missing"],
+      [
+        { key: "success", error: "Overloaded" },
+        { key: "success", error: null },
+        { key: "failed", error: "Overloaded" },
+        { key: "reused", error: null, cache_source: "reused" as const },
+      ],
+      key,
+      "global_cap",
+    );
+    expect(coverage).toEqual({
+      requested: 4,
+      completed: 1,
+      failed: 1,
+      reused: 1,
+      skipped: 1,
+      status: "budget_limited",
+    });
+  });
+
+  it("never calls all-infra-error or interrupted work completed", () => {
+    expect(
+      summarizeRunCoverage(["a"], [{ key: "a", error: "Overloaded" }], key, "completed").status,
+    ).toBe("failed");
+    expect(summarizeRunCoverage(["a"], [], key, "interrupted").status).toBe("cancelled");
+  });
+});
+
+describe("summarizeRunCoverage scored failures", () => {
+  it("counts timeouts and model-outcome errors as completed, scored cells", () => {
+    const coverage = summarizeRunCoverage(
+      ["timeout", "unparseable", "ok"],
+      [
+        { key: "timeout", error: "run timed out after 180000ms", error_class: "timeout" as const },
+        { key: "unparseable", error: "No object generated: could not parse the response.", error_class: "outcome" as const },
+        { key: "ok", error: null },
+      ],
+      (row: { key: string }) => row.key,
+      "completed",
+    );
+    expect(coverage).toEqual({ requested: 3, completed: 3, failed: 0, reused: 0, skipped: 0, status: "completed" });
+  });
+});
+
+describe("summarizeRunCoverage spend evidence", () => {
+  const spend = (over: Record<string, number>) => ({
+    attempts: 2,
+    unresolved: 0,
+    unknown: 0,
+    untrackedRows: 0,
+    unattributedAttempts: 0,
+    knownUsd: 0.1,
+    completeness: "partial" as const,
+    ...over,
+  });
+  const cover = (s: ReturnType<typeof spend>) =>
+    summarizeRunCoverage(["a"], [{ key: "a", error: null }], (row: { key: string }) => row.key, "completed", s).status;
+
+  it("completes when the only gap is a settled attempt of unknown cost", () => {
+    expect(cover(spend({ unknown: 1 }))).toBe("completed");
+  });
+
+  it("stays partial on unresolved, unattributed or untracked spend evidence", () => {
+    expect(cover(spend({ unresolved: 1 }))).toBe("partial");
+    expect(cover(spend({ unattributedAttempts: 1 }))).toBe("partial");
+    expect(cover(spend({ untrackedRows: 1 }))).toBe("partial");
   });
 });
 

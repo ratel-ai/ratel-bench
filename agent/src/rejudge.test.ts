@@ -1,8 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rejudge } from "./rejudge.js";
+import { openSpendLedger } from "./spend-ledger.js";
 import type { CellResult, Scenario } from "./types.js";
 
 let tempDir: string;
@@ -11,6 +13,43 @@ beforeEach(() => {
 });
 afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
+});
+
+it("journals a paid rejudge call beside its output", async () => {
+  const corpusPath = join(tempDir, "corpus.jsonl");
+  const inputPath = join(tempDir, "input.jsonl");
+  const outputPath = join(tempDir, "output.jsonl");
+  writeFileSync(corpusPath, `${JSON.stringify(scenario({ id: "one" }))}\n`);
+  writeFileSync(
+    inputPath,
+    `${JSON.stringify(cell({ scenario_id: "one", final_text: "answer" }))}\n`,
+  );
+  const model = new MockLanguageModelV3({
+    doGenerate: async () => ({
+      content: [{ type: "text", text: JSON.stringify({ verdict: "pass", explanation: "ok" }) }],
+      finishReason: { unified: "stop", raw: "end_turn" },
+      usage: {
+        inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 5, text: 5, reasoning: 0 },
+      },
+      warnings: [],
+    }),
+  });
+  await rejudge({
+    inputPath,
+    outputPath,
+    corpusPath,
+    judgeModel: model,
+    judgeModelId: "bedrock/j",
+    pricing: {
+      "bedrock/j": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    },
+  });
+  expect(openSpendLedger(`${outputPath}.spend.jsonl`).summary()).toMatchObject({
+    attempts: 1,
+    knownUsd: 0.00002,
+    completeness: "complete",
+  });
 });
 
 function scenario(over: Partial<Scenario> & { id: string }): Scenario {

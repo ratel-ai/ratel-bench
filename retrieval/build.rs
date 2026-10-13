@@ -19,12 +19,24 @@ fn main() {
         }
     };
     println!("cargo:rerun-if-changed={}", lock.display());
+    println!("cargo:rustc-check-cfg=cfg(core_searchable_description)");
 
     let version = std::fs::read_to_string(&lock)
         .ok()
         .and_then(|s| parse_dep_version(&s, "ratel-ai-core"))
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=RATEL_AI_CORE_VERSION={version}");
+    // Core 0.11 added this required field to Tool and Skill. Keep historical
+    // version-set builds on their original struct shape.
+    if let Some(minor) = version
+        .split('.')
+        .nth(1)
+        .and_then(|part| part.parse::<u64>().ok())
+        && version.starts_with("0.")
+        && minor >= 11
+    {
+        println!("cargo:rustc-cfg=core_searchable_description");
+    }
 }
 
 /// Find the `version` of a `[[package]]` named `name` in a Cargo.lock. Cargo

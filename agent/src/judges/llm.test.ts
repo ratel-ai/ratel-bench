@@ -1,5 +1,7 @@
 import { NoObjectGeneratedError, RetryError } from "ai";
 import { describe, expect, it, vi } from "vitest";
+import { BudgetLimitedError } from "../campaign-budget.js";
+import { SpendJournalError } from "../llm-retry.js";
 import { JUDGE_MAX_RETRIES, judgeLLM } from "./llm.js";
 
 vi.mock("ai", async () => {
@@ -11,6 +13,31 @@ vi.mock("ai", async () => {
 });
 
 describe("judgeLLM", () => {
+  it("propagates budget denial instead of returning a judge n/a", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(
+      new BudgetLimitedError({
+        ceilingTicks: 100,
+        spentTicks: 100,
+        reservedTicks: 0,
+        remainingTicks: 0,
+        unresolved: 0,
+        discrepant: false,
+      }),
+    );
+    await expect(
+      judgeLLM({ prompt: "hi", finalText: "hi", model: {} as never }),
+    ).rejects.toMatchObject({ status: "budget_limited" });
+  });
+  it("propagates journal failure instead of scoring an unaccounted judge call", async () => {
+    const ai = await import("ai");
+    vi.mocked(ai.generateObject).mockRejectedValueOnce(
+      new SpendJournalError(new Error("disk full")),
+    );
+    await expect(judgeLLM({ prompt: "hi", finalText: "hi", model: {} as never })).rejects.toThrow(
+      SpendJournalError,
+    );
+  });
   it("returns n/a when the model call throws (criteria path)", async () => {
     const result = await judgeLLM({
       prompt: "what is 2+2?",
@@ -21,6 +48,21 @@ describe("judgeLLM", () => {
     });
     expect(result.verdict).toBe("n/a");
     expect(result.explanation).toMatch(/judge failed/);
+  });
+
+  it("routes paid judge retries through the attempt recorder", async () => {
+    const ai = await import("ai");
+    const mock = vi.mocked(ai.generateObject);
+    mock.mockResolvedValueOnce({ object: { verdict: "pass", explanation: "ok" } } as never);
+    const result = await judgeLLM({
+      prompt: "hello",
+      finalText: "hi",
+      model: { specificationVersion: "v2", provider: "test", modelId: "m" } as never,
+      attempt: { start: () => "id", finish: () => {} },
+    });
+    expect(result.verdict).toBe("pass");
+    expect(mock.mock.calls.at(-1)?.[0].maxRetries).toBe(0);
+    expect(mock.mock.calls.at(-1)?.[0].model).not.toBeUndefined();
   });
 
   it("falls back to prompt-only judging when criteria is empty (the MetaTool case)", async () => {

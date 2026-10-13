@@ -65,6 +65,26 @@ describe("summarize", () => {
     expect(summarize(noTotal).totalTokens).toBe(150);
   });
 
+  it("does not count cached prompt tokens twice when totalTokens is absent", () => {
+    const noTotal: AgentLikeResult = {
+      steps: [
+        {
+          usage: {
+            inputTokens: 10,
+            outputTokens: 4,
+            inputTokenDetails: { cacheReadTokens: 3, cacheWriteTokens: 2 },
+          },
+        },
+      ],
+    };
+    expect(summarize(noTotal)).toMatchObject({
+      inputTokens: 10,
+      cachedInputTokens: 3,
+      cacheCreationTokens: 2,
+      totalTokens: 14,
+    });
+  });
+
   it("handles a null result gracefully", () => {
     const s = summarize(null);
     expect(s.inputTokens).toBe(0);
@@ -74,24 +94,50 @@ describe("summarize", () => {
 });
 
 describe("dollarCost", () => {
+  it("records no provider API charge for a local Ollama route", () => {
+    expect(
+      dollarCost("ollama:qwen3.5", { input: 100, output: 20, cachedInput: 0, cacheCreation: 0 }),
+    ).toBe(0);
+  });
+  it("charges cached Gemini prompt tokens at the cache rate only", () => {
+    expect(
+      dollarCost(
+        "gcp/gemini-2.5-pro",
+        {
+          input: 20,
+          output: 6,
+          cachedInput: 5,
+          cacheCreation: 0,
+        },
+        {
+          "gcp/gemini-2.5-pro": {
+            inputPer1M: 2,
+            outputPer1M: 4,
+            cachedInputPer1M: 0.2,
+            cacheCreationPer1M: 2.5,
+          },
+        },
+      ),
+    ).toBeCloseTo(55 / 1_000_000, 12);
+  });
   // DEFAULT_PRICING is an empty fallback (real rates live in models.json), so
   // against it every model — known ids included — resolves to $0.
-  it("returns 0 for every model against the (empty) default table", () => {
+  it("returns unknown for every model against the empty default table", () => {
     const cost = dollarCost(
       "gpt-5.4-mini",
       { input: 1_000_000, output: 1_000_000, cachedInput: 1_000_000, cacheCreation: 1_000_000 },
       DEFAULT_PRICING,
     );
-    expect(cost).toBe(0);
+    expect(cost).toBeNull();
   });
 
-  it("returns 0 for unknown models", () => {
+  it("returns unknown for unpriced models", () => {
     const cost = dollarCost(
       "imaginary-model",
       { input: 1_000_000, output: 1_000_000, cachedInput: 0, cacheCreation: 0 },
       DEFAULT_PRICING,
     );
-    expect(cost).toBe(0);
+    expect(cost).toBeNull();
   });
 
   it("still computes cost when an explicit price table is supplied", () => {
@@ -109,6 +155,41 @@ describe("dollarCost", () => {
     );
     expect(cost).toBeCloseTo(4.05, 5);
   });
+});
+
+it("does not price a completed step whose provider omitted token usage", async () => {
+  const { cell } = await meter(
+    {
+      scenarioId: "s",
+      arm: "control-baseline",
+      model: "bedrock/m",
+      runIndex: 0,
+      catalogSize: 0,
+      poolSize: 0,
+      seed: 0,
+    },
+    async () => ({ steps: [{ toolCalls: [] }] }),
+    { "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 } },
+  );
+  expect(cell.dollar_cost).toBeNull();
+  expect(cell.cost_source).toBe("unknown");
+});
+
+it("does not price malformed negative token usage", async () => {
+  const { cell } = await meter(
+    {
+      scenarioId: "s",
+      arm: "control-baseline",
+      model: "bedrock/m",
+      runIndex: 0,
+      catalogSize: 0,
+      poolSize: 0,
+      seed: 0,
+    },
+    async () => ({ steps: [{ usage: { inputTokens: -1, outputTokens: 2 } }] }),
+    { "bedrock/m": { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 } },
+  );
+  expect(cell.dollar_cost).toBeNull();
 });
 
 describe("summarize with nameToId remap", () => {
@@ -172,9 +253,9 @@ describe("meter", () => {
     expect(cell.tool_calls_total).toBe(3);
     expect(cell.gateway_calls).toBe(1);
     expect(cell.error).toBeNull();
-    // meter() here passes no pricing table → empty DEFAULT_PRICING fallback → $0.
-    // (Real runs pass config.pricing from models.json.)
-    expect(cell.dollar_cost).toBe(0);
+    // Missing route rates are unknown, including for a successful call.
+    expect(cell.dollar_cost).toBeNull();
+    expect(cell.cost_source).toBe("unknown");
     expect(cell.wall_ms).toBeGreaterThanOrEqual(0);
     expect(cell.programmatic_verdict).toBe("n/a");
     expect(raw).toBe(fakeResult);

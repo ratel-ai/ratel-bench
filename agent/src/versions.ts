@@ -30,18 +30,25 @@ export function parseLockVersion(lock: string, name: string): string | null {
 }
 
 /**
- * The resolved `ratel-ai-core` version from the repo-root `Cargo.lock`, or
- * `"unknown"` when the lockfile or package isn't found. Computed once at module
- * load — the lockfile doesn't change within a run.
+ * Resolve the actual core release and the report label independently. A
+ * method-specific label never changes the crate version recorded as provenance.
  */
-export const RATEL_AI_CORE_VERSION: string = (() => {
-  // Explicit override for the version *label* stamped on rows (the field the
-  // reports group layers on). Lets one build be run under distinct labels — e.g.
-  // the same SDK 0.4.0 exercised as `0.4.0-sparse` / `0.4.0-dense` / `0.4.0-hybrid`
-  // by switching `--retriever` — since the retrieval method isn't a separate crate.
-  // Set on the command line: `RATEL_VERSION_LABEL=0.4.0-dense pnpm ... start ...`.
-  if (process.env.RATEL_VERSION_LABEL) return process.env.RATEL_VERSION_LABEL;
+export function resolveCoreVersions(
+  lock: string,
+  label?: string,
+): { label: string; resolved: string } {
+  const resolved = parseLockVersion(lock, "ratel-ai-core") ?? "unknown";
+  return { label: label || resolved, resolved };
+}
+
+const CORE_VERSIONS = (() => {
   const lockPath = resolveRepoPath("Cargo.lock");
-  if (!existsSync(lockPath)) return "unknown";
-  return parseLockVersion(readFileSync(lockPath, "utf-8"), "ratel-ai-core") ?? "unknown";
+  const lock = existsSync(lockPath) ? readFileSync(lockPath, "utf-8") : "";
+  return resolveCoreVersions(lock, process.env.RATEL_VERSION_LABEL);
 })();
+
+/** Grouping label, optionally method-suffixed by RATEL_VERSION_LABEL. */
+export const RATEL_AI_CORE_VERSION = CORE_VERSIONS.label;
+
+/** Exact crate release in Cargo.lock, independent of the report label and SDK. */
+export const RATEL_AI_CORE_RESOLVED_VERSION = CORE_VERSIONS.resolved;

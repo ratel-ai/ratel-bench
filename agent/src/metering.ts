@@ -2,22 +2,16 @@
 // CellResult ready for JSONL persistence. Structural typing on the result lets
 // us swap providers/SDK versions without coupling the meter to a specific shape.
 
-import { createRequire } from "node:module";
-import { INVOKE_TOOL_ID, SEARCH_TOOLS_ID } from "@ratel-ai/sdk";
 import type { LanguageModel } from "ai";
 import { classifyError, type ErrorClass } from "./cell-errors.js";
 import type { RetryStats } from "./llm-retry.js";
+import { GATEWAY_INVOKE_ID, GATEWAY_SEARCH_ID, sdkVersion } from "./sdk/resolve.js";
 import type { Arm, CellResult, ProgrammaticVerdict, ToolCall } from "./types.js";
-import { RATEL_AI_CORE_VERSION } from "./versions.js";
+import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
 
-// Resolve the installed SDK version once. Used as the `ratel_version` row
-// dimension and (downstream) cache-key component, so a campaign run is
-// "ratel v0.1.5 ran on this corpus" rather than "whatever was on the tree".
-export const SDK_VERSION: string = (() => {
-  const requirePkg = createRequire(import.meta.url);
-  const pkg = requirePkg("@ratel-ai/sdk/package.json") as { version: string };
-  return pkg.version;
-})();
+// Historical default for callers that report it directly. Rows resolve the
+// selected package at measurement time, after --sdk-version is parsed.
+export const SDK_VERSION: string = sdkVersion();
 
 /** Loose shape of `agent.generate()` output we depend on. Keeps us decoupled from AI SDK internals. */
 export interface AgentLikeResult {
@@ -36,8 +30,10 @@ export interface AgentStep {
     outputTokens?: number;
     cachedInputTokens?: number;
     cacheCreationInputTokens?: number;
+    inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
     totalTokens?: number;
   };
+  providerMetadata?: Record<string, Record<string, unknown>>;
 }
 
 /**
@@ -72,7 +68,7 @@ export type PricingTable = Record<string, ModelPrice>;
  * entry in models.json (backend-keyed) and are loaded at runtime into
  * `RunnerConfig.pricing` by {@link file://./pricing.ts} — see `loadModelPricing`.
  * That keeps a model defined in one place and lets an unpriced model run fine at
- * $0. This empty default only applies when no pricing table is passed at all.
+ * unknown. This empty default only applies when no pricing table is passed at all.
  */
 export const DEFAULT_PRICING: PricingTable = {};
 
@@ -85,14 +81,16 @@ export function dollarCost(
     cacheCreation: number;
   },
   pricing: PricingTable = DEFAULT_PRICING,
-): number {
+): number | null {
   const price = pricing[modelId];
-  // Unknown models (incl. `ollama:*` local runs) intentionally return $0 — the
-  // caller can spot a stale price table by cross-referencing raw tokens with
-  // expected provider rates. For local runs the $0 is real, not stale.
-  if (!price) return 0;
+  if (modelId.startsWith("ollama:")) return 0;
+  if (!price) return null;
+  // AI SDK inputTokens is the total prompt count, including cache reads/writes.
+  // Bill each reported category once; tolerate older rows that reported only
+  // cache categories without a total.
+  const uncachedInput = Math.max(0, tokens.input - tokens.cachedInput - tokens.cacheCreation);
   return (
-    (tokens.input * price.inputPer1M +
+    (uncachedInput * price.inputPer1M +
       tokens.output * price.outputPer1M +
       tokens.cachedInput * price.cachedInputPer1M +
       tokens.cacheCreation * price.cacheCreationPer1M) /
@@ -124,6 +122,10 @@ export interface MeterContext {
   nameToId?: ReadonlyMap<string, string>;
   /** AI SDK provider id of the model (see {@link providerOf}); stamped on the row. */
   provider?: string;
+  servingProvider?: string;
+  publisher?: string;
+  resolvedModel?: string;
+  vertexLocation?: string;
   /**
    * The cell's retry counters (`llm-retry.ts`), read once `generate` settles.
    * Plan-pinned U1/U4 rule: a timeout in a cell that saw any retry classifies
@@ -133,7 +135,7 @@ export interface MeterContext {
   retryStats?: Pick<RetryStats, "retries">;
 }
 
-const GATEWAY_NAMES = new Set<string>([SEARCH_TOOLS_ID, INVOKE_TOOL_ID]);
+const GATEWAY_NAMES = new Set<string>([GATEWAY_SEARCH_ID, GATEWAY_INVOKE_ID]);
 
 /**
  * Run `generate`, time it, and roll the result into a `CellResult`. Returns the
@@ -164,16 +166,39 @@ export async function meter(
   // scores on its partial trace. `usage` meters what the cell spent either way.
   const trace = summarize(raw, ctx.nameToId);
   const usage = raw || !recorder ? trace : summarize({ steps: recorder.steps }, ctx.nameToId);
-  const dollars = dollarCost(
-    ctx.model,
-    {
-      input: usage.inputTokens,
-      output: usage.outputTokens,
-      cachedInput: usage.cachedInputTokens,
-      cacheCreation: usage.cacheCreationTokens,
-    },
-    pricing,
-  );
+  const meteredSteps = raw?.steps ?? recorder?.steps ?? [];
+  const completeUsage =
+    meteredSteps.length > 0 &&
+    meteredSteps.every(
+      (step) =>
+        Number.isSafeInteger(step.usage?.inputTokens) &&
+        Number.isSafeInteger(step.usage?.outputTokens) &&
+        (step.usage?.inputTokens ?? -1) >= 0 &&
+        (step.usage?.outputTokens ?? -1) >= 0,
+    );
+  const estimatedDollars =
+    completeUsage || ctx.model.startsWith("ollama:")
+      ? dollarCost(
+          ctx.model,
+          {
+            input: usage.inputTokens,
+            output: usage.outputTokens,
+            cachedInput: usage.cachedInputTokens,
+            cacheCreation: usage.cacheCreationTokens,
+          },
+          pricing,
+        )
+      : null;
+  const providerTicks =
+    ctx.provider === "xai.responses" && meteredSteps.length > 0
+      ? meteredSteps.map((step) => xaiCostTicks(step.providerMetadata, step.usage))
+      : [];
+  const completeProviderCost =
+    raw !== null && providerTicks.length > 0 && providerTicks.every((ticks) => ticks !== undefined);
+  const hasProviderCost = providerTicks.some((ticks) => ticks !== undefined);
+  const dollars = hasProviderCost
+    ? providerTicks.reduce<number>((total, ticks) => total + (ticks ?? 0), 0) / 10_000_000_000
+    : estimatedDollars;
 
   const cell: CellResult = {
     scenario_id: ctx.scenarioId,
@@ -181,9 +206,14 @@ export async function meter(
     arm: ctx.arm,
     model: ctx.model,
     provider: ctx.provider,
+    serving_provider: ctx.servingProvider,
+    publisher: ctx.publisher,
+    resolved_model: ctx.resolvedModel,
+    vertex_location: ctx.vertexLocation,
     run_index: ctx.runIndex,
-    ratel_version: SDK_VERSION,
+    ratel_version: sdkVersion(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+    ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
     catalog_size: ctx.catalogSize,
     pool_size: ctx.poolSize,
     seed: ctx.seed,
@@ -209,9 +239,45 @@ export async function meter(
     max_step_output_tokens: usage.maxStepOutputTokens,
     wall_ms: wallMs,
     dollar_cost: dollars,
+    cost_source: completeProviderCost
+      ? "provider"
+      : hasProviderCost
+        ? "partial"
+        : estimatedDollars === null
+          ? "unknown"
+          : "estimate",
+    ...(ctx.provider === "xai.responses"
+      ? {
+          ...(hasProviderCost
+            ? {
+                provider_cost_ticks: providerTicks.reduce<number>(
+                  (total, ticks) => total + (ticks ?? 0),
+                  0,
+                ),
+              }
+            : {}),
+        }
+      : {}),
     tool_calls: trace.toolCalls,
   };
   return { cell, raw };
+}
+
+/** xAI bills in 10^-10 USD ticks; reject malformed metadata. */
+export function xaiCostTicks(metadata: unknown, usage?: unknown): number | undefined {
+  const xai =
+    metadata && typeof metadata === "object" ? (metadata as { xai?: unknown }).xai : undefined;
+  const fromMetadata =
+    xai && typeof xai === "object"
+      ? (xai as { costInUsdTicks?: unknown }).costInUsdTicks
+      : undefined;
+  const raw = usage && typeof usage === "object" ? (usage as { raw?: unknown }).raw : undefined;
+  const fromUsage =
+    raw && typeof raw === "object"
+      ? (raw as { cost_in_usd_ticks?: unknown }).cost_in_usd_ticks
+      : undefined;
+  const ticks = fromMetadata ?? fromUsage;
+  return typeof ticks === "number" && Number.isFinite(ticks) && ticks >= 0 ? ticks : undefined;
 }
 
 interface Summary {
@@ -250,8 +316,8 @@ export function providerOf(model: LanguageModel): string | undefined {
 export function effectiveToolIds(calls: ToolCall[]): string[] {
   const out: string[] = [];
   for (const call of calls) {
-    if (call.toolId === SEARCH_TOOLS_ID) continue;
-    if (call.toolId === INVOKE_TOOL_ID) {
+    if (call.toolId === GATEWAY_SEARCH_ID) continue;
+    if (call.toolId === GATEWAY_INVOKE_ID) {
       const inner = call.args?.toolId;
       if (typeof inner === "string") out.push(inner);
       continue;
@@ -277,8 +343,8 @@ export interface EffectiveCall {
 export function effectiveCalls(calls: ToolCall[]): EffectiveCall[] {
   const out: EffectiveCall[] = [];
   for (const call of calls) {
-    if (call.toolId === SEARCH_TOOLS_ID) continue;
-    if (call.toolId === INVOKE_TOOL_ID) {
+    if (call.toolId === GATEWAY_SEARCH_ID) continue;
+    if (call.toolId === GATEWAY_INVOKE_ID) {
       const inner = call.args?.toolId;
       if (typeof inner !== "string") continue;
       const nested = call.args?.args;
@@ -335,8 +401,8 @@ export function summarize(
       maxStepOutput = Math.max(maxStepOutput, u.outputTokens ?? 0);
       input += u.inputTokens ?? 0;
       output += u.outputTokens ?? 0;
-      cached += u.cachedInputTokens ?? 0;
-      cacheCreation += u.cacheCreationInputTokens ?? 0;
+      cached += u.inputTokenDetails?.cacheReadTokens ?? u.cachedInputTokens ?? 0;
+      cacheCreation += u.inputTokenDetails?.cacheWriteTokens ?? u.cacheCreationInputTokens ?? 0;
       total += u.totalTokens ?? 0;
     }
     for (const call of step.toolCalls ?? []) {
@@ -353,7 +419,7 @@ export function summarize(
     }
   }
   // Some providers don't surface `totalTokens`; fall back to input + output.
-  if (total === 0) total = input + output + cached;
+  if (total === 0) total = input + output;
   const unique = new Set(calls.map((c) => c.toolId)).size;
   return {
     inputTokens: input,

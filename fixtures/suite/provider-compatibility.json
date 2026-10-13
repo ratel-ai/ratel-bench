@@ -1,0 +1,107 @@
+{
+  "routes": [
+    {
+      "id": "bedrock/anthropic.claude-sonnet-5",
+      "provider": "bedrock",
+      "publisher": "Anthropic",
+      "invocationId": "global.anthropic.claude-sonnet-5",
+      "endpoint": "bedrock-runtime",
+      "sourceRegion": "eu-central-1",
+      "adapter": "converse",
+      "outputLimit": 16384,
+      "capabilityProfile": { "reasoning": "adaptive" },
+      "price": {
+        "inputPer1M": 1,
+        "outputPer1M": 2,
+        "cachedInputPer1M": 0.5,
+        "cacheCreationPer1M": 3
+      }
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
+      "provider": "anthropic",
+      "publisher": "Anthropic",
+      "invocationId": "claude-sonnet-5",
+      "endpoint": "api.anthropic.com",
+      "sourceRegion": "global",
+      "adapter": "anthropic.messages",
+      "outputLimit": 16384,
+      "capabilityProfile": { "reasoning": "adaptive" },
+      "price": {
+        "inputPer1M": 2,
+        "outputPer1M": 4,
+        "cachedInputPer1M": 0.2,
+        "cacheCreationPer1M": 2.5
+      }
+    },
+    {
+      "id": "openai/gpt-5.4-mini",
+      "provider": "openai",
+      "publisher": "OpenAI",
+      "invocationId": "gpt-5.4-mini",
+      "endpoint": "api.openai.com",
+      "sourceRegion": "global",
+      "adapter": "openai.responses",
+      "outputLimit": 16384,
+      "capabilityProfile": { "reasoning": "medium" },
+      "price": {
+        "inputPer1M": 0.75,
+        "outputPer1M": 4.5,
+        "cachedInputPer1M": 0.075,
+        "cacheCreationPer1M": 0
+      }
+    },
+    {
+      "id": "gcp/gemini-2.5-pro",
+      "provider": "gcp",
+      "publisher": "Google",
+      "invocationId": "gemini-2.5-pro",
+      "endpoint": "vertex-ai",
+      "sourceRegion": "us-central1",
+      "adapter": "google.vertex.generate-content",
+      "outputLimit": 16384,
+      "capabilityProfile": { "family": "gemini" },
+      "price": {
+        "inputPer1M": 3,
+        "outputPer1M": 12,
+        "cachedInputPer1M": 0.3,
+        "cacheCreationPer1M": 3.75
+      }
+    },
+    {
+      "id": "gcp/claude-sonnet-4-5@20250929",
+      "provider": "gcp",
+      "publisher": "Anthropic",
+      "invocationId": "claude-sonnet-4-5@20250929",
+      "endpoint": "vertex-ai",
+      "sourceRegion": "us-central1",
+      "adapter": "vertex.anthropic.messages",
+      "outputLimit": 16384,
+      "capabilityProfile": { "family": "claude" },
+      "price": {
+        "inputPer1M": 3.5,
+        "outputPer1M": 17.5,
+        "cachedInputPer1M": 0.35,
+        "cacheCreationPer1M": 4.375
+      }
+    },
+    {
+      "id": "xai/grok-4-fast",
+      "provider": "xai",
+      "publisher": "xAI",
+      "invocationId": "grok-4-fast",
+      "endpoint": "api.x.ai",
+      "sourceRegion": "global",
+      "adapter": "xai.responses",
+      "outputLimit": 16384,
+      "capabilityProfile": { "reasoning": "medium", "store": false },
+      "price": {
+        "inputPer1M": 0.2,
+        "outputPer1M": 0.5,
+        "cachedInputPer1M": 0.05,
+        "cacheCreationPer1M": 0.2
+      }
+    }
+  ],
+  "expectedResultChecksum": "4a6364b96cca8aab120aec96eb5bab0107419472afd0ef97fcb4dc0c16fba52f"
+}
