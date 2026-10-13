@@ -754,7 +754,9 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
   const runId = randomUUID();
   const runTimestamp = new Date().toISOString();
   const ratelVersion = config.ratelVersion ?? sdkVersion();
-  const baseSpendScope = `bfcl/${ratelVersion}`;
+  // Method-specific like SR's scope: one campaign budget spans every retriever
+  // stage, and the scope is part of each dispatch's identity there.
+  const baseSpendScope = `bfcl/${config.ratelVersion ?? RATEL_AI_CORE_VERSION}`;
   const spendLedger =
     config.spendLedger ??
     openSpendLedger(config.spendLedgerPath ?? `${config.outputPath}.spend.jsonl`);
