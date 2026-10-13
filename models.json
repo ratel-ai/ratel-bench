@@ -8,7 +8,8 @@
       "bedrockProfile": "global.openai.gpt-6-astra",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "responses"
+      "bedrockApi": "responses",
+      "pricing": { "bedrock": { "inputPer1M": 10, "outputPer1M": 50, "cachedInputPer1M": 1, "cacheCreationPer1M": 12.5 } }
     },
     {
       "id": "bedrock/openai.gpt-6-sol",
@@ -18,7 +19,8 @@
       "bedrockProfile": "global.openai.gpt-6-sol",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "responses"
+      "bedrockApi": "responses",
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
     },
     {
       "id": "bedrock/openai.gpt-6-luna",
@@ -28,7 +30,8 @@
       "bedrockProfile": "global.openai.gpt-6-luna",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "responses"
+      "bedrockApi": "responses",
+      "pricing": { "bedrock": { "inputPer1M": 0.1, "outputPer1M": 0.5, "cachedInputPer1M": 0.01, "cacheCreationPer1M": 0.125 } }
     },
     {
       "id": "bedrock/anthropic.claude-fable-5-1",
@@ -38,7 +41,8 @@
       "bedrockProfile": "global.anthropic.claude-fable-5-1",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 10, "outputPer1M": 50, "cachedInputPer1M": 0.25, "cacheCreationPer1M": 12.5 } }
     },
     {
       "id": "bedrock/anthropic.claude-opus-5-5",
@@ -48,7 +52,8 @@
       "bedrockProfile": "global.anthropic.claude-opus-5-5",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 4, "outputPer1M": 20, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 5 } }
     },
     {
       "id": "bedrock/anthropic.claude-sonnet-5",
@@ -58,7 +63,8 @@
       "bedrockProfile": "global.anthropic.claude-sonnet-5",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
     },
     {
       "id": "bedrock/anthropic.claude-haiku-4-5",
@@ -68,7 +74,8 @@
       "bedrockProfile": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 1, "outputPer1M": 5, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 1.25 } }
     },
     {
       "id": "bedrock/moonshotai.kimi-k3",
@@ -78,7 +85,8 @@
       "bedrockProfile": "global.moonshotai.kimi-k3",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 3, "outputPer1M": 15, "cachedInputPer1M": 0.3, "cacheCreationPer1M": 3.75 } }
     },
     {
       "id": "bedrock/qwen.qwen3-coder-next",
@@ -88,7 +96,8 @@
       "bedrockProfile": "qwen.qwen3-coder-next",
       "bedrockRegion": "us-east-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.5, "outputPer1M": 1.2, "cachedInputPer1M": 0.5, "cacheCreationPer1M": 0.5 } }
     },
     {
       "id": "bedrock/openai.gpt-oss-120b-1:0",
@@ -98,7 +107,8 @@
       "bedrockProfile": "openai.gpt-oss-120b-1:0",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.2, "outputPer1M": 0.79, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 0.2 } }
     },
     {
       "id": "bedrock/openai.gpt-oss-20b-1:0",
@@ -108,7 +118,8 @@
       "bedrockProfile": "openai.gpt-oss-20b-1:0",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.09, "outputPer1M": 0.4, "cachedInputPer1M": 0.09, "cacheCreationPer1M": 0.09 } }
     },
     {
       "id": "bedrock/google.gemma-4-31b",
@@ -118,7 +129,8 @@
       "bedrockProfile": "google.gemma-4-31b",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-mantle",
-      "bedrockApi": "chat"
+      "bedrockApi": "chat",
+      "pricing": { "bedrock": { "inputPer1M": 0.168, "outputPer1M": 0.48, "cachedInputPer1M": 0.168, "cacheCreationPer1M": 0.168 } }
     },
     {
       "id": "bedrock/google.gemma-4-26b-a4b",
@@ -128,7 +140,8 @@
       "bedrockProfile": "google.gemma-4-26b-a4b",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-mantle",
-      "bedrockApi": "chat"
+      "bedrockApi": "chat",
+      "pricing": { "bedrock": { "inputPer1M": 0.156, "outputPer1M": 0.48, "cachedInputPer1M": 0.156, "cacheCreationPer1M": 0.156 } }
     },
     {
       "id": "bedrock/mistral.mistral-large-3-675b-instruct",
@@ -138,7 +151,8 @@
       "bedrockProfile": "mistral.mistral-large-3-675b-instruct",
       "bedrockRegion": "us-east-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.5, "outputPer1M": 1.5, "cachedInputPer1M": 0.5, "cacheCreationPer1M": 0.5 } }
     },
     {
       "id": "bedrock/meta.llama4-scout-17b-instruct-v1:0",
@@ -148,7 +162,8 @@
       "bedrockProfile": "us.meta.llama4-scout-17b-instruct-v1:0",
       "bedrockRegion": "us-east-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.17, "outputPer1M": 0.66, "cachedInputPer1M": 0.17, "cacheCreationPer1M": 0.17 } }
     },
     {
       "id": "bedrock/nvidia.nemotron-super-3-120b",
@@ -158,7 +173,8 @@
       "bedrockProfile": "nvidia.nemotron-super-3-120b",
       "bedrockRegion": "eu-west-1",
       "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse"
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.18, "outputPer1M": 0.78, "cachedInputPer1M": 0.18, "cacheCreationPer1M": 0.18 } }
     }
   ],
   "historical": [

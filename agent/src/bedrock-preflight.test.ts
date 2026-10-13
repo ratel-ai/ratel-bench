@@ -260,6 +260,7 @@ describe("Bedrock campaign preflight", () => {
       preflightBedrockModels(["bedrock/qwen.qwen3-coder-next"], {
         credentials,
         requirePricing: true,
+        pricing: {},
         fetch: async () => {
           calls++;
           return Response.json({});
