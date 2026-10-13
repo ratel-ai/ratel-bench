@@ -78,7 +78,10 @@ export async function preflightBedrockModels(
         throw new Error(`Bedrock preflight ${route.id}: profile has no destination models`);
       }
       const expectedBase = route.profile.slice(route.profile.indexOf(".") + 1);
-      let regionalModels = 0;
+      // Availability is checked in the source region only: other destinations
+      // may be opt-in Regions the account never enabled (403), and AWS routes
+      // there without requiring it.
+      const regions = new Set<string>();
       for (const model of models) {
         const parsed = /^arn:[^:]+:bedrock:([a-z0-9-]*):[^:]*:foundation-model\/(.+)$/.exec(
           String((model as { modelArn?: unknown }).modelArn),
@@ -90,13 +93,17 @@ export async function preflightBedrockModels(
         ) {
           throw new Error(`Bedrock preflight ${route.id}: profile targets an unexpected model`);
         }
-        if (!parsed[1] && route.profile.startsWith("global.")) continue;
-        await checkAvailability(route, parsed[1], parsed[2], credentials, fetch);
-        regionalModels++;
+        if (parsed[1]) regions.add(parsed[1]);
       }
-      if (regionalModels === 0) {
+      if (regions.size === 0) {
         throw new Error(`Bedrock preflight ${route.id}: profile has no regional model to check`);
       }
+      if (!regions.has(route.region)) {
+        throw new Error(
+          `Bedrock preflight ${route.id}: profile does not serve source region ${route.region}`,
+        );
+      }
+      await checkAvailability(route, route.region, expectedBase, credentials, fetch);
     } else {
       await checkAvailability(route, route.region, route.profile, credentials, fetch);
     }

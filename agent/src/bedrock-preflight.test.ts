@@ -44,6 +44,62 @@ describe("Bedrock campaign preflight", () => {
     ]);
   });
 
+  it("checks a geo profile only in its source region, never in other destinations", async () => {
+    const urls: string[] = [];
+    const fetch = async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("/inference-profiles/")) {
+        return Response.json({
+          inferenceProfileId: "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+          status: "ACTIVE",
+          models: ["eu-north-1", "eu-south-2", "eu-central-1", "eu-west-3"].map((region) => ({
+            modelArn: `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`,
+          })),
+        });
+      }
+      if (!url.startsWith("https://bedrock.eu-central-1.")) {
+        return new Response("region not enabled", { status: 403 });
+      }
+      return Response.json({
+        agreementAvailability: { status: "AVAILABLE" },
+        authorizationStatus: "AUTHORIZED",
+        entitlementAvailability: "AVAILABLE",
+        regionAvailability: "AVAILABLE",
+      });
+    };
+
+    await preflightBedrockModels(["bedrock/claude-haiku-4-5"], { credentials, fetch });
+
+    expect(urls).toEqual([
+      "https://bedrock.eu-central-1.amazonaws.com/inference-profiles/eu.anthropic.claude-haiku-4-5-20251001-v1%3A0",
+      "https://bedrock.eu-central-1.amazonaws.com/foundation-model-availability/anthropic.claude-haiku-4-5-20251001-v1%3A0",
+    ]);
+  });
+
+  it("rejects a profile whose destinations exclude the source region", async () => {
+    const urls: string[] = [];
+    await expect(
+      preflightBedrockModels(["bedrock/claude-haiku-4-5"], {
+        credentials,
+        fetch: async (input) => {
+          urls.push(String(input));
+          return Response.json({
+            inferenceProfileId: "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+            status: "ACTIVE",
+            models: [
+              {
+                modelArn:
+                  "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+              },
+            ],
+          });
+        },
+      }),
+    ).rejects.toThrow(/source region eu-central-1/i);
+    expect(urls).toHaveLength(1);
+  });
+
   it("rejects a global profile with no regional model to check", async () => {
     const urls: string[] = [];
     await expect(
@@ -118,7 +174,10 @@ describe("Bedrock campaign preflight", () => {
         return Response.json({
           inferenceProfileId: "global.openai.gpt-6-sol",
           status: "ACTIVE",
-          models: [{ modelArn: "arn:aws:bedrock:us-east-1::foundation-model/openai.gpt-6-sol" }],
+          models: [
+            { modelArn: "arn:aws:bedrock:::foundation-model/openai.gpt-6-sol" },
+            { modelArn: "arn:aws:bedrock:eu-central-1::foundation-model/openai.gpt-6-sol" },
+          ],
         });
       }
       return Response.json({
@@ -141,7 +200,7 @@ describe("Bedrock campaign preflight", () => {
     });
     expect(urls).toEqual([
       "https://bedrock.eu-central-1.amazonaws.com/inference-profiles/global.openai.gpt-6-sol",
-      "https://bedrock.us-east-1.amazonaws.com/foundation-model-availability/openai.gpt-6-sol",
+      "https://bedrock.eu-central-1.amazonaws.com/foundation-model-availability/openai.gpt-6-sol",
       "https://bedrock.us-east-1.amazonaws.com/foundation-model-availability/qwen.qwen3-coder-next",
     ]);
   });
