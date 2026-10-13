@@ -68,6 +68,8 @@ export interface SragentsSelectCell {
   /** Run whose provider attempts produced this live cell; absent on historical rows. */
   run_id?: string;
   generated_at: string;
+  /** Installed `@ratel-ai/sdk` release, as on BFCL task rows; absent on historical rows. */
+  ratel_version?: string;
   ratel_ai_core_version: string;
   /** Exact crate release, independent of the method-specific report label. */
   ratel_ai_core_resolved_version?: string;

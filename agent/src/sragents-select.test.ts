@@ -31,6 +31,7 @@ import {
   type Task,
 } from "./sragents-select.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
+import { sdkVersion } from "./sdk/resolve.js";
 import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 describe("sragentsModels", () => {
@@ -1076,6 +1077,13 @@ describe("selectForCell", () => {
     expect(cell.total_tokens).toBe(1208);
     expect(cell.dollar_cost).toBeCloseTo(expectedCost, 12);
     expect(cell.provider).toBe("anthropic.messages");
+  });
+
+  it("stamps the installed SDK release like BFCL task rows", async () => {
+    const cell = await selectForCell(args());
+
+    expect(cell.ratel_version).toBe(sdkVersion());
+    expect(cell.ratel_version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it("records the usage of a NoObjectGeneratedError wrapped in a RetryError", async () => {

@@ -107,6 +107,7 @@ import {
   type SpendSummary,
   spendRecorder,
 } from "./spend-ledger.js";
+import { sdkVersion } from "./sdk/resolve.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -355,6 +356,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
   const base: SragentsSelectCell = {
     run_type: "skill_selection",
     generated_at: new Date().toISOString(),
+    ratel_version: sdkVersion(),
     ratel_ai_core_version: RATEL_AI_CORE_VERSION,
     ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
     scenario_id: args.sc.scenarioId,
@@ -944,6 +946,7 @@ export function drainControlCache(
         appendJsonl(opts.outputPath, {
           ...prior,
           model: t.model.id,
+          ratel_version: sdkVersion(),
           ratel_ai_core_version: RATEL_AI_CORE_VERSION,
           ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
           generated_at: new Date().toISOString(),
