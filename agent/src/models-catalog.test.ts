@@ -24,7 +24,7 @@ function isApiRouted(e: ModelCatalogEntry): boolean {
 }
 
 describe("models.json", () => {
-  it("commits exactly the selected 16 Bedrock routes in campaign order", () => {
+  it("commits exactly the selected 15 Bedrock routes in campaign order", () => {
     expect(campaign.map((entry) => entry.id)).toEqual([
       "bedrock/openai.gpt-6-astra",
       "bedrock/openai.gpt-6-sol",
@@ -40,7 +40,6 @@ describe("models.json", () => {
       "bedrock/google.gemma-4-31b",
       "bedrock/google.gemma-4-26b-a4b",
       "bedrock/mistral.mistral-large-3-675b-instruct",
-      "bedrock/meta.llama4-scout-17b-instruct-v1:0",
       "bedrock/nvidia.nemotron-super-3-120b",
     ]);
   });
@@ -73,7 +72,6 @@ describe("models.json", () => {
       ["google.gemma-4-31b", "eu-central-1", "bedrock-mantle", "chat"],
       ["google.gemma-4-26b-a4b", "eu-central-1", "bedrock-mantle", "chat"],
       ["mistral.mistral-large-3-675b-instruct", "us-east-1", "bedrock-runtime", "converse"],
-      ["us.meta.llama4-scout-17b-instruct-v1:0", "us-east-1", "bedrock-runtime", "converse"],
       ["nvidia.nemotron-super-3-120b", "eu-west-1", "bedrock-runtime", "converse"],
     ]);
   });
@@ -110,7 +108,7 @@ describe("models.json", () => {
   });
 
   it("keeps optional Vertex publishers and exact API IDs out of the Bedrock campaign", () => {
-    expect(campaign).toHaveLength(16);
+    expect(campaign).toHaveLength(15);
     expect(catalog.find((entry) => entry.id === "gcp/gemini-2.5-pro")).toMatchObject({
       publisher: "Google",
       vertexModelId: "gemini-2.5-pro",

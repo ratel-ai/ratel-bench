@@ -47,7 +47,7 @@ describe("parseArgs", () => {
     // No flag defaults: models.json supplies the agent cap, the judge gets none.
     expect(args.maxOutputTokens).toBeUndefined();
     expect(args.judgeMaxOutputTokens).toBeUndefined();
-    expect(args.models).toHaveLength(16);
+    expect(args.models).toHaveLength(15);
     expect(args.models[0]).toBe("bedrock/openai.gpt-6-astra");
     expect(args.models.at(-1)).toBe("bedrock/nvidia.nemotron-super-3-120b");
   });

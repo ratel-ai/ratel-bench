@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       runOnlyModels:
-        description: "Comma-separated provider/model IDs; replaces the 16-model default"
+        description: "Comma-separated provider/model IDs; replaces the 15-model default"
         required: false
         type: string
       excludeModels:

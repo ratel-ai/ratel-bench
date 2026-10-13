@@ -34,7 +34,7 @@ Full results: [benchmark.ratel.sh](https://benchmark.ratel.sh)
 The version 1 request and result contracts are in
 [`agent/src/suite-contract.ts`](agent/src/suite-contract.ts). Shared producer/import
 fixtures are in [`fixtures/suite/`](fixtures/suite/). The committed
-[`models.json`](models.json) `run[]` list supplies exactly 16 Bedrock defaults;
+[`models.json`](models.json) `run[]` list supplies exactly 15 Bedrock defaults;
 an explicit `runOnlyModels` list replaces them, and `excludeModels` applies
 afterward. Unqualified model IDs mean Bedrock. Model concurrency defaults to
 one (maximum 16). `campaignBudgetUsd` defaults to a $1,000 ceiling across all

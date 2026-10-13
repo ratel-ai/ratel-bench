@@ -54,12 +54,12 @@ const releases = {
 };
 
 describe("suite request contract v1", () => {
-  it("uses the committed 16 Bedrock routes, all retrievers and one $1000 campaign budget", () => {
+  it("uses the committed 15 Bedrock routes, all retrievers and one $1000 campaign budget", () => {
     const request = normalizeSuiteRequest(fixture("request-default.json"));
     expect(request.schemaVersion).toBe(1);
-    expect(request.models).toHaveLength(16);
+    expect(request.models).toHaveLength(15);
     expect(request.models[0]).toBe("bedrock/openai.gpt-6-astra");
-    expect(request.models[15]).toBe("bedrock/nvidia.nemotron-super-3-120b");
+    expect(request.models[14]).toBe("bedrock/nvidia.nemotron-super-3-120b");
     expect(request.modelConcurrency).toBe(1);
     expect(request.campaignBudgetUsd).toBe(1000);
     expect(request.notifyToEmails).toEqual(["dev@ratel.sh"]);
@@ -261,7 +261,7 @@ describe("frozen suite manifest and public result v1", () => {
       repetitions: 1,
       seed: 42,
     });
-    expect(manifest.expectedWorkUnitKeys).toHaveLength(16 * 20 + 72);
+    expect(manifest.expectedWorkUnitKeys).toHaveLength(15 * 20 + 72);
     expect(new Set(manifest.expectedWorkUnitKeys).size).toBe(manifest.expectedWorkUnitKeys.length);
     expect(JSON.stringify(manifest)).not.toContain("dev@ratel.sh");
   });

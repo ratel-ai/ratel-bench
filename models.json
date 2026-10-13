@@ -155,17 +155,6 @@
       "pricing": { "bedrock": { "inputPer1M": 0.5, "outputPer1M": 1.5, "cachedInputPer1M": 0.5, "cacheCreationPer1M": 0.5 } }
     },
     {
-      "id": "bedrock/meta.llama4-scout-17b-instruct-v1:0",
-      "displayName": "Llama 4 Scout 17B Instruct",
-      "publisher": "Meta",
-      "maxOutputTokens": 8192,
-      "bedrockProfile": "us.meta.llama4-scout-17b-instruct-v1:0",
-      "bedrockRegion": "us-east-1",
-      "bedrockEndpoint": "bedrock-runtime",
-      "bedrockApi": "converse",
-      "pricing": { "bedrock": { "inputPer1M": 0.17, "outputPer1M": 0.66, "cachedInputPer1M": 0.17, "cacheCreationPer1M": 0.17 } }
-    },
-    {
       "id": "bedrock/nvidia.nemotron-super-3-120b",
       "displayName": "Nemotron 3 Super 120B",
       "publisher": "NVIDIA",
@@ -178,6 +167,17 @@
     }
   ],
   "historical": [
+    {
+      "id": "bedrock/meta.llama4-scout-17b-instruct-v1:0",
+      "displayName": "Llama 4 Scout 17B Instruct",
+      "publisher": "Meta",
+      "maxOutputTokens": 8192,
+      "bedrockProfile": "us.meta.llama4-scout-17b-instruct-v1:0",
+      "bedrockRegion": "us-east-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 0.17, "outputPer1M": 0.66, "cachedInputPer1M": 0.17, "cacheCreationPer1M": 0.17 } }
+    },
     {
       "id": "xai/grok-4-fast",
       "publisher": "xAI",

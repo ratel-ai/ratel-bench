@@ -105,11 +105,11 @@ describe("offline provider compatibility matrix", () => {
     expect(result.checksumSha256).toBe(fixture.expectedResultChecksum);
   });
 
-  it("keeps the committed default at 16 Bedrock routes across selected AWS APIs", () => {
+  it("keeps the committed default at 15 Bedrock routes across selected AWS APIs", () => {
     const catalog = loadModelCatalog(resolve(REPO_ROOT, "models.json"));
     const defaults = JSON.parse(readFileSync(resolve(REPO_ROOT, "models.json"), "utf8"))
       .run as ModelCatalogEntry[];
-    expect(defaults).toHaveLength(16);
+    expect(defaults).toHaveLength(15);
     expect(defaults.every(({ id }) => id.startsWith("bedrock/"))).toBe(true);
     expect(new Set(defaults.map(({ bedrockApi }) => bedrockApi))).toEqual(
       new Set(["responses", "converse", "chat"]),

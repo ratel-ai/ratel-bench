@@ -8,7 +8,7 @@ and commands below remain available for comparison; they are not additional
 versions in a full campaign.
 
 The v1 suite contract lives in `agent/src/suite-contract.ts`, with shared JSON
-fixtures in `fixtures/suite/`. `models.json` `run[]` is the ordered 16-model
+fixtures in `fixtures/suite/`. `models.json` `run[]` is the ordered 15-model
 Bedrock default. The request's `runOnlyModels` replaces it; `excludeModels`
 then removes canonical IDs. The default model concurrency is one and the
 aggregate model/API budget is $1,000. Notification recipients are private
@@ -17,7 +17,7 @@ request data and never enter the public manifest or result.
 The fixed work plan has 599 BFCL and a seed-42, six-dataset stratified 600
 SR-Agents scenarios (100 per dataset), one repetition, LLM pool 100, top-k 5,
 and baseline/oracle/Ratel arms. Controls run once per model/scenario and are
-reused across retrievers; Ratel cells run once per retriever. The 16-model
+reused across retrievers; Ratel cells run once per retriever. The 15-model
 default has 95,920 distinct LLM cells and 21,582 model-free retrieval cells
 (pools BFCL 30/100, SR-Agents 50/100; k 1/3/5). The manifest freezes semantic
 work-unit keys over the version pair, benchmark, scenario, model, arm, method,

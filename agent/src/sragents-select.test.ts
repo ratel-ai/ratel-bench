@@ -36,7 +36,7 @@ import { RATEL_AI_CORE_VERSION } from "./versions.js";
 
 describe("sragentsModels", () => {
   it("defaults to Bedrock and keeps explicit historical direct routes", () => {
-    expect(sragentsModels([])).toHaveLength(16);
+    expect(sragentsModels([])).toHaveLength(15);
     expect(sragentsModels([])[0]).toBe("bedrock/openai.gpt-6-astra");
     expect(sragentsModels([]).at(-1)).toBe("bedrock/nvidia.nemotron-super-3-120b");
     expect(sragentsModels(["--models", "gpt-5.4-mini,openai/gpt-5.4-mini"])).toEqual([
