@@ -22,6 +22,7 @@ import { dirname } from "node:path";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
+import { sampleScenarios } from "./scenario-sample.js";
 import { buildToolCatalog } from "./sdk/adapter.js";
 import { parseEmbedding } from "./sdk/embedding.js";
 import { selectVersion } from "./sdk/resolve.js";
@@ -105,9 +106,11 @@ async function main(): Promise<void> {
   );
   const kSlices = [1, 3, 5]; // fixed retrieval-eval k (see EXPERIMENTS.md)
 
-  let scenarios = loadScenarios(corpusPath);
-  if (scenarioLimit > 0) scenarios = scenarios.slice(0, scenarioLimit);
-  const universe = buildToolUniverse(scenarios);
+  // Same seeded subset and full-corpus universe as the agent runner, so a capped
+  // retrieval run scores exactly the scenarios its LLM stage will run.
+  const allScenarios = loadScenarios(corpusPath);
+  const scenarios = sampleScenarios(allScenarios, scenarioLimit > 0 ? scenarioLimit : undefined, seed);
+  const universe = buildToolUniverse(allScenarios);
   console.log(
     `bfcl-candidates: method=${method} pools=[${poolSizes.join(",")}] k=[${kSlices.join(",")}] ` +
       `over ${scenarios.length} scenarios (universe=${universe.length} tools) → ${outputPath}`,
