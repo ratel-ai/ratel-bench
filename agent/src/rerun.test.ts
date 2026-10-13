@@ -167,6 +167,31 @@ describe("summarizeRunCoverage scored failures", () => {
   });
 });
 
+describe("summarizeRunCoverage spend evidence", () => {
+  const spend = (over: Record<string, number>) => ({
+    attempts: 2,
+    unresolved: 0,
+    unknown: 0,
+    untrackedRows: 0,
+    unattributedAttempts: 0,
+    knownUsd: 0.1,
+    completeness: "partial" as const,
+    ...over,
+  });
+  const cover = (s: ReturnType<typeof spend>) =>
+    summarizeRunCoverage(["a"], [{ key: "a", error: null }], (row: { key: string }) => row.key, "completed", s).status;
+
+  it("completes when the only gap is a settled attempt of unknown cost", () => {
+    expect(cover(spend({ unknown: 1 }))).toBe("completed");
+  });
+
+  it("stays partial on unresolved, unattributed or untracked spend evidence", () => {
+    expect(cover(spend({ unresolved: 1 }))).toBe("partial");
+    expect(cover(spend({ unattributedAttempts: 1 }))).toBe("partial");
+    expect(cover(spend({ untrackedRows: 1 }))).toBe("partial");
+  });
+});
+
 describe("resumeLine", () => {
   it("lists the non-zero classes; null when nothing was re-queued or exhausted", () => {
     expect(resumeLine({ requeued: { access: 9 }, exhausted: 0 })).toBe(

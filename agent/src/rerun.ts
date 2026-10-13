@@ -278,10 +278,20 @@ export function summarizeRunCoverage<T extends ErrorRow & { cache_source?: "live
         ? "budget_limited"
         : completed + reused === 0
           ? "failed"
-          : failed || skipped || stopped !== "completed" || spend?.completeness === "partial"
+          : failed || skipped || stopped !== "completed" || ambiguousSpend(spend)
             ? "partial"
             : "completed";
   return { requested: requested.size, completed, failed, reused, skipped, status };
+}
+
+/**
+ * Spend evidence that may hide paid work: a dispatch never settled (crash), or
+ * attempts/rows that cannot be tied to this run. A settled attempt whose cost is
+ * unknown (provider error or timeout without usage) is reported in accounting as
+ * a lower bound but does not leave coverage incomplete.
+ */
+function ambiguousSpend(spend: SpendSummary | undefined): boolean {
+  return Boolean(spend?.unresolved || spend?.unattributedAttempts || spend?.untrackedRows);
 }
 
 /**
