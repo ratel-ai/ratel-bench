@@ -24,9 +24,10 @@ interface BedrockRoute {
   id: string;
   profile: string;
   region: string;
+  endpoint: "bedrock-runtime" | "bedrock-mantle";
 }
 
-/** Read-only access gate for an exact Bedrock selection, before any inference. */
+/** Read-only Runtime access and Mantle discovery gate, before any inference. */
 export async function preflightBedrockModels(
   modelIds: readonly string[],
   options: PreflightOptions = {},
@@ -57,6 +58,10 @@ export async function preflightBedrockModels(
   const credentials = options.credentials ?? fromNodeProviderChain();
   const fetch = options.fetch ?? globalThis.fetch;
   for (const route of routes) {
+    if (route.endpoint === "bedrock-mantle") {
+      await checkMantleModel(route, credentials, fetch);
+      continue;
+    }
     if (isProfile(route.profile)) {
       const profile = await getJson(
         route,
@@ -73,14 +78,24 @@ export async function preflightBedrockModels(
         throw new Error(`Bedrock preflight ${route.id}: profile has no destination models`);
       }
       const expectedBase = route.profile.slice(route.profile.indexOf(".") + 1);
+      let regionalModels = 0;
       for (const model of models) {
-        const parsed = /^arn:[^:]+:bedrock:([a-z0-9-]+):[^:]*:foundation-model\/(.+)$/.exec(
+        const parsed = /^arn:[^:]+:bedrock:([a-z0-9-]*):[^:]*:foundation-model\/(.+)$/.exec(
           String((model as { modelArn?: unknown }).modelArn),
         );
-        if (!parsed || parsed[2] !== expectedBase) {
+        if (
+          !parsed ||
+          parsed[2] !== expectedBase ||
+          (!parsed[1] && !route.profile.startsWith("global."))
+        ) {
           throw new Error(`Bedrock preflight ${route.id}: profile targets an unexpected model`);
         }
+        if (!parsed[1] && route.profile.startsWith("global.")) continue;
         await checkAvailability(route, parsed[1], parsed[2], credentials, fetch);
+        regionalModels++;
+      }
+      if (regionalModels === 0) {
+        throw new Error(`Bedrock preflight ${route.id}: profile has no regional model to check`);
       }
     } else {
       await checkAvailability(route, route.region, route.profile, credentials, fetch);
@@ -112,11 +127,45 @@ function configuredRoute(
   if (entry.bedrockEndpoint === "bedrock-mantle" && entry.bedrockApi === "converse") {
     throw new Error(`model ${identity.canonicalId}: Bedrock Mantle does not support Converse`);
   }
-  return { id: identity.canonicalId, profile: entry.bedrockProfile, region: entry.bedrockRegion };
+  return {
+    id: identity.canonicalId,
+    profile: entry.bedrockProfile,
+    region: entry.bedrockRegion,
+    endpoint: entry.bedrockEndpoint,
+  };
 }
 
 function isProfile(modelId: string): boolean {
   return /^(?:global|us|eu|au|jp|us-gov)\./.test(modelId);
+}
+
+async function checkMantleModel(
+  route: BedrockRoute,
+  credentials: Credentials,
+  fetch: typeof globalThis.fetch,
+): Promise<void> {
+  const listing = await getJson(
+    route,
+    route.region,
+    "/v1/models",
+    credentials,
+    fetch,
+    "bedrock-mantle",
+  );
+  const models = listing.data;
+  if (
+    !Array.isArray(models) ||
+    !models.some(
+      (model) =>
+        model &&
+        typeof model === "object" &&
+        model.id === route.profile &&
+        model.object === "model" &&
+        model.status === "available",
+    )
+  ) {
+    throw new Error(`Bedrock preflight ${route.id}: model is not available in Mantle listing`);
+  }
 }
 
 async function checkAvailability(
@@ -153,13 +202,17 @@ async function getJson(
   path: string,
   credentials: Credentials,
   fetch: typeof globalThis.fetch,
+  service: "bedrock" | "bedrock-mantle" = "bedrock",
 ): Promise<Record<string, unknown>> {
-  const url = `https://bedrock.${region}.amazonaws.com${path}`;
+  const url =
+    service === "bedrock-mantle"
+      ? `https://bedrock-mantle.${region}.api.aws${path}`
+      : `https://bedrock.${region}.amazonaws.com${path}`;
   const signer = new AwsV4Signer({
     url,
     method: "GET",
     region,
-    service: "bedrock",
+    service,
     ...(await credentials()),
   });
   const signed = await signer.sign();

@@ -74,11 +74,13 @@ The bounded live checks below are opt-in and were not executed by the offline ga
 Before the Bedrock check, pin reviewed positive input, output, cache-read and
 cache-write prices in [`models.json`](models.json) for each selected source region and
 context tier. The selected routes are intentionally unpriced; credentials alone cannot
-pass funded preflight. Confirm model access and quota before running the check.
+pass funded preflight. Read-only preflight checks Runtime profile and regional model
+availability; for Mantle it checks exact model discovery status. Mantle discovery does
+not prove inference entitlement. Confirm model access and quota before running the check.
 
 ```bash
 # Bedrock (after pricing): one model from each selected API family (Converse, Responses, Mantle chat)
-pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-sonnet-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-haiku-4-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
 
 # Vertex: Gemini plus Claude, using GOOGLE_VERTEX_PROJECT/LOCATION and ADC
 pnpm -F @ratel-ai/benchmark start --models gcp/gemini-2.5-pro,gcp/claude-sonnet-4-5@20250929 --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
@@ -87,8 +89,8 @@ pnpm -F @ratel-ai/benchmark start --models gcp/gemini-2.5-pro,gcp/claude-sonnet-
 pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
 ```
 
-Credentialed Bedrock availability and the GCP/xAI live commands remain deferred; do not
-treat the synthetic result as measured benchmark evidence.
+Read-only Bedrock availability checks have run; paid inference and the GCP/xAI live
+commands remain deferred. Do not treat the synthetic result as measured benchmark evidence.
 
 ### Launch from GitHub Actions
 
