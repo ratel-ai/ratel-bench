@@ -127,7 +127,7 @@ describe("summarizeRunCoverage", () => {
       [
         { key: "success", error: "Overloaded" },
         { key: "success", error: null },
-        { key: "failed", error: "bad output" },
+        { key: "failed", error: "Overloaded" },
         { key: "reused", error: null, cache_source: "reused" as const },
       ],
       key,
@@ -143,11 +143,27 @@ describe("summarizeRunCoverage", () => {
     });
   });
 
-  it("never calls all-error or interrupted work completed", () => {
-    expect(summarizeRunCoverage(["a"], [{ key: "a", error: "bad" }], key, "completed").status).toBe(
-      "failed",
-    );
+  it("never calls all-infra-error or interrupted work completed", () => {
+    expect(
+      summarizeRunCoverage(["a"], [{ key: "a", error: "Overloaded" }], key, "completed").status,
+    ).toBe("failed");
     expect(summarizeRunCoverage(["a"], [], key, "interrupted").status).toBe("cancelled");
+  });
+});
+
+describe("summarizeRunCoverage scored failures", () => {
+  it("counts timeouts and model-outcome errors as completed, scored cells", () => {
+    const coverage = summarizeRunCoverage(
+      ["timeout", "unparseable", "ok"],
+      [
+        { key: "timeout", error: "run timed out after 180000ms", error_class: "timeout" as const },
+        { key: "unparseable", error: "No object generated: could not parse the response.", error_class: "outcome" as const },
+        { key: "ok", error: null },
+      ],
+      (row: { key: string }) => row.key,
+      "completed",
+    );
+    expect(coverage).toEqual({ requested: 3, completed: 3, failed: 0, reused: 0, skipped: 0, status: "completed" });
   });
 });
 

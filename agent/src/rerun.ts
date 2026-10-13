@@ -265,7 +265,9 @@ export function summarizeRunCoverage<T extends ErrorRow & { cache_source?: "live
   for (const key of requested) {
     const row = final.get(key);
     if (!row) skipped++;
-    else if (row.error != null) failed++;
+    // Timeouts and model-outcome errors are final, scored results; only errors a
+    // re-run would pick up (transient, access, request) leave a cell uncovered.
+    else if (isRerunnable(row, "infra")) failed++;
     else if (row.cache_source === "reused") reused++;
     else completed++;
   }
