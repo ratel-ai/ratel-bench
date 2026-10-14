@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
@@ -162,29 +162,7 @@ it("renders immediate workflow, execution and immutable result links", () => {
   );
 });
 
-it("workflow is a scoped asynchronous dispatch and legacy deploy hook is retired", () => {
-  const workflow = readFileSync(resolve(REPO_ROOT, ".github/workflows/run-benchmark.yml"), "utf8");
-  expect(workflow).toContain("workflow_dispatch:");
-  for (const input of [
-    "runOnlyModels:",
-    "excludeModels:",
-    "notifyToEmails:",
-    "modelConcurrency:",
-    "campaignBudgetUsd:",
-  ])
-    expect(workflow).toContain(input);
-  expect(workflow).toMatch(/permissions:\s+contents: read\s+id-token: write/);
-  expect(workflow).toContain("role-to-assume: $" + "{{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}");
-  expect(workflow).toContain("ref: $" + "{{ steps.prepare.outputs.aws_sha }}");
-  // ratel-bench-aws is private: GITHUB_TOKEN cannot read it, so a read-only App token is required.
-  expect(workflow).toMatch(
-    /uses: actions\/create-github-app-token@[\s\S]*?client-id: \$\{\{ vars\.BENCHMARK_LAUNCHER_CLIENT_ID \}\}[\s\S]*?private-key: \$\{\{ secrets\.BENCHMARK_LAUNCHER_APP_PRIVATE_KEY \}\}[\s\S]*?repositories: ratel-bench-aws[\s\S]*?permission-contents: read/,
-  );
-  expect(workflow).toMatch(
-    /repository: ratel-ai\/ratel-bench-aws[\s\S]*?token: \$\{\{ steps\.launcher-token\.outputs\.token \}\}/,
-  );
-  expect(workflow).toContain("bench-suite.sh submit");
-  expect(workflow).not.toContain("bench-suite.sh watch");
-  expect(workflow).not.toMatch(/run:.*inputs\./);
-  expect(() => readFileSync(resolve(REPO_ROOT, ".github/workflows/website-rebuild.yml"))).toThrow();
+it("campaign launch workflow is retired from the benchmark repository", () => {
+  expect(existsSync(resolve(REPO_ROOT, ".github/workflows/run-benchmark.yml"))).toBe(false);
+  expect(existsSync(resolve(REPO_ROOT, ".github/workflows/website-rebuild.yml"))).toBe(false);
 });
