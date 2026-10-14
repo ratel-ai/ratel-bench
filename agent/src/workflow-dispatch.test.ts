@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
 import { prepareWorkflowDispatch, summarizeCampaignLaunch } from "./workflow-dispatch.js";
@@ -19,6 +19,12 @@ const template = {
   },
   harness: { frozen: true },
 };
+const PRIVILEGED_WORKFLOW_MARKERS = [
+  "id-token: write",
+  "role-to-assume",
+  "states:StartExecution",
+  "bench-suite.sh",
+];
 const releases = {
   sdk: [
     { version: "0.12.0", integrity: "sha512-stable" },
@@ -147,12 +153,12 @@ it("renders immediate workflow, execution and immutable result links", () => {
       "console: https://eu-central-1.console.aws.amazon.com/states/example",
       "s3://private-results/runs/run-123/result.json",
     ].join("\n"),
-    "ratel-ai/ratel-bench",
+    "ratel-ai/ratel-bench-aws",
     "456",
   );
   expect(summary).toContain("Run ID: `run-123`");
   expect(summary).toContain(
-    "[Workflow logs](https://github.com/ratel-ai/ratel-bench/actions/runs/456)",
+    "[Workflow logs](https://github.com/ratel-ai/ratel-bench-aws/actions/runs/456)",
   );
   expect(summary).toContain(
     "[Step Functions execution](https://eu-central-1.console.aws.amazon.com/states/example)",
@@ -162,7 +168,17 @@ it("renders immediate workflow, execution and immutable result links", () => {
   );
 });
 
-it("campaign launch workflow is retired from the benchmark repository", () => {
-  expect(existsSync(resolve(REPO_ROOT, ".github/workflows/run-benchmark.yml"))).toBe(false);
-  expect(existsSync(resolve(REPO_ROOT, ".github/workflows/website-rebuild.yml"))).toBe(false);
+it("benchmark repository holds no privileged campaign launch workflow", () => {
+  const workflowsDir = resolve(REPO_ROOT, ".github/workflows");
+  expect(existsSync(join(workflowsDir, "run-benchmark.yml"))).toBe(false);
+  if (!existsSync(workflowsDir)) return;
+  const offenders = readdirSync(workflowsDir, { recursive: true, encoding: "utf8" })
+    .map((entry) => join(workflowsDir, entry))
+    .filter((path) => statSync(path).isFile())
+    .filter((path) => {
+      const content = readFileSync(path, "utf8");
+      return PRIVILEGED_WORKFLOW_MARKERS.some((marker) => content.includes(marker));
+    })
+    .map((path) => relative(REPO_ROOT, path));
+  expect(offenders).toEqual([]);
 });
