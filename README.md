@@ -94,9 +94,9 @@ commands remain deferred. Do not treat the synthetic result as measured benchmar
 
 ### Launch from GitHub Actions
 
-Launch campaigns from the private `ratel-bench-aws` repository (requires repository
-access): **Actions → Run benchmark campaign**. The manual Action submits the same
-selection contract as the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
+Launch campaigns from **ratel-bench-aws → Actions → Run benchmark campaign** (private;
+requires repository access). The manual Action submits the same selection contract as
+the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
 `modelConcurrency` and `campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted
 selection uses the 15 Bedrock defaults; exclusions win, concurrency defaults to one, the
 aggregate model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
@@ -107,9 +107,12 @@ The optional `benchRef` input selects a public `ratel-bench` branch, tag or comm
 freezes the deployed `ratel-bench-aws` commit from the request template, plus the highest
 stable compatible SDK/core pair recorded in `.github/benchmark-release-metadata.json` at
 the selected benchmark commit. Update release metadata only after the pair passes
-compatibility review. The launch job installs and executes this repository's code at the
-resolved commit with launch credentials, so pass only refs reviewed on
-`ratel-ai/ratel-bench` (not pull-request heads or fork SHAs).
+compatibility review. The selected commit's code runs in the launch job (install plus
+`prepare`/`summarize`, in the same job that later assumes the launch role) and is frozen
+as `benchmarkSha` for the benchmark workers, which run it with worker credentials and spend
+the campaign budget. The Action does not reject other refs: the commits API also resolves
+abbreviated SHAs and fork pull-request SHAs. Pass only refs reviewed on
+`ratel-ai/ratel-bench` `main` or tags.
 
 The Action uses this repository's `workflow-dispatch-cli.ts` (`prepare`, `summarize`) to
 validate inputs, write JSON and render the launch summary. Launch configuration
