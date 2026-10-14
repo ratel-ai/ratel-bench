@@ -39,6 +39,21 @@ export const JEV_INSTRUCTIONS: Record<JevKind, string> = {
 
 const QUESTION_ID = "select";
 
+/**
+ * Wire protocol of the decision server. `jev` = TypeSafe `/v1/systemone` (also laya-serve,
+ * simple-jev, OpenJev); `openai` = OpenAI Decisions `POST /v1/decisions` (public beta,
+ * `gpt-6-luna`): questions are an array, choices `[{value, description}]`, probabilities an
+ * array, and a question may come back as `{type: "refusal"}`.
+ */
+export type DecisionProtocol = "jev" | "openai";
+export const OPENAI_DECISIONS_ENDPOINT = "https://api.openai.com/v1/decisions";
+export const OPENAI_DECISIONS_MODEL = "gpt-6-luna";
+/** $ per input token for each protocol's hosted API (output tokens are free on both). */
+export const INPUT_PRICE: Record<DecisionProtocol, number> = {
+  jev: 0.042 / 1_000_000,
+  openai: 0.1 / 1_000_000,
+};
+
 /** A pool member. Tools carry schemas; skills only id/name/description. */
 export interface JevItem {
   id: string;
@@ -180,6 +195,35 @@ export interface JevResponse {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
+export interface OpenAIDecisionRequest {
+  model: string;
+  input: string;
+  questions: {
+    type: "choice";
+    name: string;
+    instructions: string;
+    choices: { value: string; description: string }[];
+  }[];
+  [extra: string]: unknown;
+}
+
+export interface OpenAIDecisionResponse {
+  model?: string;
+  answers?: {
+    type: string;
+    name: string;
+    choice?: string;
+    confidence?: number;
+    probabilities?: { value: string; probability: number }[];
+  }[];
+  usage?: { input_tokens?: number; output_tokens?: number; prompt_tokens?: number };
+}
+
+/** A parsed answer: per-option probabilities, or a refusal (ranked as all-zero). */
+export type ParsedAnswer =
+  | { probabilities: Record<string, number>; refusal: false }
+  | { probabilities: Record<string, number>; refusal: true };
+
 export class JevHttpError extends Error {
   constructor(
     readonly status: number,
@@ -212,10 +256,10 @@ const RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
  * capped at 60 s). Defaults ride out a ~9-minute outage — a multi-hour semantic/hybrid run
  * must not die on a brief API blip (it did at 6 × 10 s).
  */
-export async function callJev(
-  body: JevRequest,
+export async function callJev<R = JevResponse>(
+  body: object,
   opts: JevClientOptions,
-): Promise<{ response: JevResponse; latencyMs: number }> {
+): Promise<{ response: R; latencyMs: number }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const maxAttempts = opts.maxAttempts ?? 10;
@@ -234,7 +278,7 @@ export async function callJev(
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (res.ok) {
-        const response = (await res.json()) as JevResponse;
+        const response = (await res.json()) as R;
         return { response, latencyMs: Math.round(performance.now() - t0) };
       }
       const err = new JevHttpError(res.status, await res.text());
@@ -261,12 +305,13 @@ export interface JevCacheEntry {
   scenario_id: string;
   pool_size: number;
   model: string;
-  response: JevResponse;
+  /** Raw server response (`JevResponse` or `OpenAIDecisionResponse`), kept for audit. */
+  response: JevResponse & OpenAIDecisionResponse;
   latency_ms: number;
   at: string;
 }
 
-export function requestKey(body: JevRequest): string {
+export function requestKey(body: object): string {
   return createHash("sha256").update(JSON.stringify(body)).digest("hex");
 }
 
@@ -307,6 +352,8 @@ export interface JevRankMeta {
   /** Tournament only: number of calls made for this ranking (latency/tokens are summed). */
   calls?: number;
   tournament?: boolean;
+  /** OpenAI Decisions only: the question was refused (ranked as all-zero). */
+  refusal?: boolean;
 }
 
 export interface JevRankerOptions {
@@ -325,32 +372,110 @@ export interface JevRankerOptions {
   optionText?: OptionTextMode;
   /** Server cap on options per question; larger pools are ranked by a tournament. */
   maxOptions?: number;
+  /** Wire protocol (default `jev`). */
+  protocol?: DecisionProtocol;
+  /** Env var holding the API key (default: OPENAI_API_KEY / TYPESAFE_API_KEY by protocol). */
+  apiKeyEnv?: string;
+  /** $ per input / output token for cost accounting (default: the protocol's list price, $0 out). */
+  priceIn?: number;
+  priceOut?: number;
+  /** Dollar cap: refuse any further uncached call once this run's spend reaches it. */
+  maxSpend?: number;
+}
+
+/** Thrown before an uncached call once the run's spend has reached `--jev-max-spend`. */
+export class SpendCapError extends Error {
+  constructor(spent: number, cap: number) {
+    super(
+      `spend cap reached ($${spent.toFixed(4)} of $${cap.toFixed(2)}): stopping before the next ` +
+        `uncached call. Answered calls are cached — rerun with a higher --jev-max-spend to resume.`,
+    );
+  }
 }
 
 /** Survivors kept per chunk in each tournament round (≥ the largest k we score). */
 const TOURNAMENT_KEEP = 5;
 
-function probabilitiesOf(
-  response: JevResponse,
+/** Extract the `select` answer for either protocol; throws on a malformed response. */
+export function parseAnswer(
+  protocol: DecisionProtocol,
+  response: JevResponse & OpenAIDecisionResponse,
   ctx: { scenarioId: string; poolSize: number },
-): Record<string, number> {
-  const probabilities = response.answers?.[QUESTION_ID]?.probabilities;
-  if (!probabilities) {
+): ParsedAnswer {
+  const fail = (): never => {
     throw new Error(
-      `Jev response for ${ctx.scenarioId} (pool ${ctx.poolSize}) has no probabilities: ` +
+      `${protocol} response for ${ctx.scenarioId} (pool ${ctx.poolSize}) has no probabilities: ` +
         JSON.stringify(response).slice(0, 300),
     );
+  };
+  if (protocol === "jev") {
+    const probabilities = (response as JevResponse).answers?.[QUESTION_ID]?.probabilities;
+    return probabilities ? { probabilities, refusal: false } : fail();
   }
-  return probabilities;
+  const answers = (response as OpenAIDecisionResponse).answers;
+  const answer = Array.isArray(answers) ? answers.find((a) => a.name === QUESTION_ID) : undefined;
+  if (answer?.type === "refusal") return { probabilities: {}, refusal: true };
+  if (!answer?.probabilities) return fail();
+  return {
+    probabilities: Object.fromEntries(answer.probabilities.map((p) => [p.value, p.probability])),
+    refusal: false,
+  };
+}
+
+function inputTokensOf(response: JevResponse & OpenAIDecisionResponse): number {
+  return response.usage?.input_tokens ?? response.usage?.prompt_tokens ?? 0;
+}
+
+function outputTokensOf(response: JevResponse & OpenAIDecisionResponse): number {
+  return response.usage?.output_tokens ?? 0;
 }
 
 export class JevRanker {
-  /** `inputTokens` counts billed (uncached) requests only. */
-  readonly stats = { calls: 0, cacheHits: 0, inputTokens: 0, missingOptions: 0 };
+  /** Token counts are billed (uncached) requests only. */
+  readonly stats = {
+    calls: 0,
+    cacheHits: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    missingOptions: 0,
+    refusals: 0,
+  };
   private readonly model: string;
+  private readonly protocol: DecisionProtocol;
 
   constructor(private readonly opts: JevRankerOptions) {
-    this.model = opts.model ?? JEV_MODEL;
+    this.protocol = opts.protocol ?? "jev";
+    this.model = opts.model ?? (this.protocol === "openai" ? OPENAI_DECISIONS_MODEL : JEV_MODEL);
+  }
+
+  /** Request body for one call; the `jev` shape is byte-for-byte what it always was. */
+  private requestBody(query: string, options: JevOptions): object {
+    const instructions = JEV_INSTRUCTIONS[this.opts.kind];
+    if (this.protocol === "openai") {
+      const body: OpenAIDecisionRequest = {
+        model: this.model,
+        input: query,
+        questions: [
+          {
+            type: "choice",
+            name: QUESTION_ID,
+            instructions,
+            choices: options.order.map((k) => ({ value: k, description: options.criteria[k] })),
+          },
+        ],
+        ...(this.opts.extraBody ?? {}),
+      };
+      return body;
+    }
+    const body: JevRequest = {
+      model: this.model,
+      state: query,
+      questions: {
+        [QUESTION_ID]: { type: "choice", instructions, criteria: options.criteria },
+      },
+      ...(this.opts.extraBody ?? {}),
+    };
+    return body;
   }
 
   /**
@@ -447,29 +572,26 @@ export class JevRanker {
     ctx: { scenarioId: string; poolSize: number; seedKey: string },
   ): Promise<{ hits: RankedHit[]; meta: JevRankMeta }> {
     const options = buildOptions(pool, ctx.seedKey, this.opts.seed, this.opts.optionText);
-    const body: JevRequest = {
-      model: this.model,
-      state: query,
-      questions: {
-        [QUESTION_ID]: {
-          type: "choice",
-          instructions: JEV_INSTRUCTIONS[this.opts.kind],
-          criteria: options.criteria,
-        },
-      },
-      ...(this.opts.extraBody ?? {}),
-    };
+    const body = this.requestBody(query, options);
     const key = requestKey(body);
     let entry = this.opts.cache.get(key);
     const cacheHit = entry !== undefined;
     if (!entry) {
-      const apiKey = this.opts.apiKey?.() ?? process.env.TYPESAFE_API_KEY;
+      const cap = this.opts.maxSpend;
+      if (cap !== undefined && this.spent() >= cap) throw new SpendCapError(this.spent(), cap);
+      const envKey =
+        this.opts.apiKeyEnv ?? (this.protocol === "openai" ? "OPENAI_API_KEY" : "TYPESAFE_API_KEY");
+      const apiKey = this.opts.apiKey?.() ?? process.env[envKey];
       if (!apiKey && this.opts.requireApiKey !== false) {
-        throw new Error("TYPESAFE_API_KEY is not set (needed for uncached Jev requests)");
+        throw new Error(`${envKey} is not set (needed for uncached ${this.protocol} requests)`);
       }
-      const { response, latencyMs } = await callJev(body, { apiKey, ...this.opts.client });
+      const { response, latencyMs } = await callJev<JevResponse & OpenAIDecisionResponse>(body, {
+        apiKey,
+        endpoint: this.protocol === "openai" ? OPENAI_DECISIONS_ENDPOINT : undefined,
+        ...this.opts.client,
+      });
       // Validate before caching — a malformed answer must not be replayed forever.
-      probabilitiesOf(response, ctx);
+      parseAnswer(this.protocol, response, ctx);
       entry = {
         key,
         scenario_id: ctx.scenarioId,
@@ -481,33 +603,46 @@ export class JevRanker {
       };
       this.opts.cache.put(entry);
       this.stats.calls++;
-      this.stats.inputTokens += response.usage?.input_tokens ?? 0;
+      this.stats.inputTokens += inputTokensOf(response);
+      this.stats.outputTokens += outputTokensOf(response);
     } else {
       this.stats.cacheHits++;
     }
 
-    const probabilities = probabilitiesOf(entry.response, ctx);
-    this.stats.missingOptions += options.order.filter((k) => !(k in probabilities)).length;
-    const inputTokens = entry.response.usage?.input_tokens ?? 0;
+    const { probabilities, refusal } = parseAnswer(this.protocol, entry.response, ctx);
+    if (refusal) this.stats.refusals++;
+    else this.stats.missingOptions += options.order.filter((k) => !(k in probabilities)).length;
     return {
       hits: rankFromProbabilities(probabilities, options),
       meta: {
         jev_model: entry.model,
         latency_ms: entry.latency_ms,
-        input_tokens: inputTokens,
+        input_tokens: inputTokensOf(entry.response),
         cache_hit: cacheHit,
+        ...(refusal ? { refusal: true } : {}),
       },
     };
   }
 
+  /** Dollars spent by this ranker's uncached calls (input + output at the configured prices). */
+  spent(): number {
+    const priceIn = this.opts.priceIn ?? INPUT_PRICE[this.protocol];
+    return this.stats.inputTokens * priceIn + this.stats.outputTokens * (this.opts.priceOut ?? 0);
+  }
+
   summary(): string {
-    const cost = this.stats.inputTokens * JEV_INPUT_PRICE;
+    const cost = this.spent();
     return (
-      `  jev: ${this.stats.calls} API calls, ${this.stats.cacheHits} cache hits, ` +
-      `${this.stats.inputTokens} billed input tokens (~$${cost.toFixed(4)})` +
+      `  ${this.protocol}: ${this.stats.calls} API calls, ${this.stats.cacheHits} cache hits, ` +
+      `${this.stats.inputTokens} billed input tokens` +
+      (this.stats.outputTokens ? ` + ${this.stats.outputTokens} output tokens` : "") +
+      ` (~$${cost.toFixed(4)}` +
+      (this.opts.maxSpend !== undefined ? ` of $${this.opts.maxSpend.toFixed(2)} cap` : "") +
+      ")" +
       (this.stats.missingOptions
         ? `, ${this.stats.missingOptions} options missing from responses`
-        : "")
+        : "") +
+      (this.stats.refusals ? `, ${this.stats.refusals} refusals` : "")
     );
   }
 }
@@ -555,8 +690,22 @@ export function jevConfigFromArgs(
   arg: (name: string, fallback: string) => string,
 ): Pick<
   JevRankerOptions,
-  "model" | "extraBody" | "requireApiKey" | "client" | "optionText" | "maxOptions"
+  | "model"
+  | "extraBody"
+  | "requireApiKey"
+  | "client"
+  | "optionText"
+  | "maxOptions"
+  | "protocol"
+  | "apiKeyEnv"
+  | "priceIn"
+  | "priceOut"
+  | "maxSpend"
 > {
+  const protocol = arg("--decision-api", "jev");
+  if (protocol !== "jev" && protocol !== "openai") {
+    throw new Error(`--decision-api must be jev or openai (got "${protocol}")`);
+  }
   const baseUrl = arg("--jev-base-url", "");
   const optionTextRaw = arg("--jev-option-text", "standard");
   if (optionTextRaw !== "standard" && optionTextRaw !== "compact") {
@@ -579,12 +728,32 @@ export function jevConfigFromArgs(
     }
     extraBody = parsed as Record<string, unknown>;
   }
+  // Optional non-negative number flags; `perMillion` converts a $/1M-token price to $/token.
+  const num = (flag: string, perMillion: boolean): number | undefined => {
+    const raw = arg(flag, "");
+    if (!raw) return undefined;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v < 0)
+      throw new Error(`${flag} must be a number ≥ 0 (got "${raw}")`);
+    return perMillion ? v / 1_000_000 : v;
+  };
+  const apiKeyEnv = arg("--jev-api-key-env", "");
+  const priceIn = num("--jev-price-in", true);
+  const priceOut = num("--jev-price-out", true);
+  const maxSpend = num("--jev-max-spend", false);
+  const path = protocol === "openai" ? "/v1/decisions" : "/v1/systemone";
   return {
-    model: arg("--jev-model", JEV_MODEL),
+    model: arg("--jev-model", protocol === "openai" ? OPENAI_DECISIONS_MODEL : JEV_MODEL),
     extraBody,
-    requireApiKey: !baseUrl,
-    client: baseUrl ? { endpoint: `${baseUrl.replace(/\/+$/, "")}/v1/systemone` } : undefined,
+    // a custom base URL is keyless (self-hosted) unless a key env var is named
+    requireApiKey: !baseUrl || apiKeyEnv !== "",
+    client: baseUrl ? { endpoint: `${baseUrl.replace(/\/+$/, "")}${path}` } : undefined,
+    ...(protocol === "openai" ? { protocol: "openai" as const } : {}),
     ...(optionTextRaw === "compact" ? { optionText: "compact" as const } : {}),
     ...(maxOptions ? { maxOptions } : {}),
+    ...(apiKeyEnv ? { apiKeyEnv } : {}),
+    ...(priceIn !== undefined ? { priceIn } : {}),
+    ...(priceOut !== undefined ? { priceOut } : {}),
+    ...(maxSpend !== undefined ? { maxSpend } : {}),
   };
 }

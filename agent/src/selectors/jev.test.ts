@@ -15,8 +15,10 @@ import {
   type JevResponse,
   jevConfigFromArgs,
   optionText,
+  parseAnswer,
   rankFromProbabilities,
   rerankWithJev,
+  SpendCapError,
 } from "./jev.js";
 
 function item(id: string, extra: Partial<JevItem> = {}): JevItem {
@@ -438,5 +440,209 @@ describe("compact option text and flags", () => {
       /standard or compact/,
     );
     expect(() => jevConfigFromArgs(a({ "--jev-max-options": "5" }))).toThrow(/integer > 5/);
+  });
+});
+
+describe("OpenAI Decisions protocol", () => {
+  const pool = [item("a"), item("b"), item("c")];
+  const ctx = { scenarioId: "sc", poolSize: 3, seedKey: "sc:jev:3" };
+
+  function openaiResponse(probs: Record<string, number> | "refusal") {
+    return {
+      model: "gpt-6-luna",
+      answers: [
+        probs === "refusal"
+          ? { type: "refusal", name: "select" }
+          : {
+              type: "choice",
+              name: "select",
+              choice: Object.entries(probs).sort((x, y) => y[1] - x[1])[0][0],
+              probabilities: Object.entries(probs).map(([value, probability]) => ({
+                value,
+                probability,
+              })),
+              confidence: 0.5,
+            },
+      ],
+      usage: { input_tokens: 42 },
+    };
+  }
+
+  function ranker(fetchImpl: typeof fetch, cachePath?: string) {
+    return new JevRanker({
+      kind: "tool",
+      cache: new JevCache(cachePath ?? join(mkdtempSync(join(tmpdir(), "jev-")), "cache.jsonl")),
+      seed: 42,
+      protocol: "openai",
+      apiKey: () => "sk-test",
+      client: { fetchImpl, sleep: noSleep },
+    });
+  }
+
+  it("sends the Decisions request shape: input + questions[] with choices in sent order", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(openaiResponse({ a: 0.2, b: 0.7, c: 0.1 })));
+    const { hits, meta } = await ranker(fetchImpl).rank("find b", pool, ctx);
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.openai.com/v1/decisions");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-test");
+    const body = JSON.parse(init.body as string);
+    expect(body.model).toBe("gpt-6-luna");
+    expect(body.input).toBe("find b");
+    expect(body).not.toHaveProperty("state");
+    const q = body.questions[0];
+    expect(q).toMatchObject({
+      type: "choice",
+      name: "select",
+      instructions: JEV_INSTRUCTIONS.tool,
+    });
+    // same shuffled order and option text as the Jev request would use
+    const jevOrder = buildOptions(pool, ctx.seedKey, 42);
+    expect(q.choices.map((c: { value: string }) => c.value)).toEqual(jevOrder.order);
+    expect(q.choices[0].description).toBe(jevOrder.criteria[jevOrder.order[0]]);
+    expect(hits.map((h) => h.id)).toEqual(["b", "a", "c"]);
+    expect(meta).toMatchObject({ jev_model: "gpt-6-luna", input_tokens: 42, cache_hit: false });
+    expect(meta).not.toHaveProperty("refusal");
+  });
+
+  it("a refusal is cached, counted, and ranked as all-zero (sent order)", async () => {
+    const cachePath = join(mkdtempSync(join(tmpdir(), "jev-")), "cache.jsonl");
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(openaiResponse("refusal")));
+    const r = ranker(fetchImpl, cachePath);
+    const first = await r.rank("q", pool, ctx);
+    expect(first.meta.refusal).toBe(true);
+    expect(first.hits.map((h) => h.id)).toEqual(
+      buildOptions(pool, ctx.seedKey, 42).order.map((k) => k),
+    );
+    expect(r.stats.refusals).toBe(1);
+    const again = await ranker(vi.fn(), cachePath).rank("q", pool, ctx);
+    expect(again.meta).toMatchObject({ refusal: true, cache_hit: true });
+  });
+
+  it("rejects a malformed response without caching it", async () => {
+    const cachePath = join(mkdtempSync(join(tmpdir(), "jev-")), "cache.jsonl");
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ answers: [] }));
+    await expect(ranker(fetchImpl, cachePath).rank("q", pool, ctx)).rejects.toThrow(
+      /no probabilities/,
+    );
+    expect(new JevCache(cachePath).size).toBe(0);
+  });
+
+  it("--decision-api openai sets protocol and the gpt-6-luna default; jev default unchanged", () => {
+    const a = (m: Record<string, string>) => (n: string, f: string) => m[n] ?? f;
+    expect(jevConfigFromArgs(a({ "--decision-api": "openai" }))).toMatchObject({
+      protocol: "openai",
+      model: "gpt-6-luna",
+      requireApiKey: true,
+    });
+    expect(jevConfigFromArgs(a({}))).not.toHaveProperty("protocol");
+    expect(() => jevConfigFromArgs(a({ "--decision-api": "gemini" }))).toThrow(/jev or openai/);
+  });
+
+  it("parseAnswer maps the probabilities array to a key → probability record", () => {
+    expect(
+      parseAnswer("openai", openaiResponse({ x: 0.25, y: 0.75 }) as never, {
+        scenarioId: "s",
+        poolSize: 2,
+      }),
+    ).toEqual({ probabilities: { x: 0.25, y: 0.75 }, refusal: false });
+  });
+});
+
+describe("provider key env, cost accounting and the dollar cap", () => {
+  const pool = [item("a"), item("b")];
+  const ctx = (i: number) => ({ scenarioId: `s${i}`, poolSize: 2, seedKey: `s${i}:jev:2` });
+  const withUsage = (inTok: number, outTok: number) =>
+    jsonResponse({
+      ...choiceResponse({ a: 0.7, b: 0.3 }, inTok),
+      usage: { input_tokens: inTok, output_tokens: outTok },
+    });
+
+  it("--jev-api-key-env names the key variable and makes a base-url server keyed", async () => {
+    const a = (m: Record<string, string>) => (n: string, f: string) => m[n] ?? f;
+    const cfg = jevConfigFromArgs(
+      a({
+        "--jev-base-url": "https://sage.levanto.ai",
+        "--jev-model": "levanto-sage-v1.3",
+        "--jev-api-key-env": "SAGE_API_KEY",
+        "--jev-price-in": "0.05",
+        "--jev-price-out": "10",
+        "--jev-max-spend": "1.5",
+      }),
+    );
+    expect(cfg).toMatchObject({
+      model: "levanto-sage-v1.3",
+      requireApiKey: true,
+      apiKeyEnv: "SAGE_API_KEY",
+      priceIn: 0.05 / 1e6,
+      priceOut: 10 / 1e6,
+      maxSpend: 1.5,
+      client: { endpoint: "https://sage.levanto.ai/v1/systemone" },
+    });
+    expect(() => jevConfigFromArgs(a({ "--jev-max-spend": "-1" }))).toThrow(/≥ 0/);
+
+    const fetchImpl = vi.fn().mockResolvedValue(withUsage(100, 1));
+    const saved = process.env.SAGE_API_KEY;
+    process.env.SAGE_API_KEY = "lv_live_test";
+    try {
+      const r = new JevRanker({
+        kind: "tool",
+        cache: new JevCache(join(mkdtempSync(join(tmpdir(), "jev-")), "c.jsonl")),
+        seed: 42,
+        ...cfg,
+        client: { ...cfg.client, fetchImpl, sleep: noSleep },
+      });
+      await r.rank("q", pool, ctx(0));
+      const init = fetchImpl.mock.calls[0][1] as RequestInit;
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer lv_live_test");
+      expect(JSON.parse(init.body as string)).toMatchObject({
+        model: "levanto-sage-v1.3",
+        state: "q",
+      });
+      expect(r.stats).toMatchObject({ inputTokens: 100, outputTokens: 1 });
+      expect(r.spent()).toBeCloseTo(100 * 0.05e-6 + 1 * 10e-6, 12);
+    } finally {
+      if (saved === undefined) delete process.env.SAGE_API_KEY;
+      else process.env.SAGE_API_KEY = saved;
+    }
+  });
+
+  it("a named key env that is unset fails fast", async () => {
+    delete process.env.SAGE_TEST_MISSING;
+    const r = new JevRanker({
+      kind: "tool",
+      cache: new JevCache(join(mkdtempSync(join(tmpdir(), "jev-")), "c.jsonl")),
+      seed: 42,
+      apiKeyEnv: "SAGE_TEST_MISSING",
+      client: { endpoint: "https://example.invalid/v1/systemone", fetchImpl: vi.fn() },
+    });
+    await expect(r.rank("q", pool, ctx(0))).rejects.toThrow(/SAGE_TEST_MISSING is not set/);
+  });
+
+  it("the cap stops before the next uncached call but never blocks cache hits", async () => {
+    const cachePath = join(mkdtempSync(join(tmpdir(), "jev-")), "c.jsonl");
+    const fetchImpl = vi.fn(async () => withUsage(1_000_000, 0)); // $0.05/call, fresh body each time
+    const mk = () =>
+      new JevRanker({
+        kind: "tool",
+        cache: new JevCache(cachePath),
+        seed: 42,
+        apiKey: () => "k",
+        priceIn: 0.05 / 1e6,
+        maxSpend: 0.08,
+        client: { fetchImpl, sleep: noSleep },
+      });
+    const r = mk();
+    await r.rank("q0", pool, ctx(0)); // $0.05
+    await r.rank("q1", pool, ctx(1)); // spent $0.05 < cap → allowed; now $0.10 ≥ cap
+    await expect(r.rank("q2", pool, ctx(2))).rejects.toBeInstanceOf(SpendCapError);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // a fresh run (spend resets to 0 for new calls) replays both cached answers for free
+    const again = mk();
+    await again.rank("q0", pool, ctx(0));
+    await again.rank("q1", pool, ctx(1));
+    expect(again.stats).toMatchObject({ calls: 0, cacheHits: 2 });
+    expect(r.summary()).toMatch(/of \$0\.08 cap/);
   });
 });
