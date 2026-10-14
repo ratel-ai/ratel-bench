@@ -4,6 +4,15 @@ import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
 import { prepareWorkflowDispatch, summarizeCampaignLaunch } from "./workflow-dispatch.js";
 
+// Repo has no CI: local/Loop-run tripwire, not an IAM boundary.
+const PRIVILEGED_WORKFLOW_MARKERS = [
+  /id-token:\s*['"]?write/,
+  /permissions:\s*['"]?write-all/,
+  /role-to-assume/,
+  /states:StartExecution/,
+  /stepfunctions\s+start-execution/,
+  /bench-suite\.sh/,
+];
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const template = {
@@ -19,12 +28,6 @@ const template = {
   },
   harness: { frozen: true },
 };
-const PRIVILEGED_WORKFLOW_MARKERS = [
-  "id-token: write",
-  "role-to-assume",
-  "states:StartExecution",
-  "bench-suite.sh",
-];
 const releases = {
   sdk: [
     { version: "0.12.0", integrity: "sha512-stable" },
@@ -175,10 +178,32 @@ it("benchmark repository holds no privileged campaign launch workflow", () => {
   const offenders = readdirSync(workflowsDir, { recursive: true, encoding: "utf8" })
     .map((entry) => join(workflowsDir, entry))
     .filter((path) => statSync(path).isFile())
-    .filter((path) => {
-      const content = readFileSync(path, "utf8");
-      return PRIVILEGED_WORKFLOW_MARKERS.some((marker) => content.includes(marker));
-    })
+    .filter((path) => isPrivilegedWorkflow(readFileSync(path, "utf8")))
     .map((path) => relative(REPO_ROOT, path));
   expect(offenders).toEqual([]);
 });
+
+describe("isPrivilegedWorkflow", () => {
+  it.each([
+    ["quoted id-token", 'permissions:\n  id-token: "write"'],
+    ["padded id-token", "permissions:\n  id-token:   write"],
+    ["unspaced id-token", "permissions:\n  id-token:write"],
+    ["write-all", "permissions: write-all"],
+    ["role assumption", "with:\n  role-to-assume: arn:aws:iam::1:role/x"],
+    ["sfn IAM action", "Action: states:StartExecution"],
+    ["sfn CLI", "run: aws stepfunctions start-execution --state-machine-arn x"],
+    ["bench-suite", "run: ./scripts/bench-suite.sh"],
+  ])("flags %s", (_, content) => {
+    expect(isPrivilegedWorkflow(content)).toBe(true);
+  });
+
+  it("allows benign read-only workflow", () => {
+    expect(isPrivilegedWorkflow("permissions:\n  contents: read\nsteps:\n  - run: pnpm test")).toBe(
+      false,
+    );
+  });
+});
+
+function isPrivilegedWorkflow(content: string): boolean {
+  return PRIVILEGED_WORKFLOW_MARKERS.some((marker) => marker.test(content));
+}
