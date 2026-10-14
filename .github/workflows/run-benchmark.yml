@@ -4,29 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       runOnlyModels:
-        description: "Comma-separated provider/model IDs; replaces the 15-model default"
+        description: 'Run only models (optional, comma-separated, e.g. "bedrock/openai.gpt-6-luna,bedrock/openai.gpt-6-sol")'
         required: false
         type: string
       excludeModels:
-        description: "Comma-separated provider/model IDs removed after selection"
+        description: 'Exclude models (optional, comma-separated, e.g. "bedrock/openai.gpt-6-astra")'
         required: false
         type: string
       notifyToEmails:
-        description: "Comma-separated additional recipients; dev@ratel.sh is always included"
+        description: 'Also email (optional, comma-separated, e.g. "you@ratel.sh"); dev@ratel.sh always gets it'
         required: false
         type: string
       modelConcurrency:
-        description: "Concurrent model pipelines"
+        description: 'Models in parallel (1-4, e.g. "4")'
         required: true
         default: "1"
         type: string
       campaignBudgetUsd:
-        description: "Aggregate model/API spend ceiling in USD"
+        description: 'Budget in USD (e.g. "25")'
         required: true
         default: "1000"
         type: string
       runId:
-        description: "Optional idempotent run ID"
+        description: 'Run ID (optional, e.g. "luna-test-1")'
         required: false
         type: string
 
