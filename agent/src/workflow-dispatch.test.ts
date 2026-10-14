@@ -176,6 +176,13 @@ it("workflow is a scoped asynchronous dispatch and legacy deploy hook is retired
   expect(workflow).toMatch(/permissions:\s+contents: read\s+id-token: write/);
   expect(workflow).toContain("role-to-assume: $" + "{{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}");
   expect(workflow).toContain("ref: $" + "{{ steps.prepare.outputs.aws_sha }}");
+  // ratel-bench-aws is private: GITHUB_TOKEN cannot read it, so a read-only App token is required.
+  expect(workflow).toMatch(
+    /uses: actions\/create-github-app-token@[\s\S]*?client-id: \$\{\{ vars\.BENCHMARK_LAUNCHER_CLIENT_ID \}\}[\s\S]*?private-key: \$\{\{ secrets\.BENCHMARK_LAUNCHER_APP_PRIVATE_KEY \}\}[\s\S]*?repositories: ratel-bench-aws[\s\S]*?permission-contents: read/,
+  );
+  expect(workflow).toMatch(
+    /repository: ratel-ai\/ratel-bench-aws[\s\S]*?token: \$\{\{ steps\.launcher-token\.outputs\.token \}\}/,
+  );
   expect(workflow).toContain("bench-suite.sh submit");
   expect(workflow).not.toContain("bench-suite.sh watch");
   expect(workflow).not.toMatch(/run:.*inputs\./);

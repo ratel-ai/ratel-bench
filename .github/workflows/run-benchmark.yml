@@ -73,12 +73,23 @@ jobs:
           CAMPAIGN_RUN_ID: ${{ inputs.runId }}
         run: pnpm --filter @ratel-ai/benchmark exec tsx src/workflow-dispatch-cli.ts prepare
 
+      - name: Create read-only AWS launcher token
+        id: launcher-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.BENCHMARK_LAUNCHER_CLIENT_ID }}
+          private-key: ${{ secrets.BENCHMARK_LAUNCHER_APP_PRIVATE_KEY }}
+          owner: ratel-ai
+          repositories: ratel-bench-aws
+          permission-contents: read
+
       - name: Check out immutable AWS launcher revision
         uses: actions/checkout@v4
         with:
           repository: ratel-ai/ratel-bench-aws
           ref: ${{ steps.prepare.outputs.aws_sha }}
           path: .campaign/ratel-bench-aws
+          token: ${{ steps.launcher-token.outputs.token }}
 
       - name: Assume campaign launch role
         uses: aws-actions/configure-aws-credentials@v4

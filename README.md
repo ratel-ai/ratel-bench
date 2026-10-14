@@ -112,6 +112,9 @@ Repository variables must provide `BENCHMARK_CAMPAIGN_TEMPLATE_JSON` (the deploy
 versioned request template), `BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN`, `BENCHMARK_AWS_REGION`,
 `BENCHMARK_RESULTS_BUCKET`, `BENCHMARK_CAMPAIGN_STATE_MACHINE_ARN`,
 `BENCHMARK_CAMPAIGN_RUN_TABLE`, and the model/preparation/CodeBuild concurrency limits.
+`ratel-bench-aws` is private, so the launcher checkout uses a read-only token from the
+"Ratel Bench Launcher" GitHub App (Contents: read, installed only on `ratel-bench-aws`):
+set `BENCHMARK_LAUNCHER_CLIENT_ID` and the `BENCHMARK_LAUNCHER_APP_PRIVATE_KEY` secret.
 Update release metadata only after the pair passes compatibility review. A failed launch
 reports a configuration/coordinator error without starting a watcher.
 
