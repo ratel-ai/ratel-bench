@@ -19,6 +19,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { candidateTool } from "./catalog-shapes.js";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
@@ -109,7 +110,11 @@ async function main(): Promise<void> {
   // Same seeded subset and full-corpus universe as the agent runner, so a capped
   // retrieval run scores exactly the scenarios its LLM stage will run.
   const allScenarios = loadScenarios(corpusPath);
-  const scenarios = sampleScenarios(allScenarios, scenarioLimit > 0 ? scenarioLimit : undefined, seed);
+  const scenarios = sampleScenarios(
+    allScenarios,
+    scenarioLimit > 0 ? scenarioLimit : undefined,
+    seed,
+  );
   const universe = buildToolUniverse(allScenarios);
   console.log(
     `bfcl-candidates: method=${method} pools=[${poolSizes.join(",")}] k=[${kSlices.join(",")}] ` +
@@ -127,14 +132,7 @@ async function main(): Promise<void> {
       const { search } = await buildToolCatalog({
         method,
         embedding,
-        tools: pool.map((t) => ({
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          inputSchema: t.input_schema,
-          outputSchema: t.output_schema ?? {},
-          execute: async () => ({}),
-        })),
+        tools: pool.map(candidateTool),
       });
       const hits = (await search(sc.prompt, poolSize)).map((h) => ({
         id: h.toolId,
