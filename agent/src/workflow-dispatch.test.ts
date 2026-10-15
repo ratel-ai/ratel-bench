@@ -243,9 +243,13 @@ it("workflow is a scoped asynchronous dispatch and legacy deploy hook is retired
     "excludeModels:",
     "notifyToEmails:",
     "modelConcurrency:",
+    "llmConcurrency:",
     "campaignBudgetUsd:",
   ])
     expect(workflow).toContain(input);
+  expect(workflow).toMatch(
+    /- name: Validate and serialize request\n\s+id: prepare\n\s+env:\n(?:\s+[A-Z_]+: .*\n)*?\s+LLM_CONCURRENCY: \$\{\{ inputs\.llmConcurrency \}\}\n/,
+  );
   expect(workflow).toMatch(/permissions:\s+contents: read\s+id-token: write/);
   expect(workflow).toContain("role-to-assume: $" + "{{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}");
   expect(workflow).toContain("ref: $" + "{{ steps.prepare.outputs.aws_sha }}");

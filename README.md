@@ -95,10 +95,11 @@ commands remain deferred. Do not treat the synthetic result as measured benchmar
 ### Launch from GitHub Actions
 
 The manual **Run benchmark campaign** Action submits the same selection contract as the
-campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`, `modelConcurrency` and
-`campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted selection uses the 16
-Bedrock defaults; exclusions win, concurrency defaults to one, the aggregate model/API
-budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL, SR-Agents and all
+campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`, `modelConcurrency`,
+`llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted
+selection uses the 16 Bedrock defaults; exclusions win, model concurrency defaults to one,
+in-flight LLM calls per model job default to 8 (1-16), the aggregate model/API budget
+defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL, SR-Agents and all
 three retrievers remain fixed parts of a full campaign.
 
 At submission the Action freezes its own commit, the deployed `ratel-bench-aws` commit from

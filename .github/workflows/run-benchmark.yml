@@ -20,6 +20,11 @@ on:
         required: true
         default: "1"
         type: string
+      llmConcurrency:
+        description: 'In-flight LLM calls per model job (1-16, e.g. "2")'
+        required: false
+        default: "8"
+        type: string
       campaignBudgetUsd:
         description: 'Budget in USD (e.g. "25")'
         required: true
@@ -69,6 +74,7 @@ jobs:
           EXCLUDE_MODELS: ${{ inputs.excludeModels }}
           NOTIFY_TO_EMAILS: ${{ inputs.notifyToEmails }}
           MODEL_CONCURRENCY: ${{ inputs.modelConcurrency }}
+          LLM_CONCURRENCY: ${{ inputs.llmConcurrency }}
           CAMPAIGN_BUDGET_USD: ${{ inputs.campaignBudgetUsd }}
           CAMPAIGN_RUN_ID: ${{ inputs.runId }}
         run: pnpm --filter @ratel-ai/benchmark exec tsx src/workflow-dispatch-cli.ts prepare
