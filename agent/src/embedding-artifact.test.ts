@@ -11,6 +11,11 @@ import { loadSdk, resetForTests, selectVersion } from "./sdk/resolve.js";
 const dirs: string[] = [];
 const exec = promisify(execFile);
 
+// Node runtime diagnostics (env/deprecation warnings + trace hints) are not CLI output.
+const NODE_WARNING_LINE = /^\(node:\d+\) (\[[A-Z0-9]+\] )?\w*Warning: /;
+const NODE_TRACE_HINT_LINE =
+  /^\(Use `node --trace-[\w-]+ \.\.\.` to show where the warning was created\)$/;
+
 afterEach(() => {
   resetForTests();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -22,7 +27,10 @@ describe("embedding-artifact CLI", () => {
     { version: "0.5.0", capabilities: { build: false, candidates: false, start: false } },
     { version: "0.4.0", capabilities: { build: false, candidates: false, start: false } },
     { version: undefined, capabilities: { build: false, candidates: false, start: false } },
-  ])("reports complete artifact capabilities for SDK $version", async ({ version, capabilities }) => {
+  ])("reports complete artifact capabilities for SDK $version", async ({
+    version,
+    capabilities,
+  }) => {
     const { stdout, stderr } = await exec(
       process.execPath,
       [
@@ -36,7 +44,19 @@ describe("embedding-artifact CLI", () => {
     );
     expect(JSON.parse(stdout)).toEqual(capabilities);
     expect(stdout.trim().split("\n")).toHaveLength(1);
-    expect(stderr).toBe("");
+    expect(withoutNodeWarnings(stderr)).toBe("");
+  });
+
+  it("ignores Node runtime warnings but keeps other stderr output", () => {
+    const stderr = [
+      "(node:123) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.",
+      "(Use `node --trace-warnings ...` to show where the warning was created)",
+      "(node:123) [DEP0205] DeprecationWarning: module.register() is deprecated.",
+      "(Use `node --trace-deprecation ...` to show where the warning was created)",
+      "",
+    ].join("\n");
+    expect(withoutNodeWarnings(stderr)).toBe("");
+    expect(withoutNodeWarnings(`${stderr}cli: unexpected\n`)).toBe("cli: unexpected");
   });
 
   it.each([
@@ -239,3 +259,11 @@ describe("loadEmbeddingArtifact", () => {
     expect(await loadEmbeddingArtifact(path)).toBe(first);
   });
 });
+
+function withoutNodeWarnings(stderr: string): string {
+  return stderr
+    .split("\n")
+    .filter((line) => !NODE_WARNING_LINE.test(line) && !NODE_TRACE_HINT_LINE.test(line))
+    .join("\n")
+    .trim();
+}
