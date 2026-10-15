@@ -171,9 +171,22 @@ pnpm -F @ratel-ai/benchmark start --sdk-version 0.12.0 \
 For `start`, ratel-full uses the artifact during the serial prewarm pass and
 any cold per-scenario build. Its scenario/pool/retriever/seed bundle cache keys
 are unchanged. Bytes are loaded once and shared across scenario/pool catalogs.
-Missing entries are embedded inline (`onMiss: "embed"`); invalid or incompatible artifacts fail
-the run. SDKs without artifact support log one warning and embed inline. BM25
+Missing entries are embedded inline (`onMiss: "embed"`); invalid or incompatible
+artifacts fail the run. SDKs without artifact support log one warning and embed inline. BM25
 ignores the flag. Omitting the flag retains inline embedding.
+
+Check end-to-end artifact support before enabling it in campaign automation:
+
+```bash
+pnpm -F @ratel-ai/benchmark embedding-artifact capabilities --sdk-version 0.12.0
+# {"build":true,"candidates":true,"start":true}
+```
+
+The command prints one JSON object for the selected SDK, without reading a
+universe or building an artifact. All fields are false for 0.4.0 and 0.5.0.
+Enable campaign artifacts only when `build`, `candidates`, and `start` are all
+true. Unsupported SDKs return false capabilities with exit 0; an invalid or
+uninstalled SDK selection fails with exit 1.
 
 ## Output caps (`maxOutputTokens`)
 

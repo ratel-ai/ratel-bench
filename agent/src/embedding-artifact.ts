@@ -5,13 +5,19 @@ import { loadSkillUniverse, toolCatalogMetadata } from "./catalog-shapes.js";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse } from "./pool.js";
-import { loadSdk, sdkVersion } from "./sdk/resolve.js";
+import { loadSdk, sdkVersion, supportsAsyncSearch } from "./sdk/resolve.js";
 
 interface BuildEmbeddingArtifactOptions {
   benchmark: "bfcl" | "sragents";
   output: string;
   corpus?: string;
   skills?: string;
+}
+
+interface EmbeddingArtifactCapabilities {
+  build: boolean;
+  candidates: boolean;
+  start: boolean;
 }
 
 type ArtifactBuilder = (options: {
@@ -51,6 +57,23 @@ export async function buildEmbeddingArtifact(
   const output = resolveRepoPath(options.output);
   await mkdir(dirname(output), { recursive: true });
   await build({ output, ...universe });
+}
+
+/** End-to-end harness support for the resolver-selected SDK, without loading corpus data. */
+export async function embeddingArtifactCapabilities(): Promise<EmbeddingArtifactCapabilities> {
+  const mod = await loadSdk();
+  const build =
+    typeof (mod as unknown as { experimentalBuildEmbeddingArtifact?: unknown })
+      .experimentalBuildEmbeddingArtifact === "function";
+  // The builder and catalog option ship together; constructor option types are
+  // erased at runtime. Match the adapter's structural check, including local SDKs.
+  const start = build && supportsAsyncSearch(mod);
+  const skillPrototype = mod.SkillCatalog.prototype as unknown as Record<string, unknown>;
+  return {
+    build,
+    candidates: start && typeof skillPrototype.searchAsync === "function",
+    start,
+  };
 }
 
 /** Load once per resolved path, sharing bytes across all catalogs in this process. */
