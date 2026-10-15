@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildEmbeddingArtifact } from "../../embedding-artifact.js";
 import { REPO_ROOT } from "../../paths.js";
 import { resetForTests, selectVersion } from "../../sdk/resolve.js";
-import type { PrewarmInput, Scenario, ToolSpec } from "../../types.js";
+import type { AgentRunInput, PrewarmInput, Scenario, ToolSpec } from "../../types.js";
 import {
   buildRatelFullBundle,
   descriptor,
@@ -81,6 +81,22 @@ describe("prewarm bundle cache", () => {
     // the test on its own, so awaiting is the assertion.
     await prewarm([cell, cell]);
     expect(isPrewarmed(cell)).toBe(true);
+  });
+
+  it("rejects re-prewarming a cached cell with a different embedding artifact path", async () => {
+    await prewarm([{ ...cell, embeddingArtifactPath: "/a.rat1" }]);
+    await expect(prewarm([{ ...cell, embeddingArtifactPath: "/a.rat1" }])).resolves.toBeUndefined();
+    await expect(prewarm([{ ...cell, embeddingArtifactPath: "/b.rat1" }])).rejects.toThrow(
+      /embedding artifact mismatch/,
+    );
+    // undefined vs a path counts as different.
+    await expect(prewarm([cell])).rejects.toThrow(/embedding artifact mismatch/);
+  });
+
+  it("rejects run() for a cached cell with a different embedding artifact path", async () => {
+    await prewarm([cell]);
+    const input = { ...cell, embeddingArtifactPath: "/other.rat1" } as unknown as AgentRunInput;
+    await expect(descriptor.run(input)).rejects.toThrow(/embedding artifact mismatch/);
   });
 
   it("builds a bundle whose tool selection is identical to a cold build", async () => {
@@ -248,10 +264,12 @@ describe("ratel-full embedding artifacts", () => {
 
       await prewarm([{ ...cell, embeddingArtifactPath: output }]);
       expect(isPrewarmed(cell)).toBe(true);
-      // Artifact source does not change the established scenario/pool/retriever/seed key.
+      // Same path re-prewarm stays a no-op; a different path must not silently
+      // reuse the ranking warmed from the first artifact.
+      await expect(prewarm([{ ...cell, embeddingArtifactPath: output }])).resolves.toBeUndefined();
       await expect(
         prewarm([{ ...cell, embeddingArtifactPath: "/missing/already-prewarmed.rat1" }]),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow(/embedding artifact mismatch/);
     },
     60_000,
   );

@@ -37,13 +37,20 @@ const ID = "ratel-full";
 // (model, run) that shares the same (scenario, pool, retriever). Populated by
 // `prewarm` in the runner's serial pre-pass; `descriptor.run` reads from it.
 // See `prewarm` for why this must not happen inside the concurrent metered loop.
-const bundleCache = new Map<string, ToolBundle>();
+const bundleCache = new Map<string, CachedBundle>();
+
+/** A cached bundle plus the embedding-artifact path it was warmed from. */
+interface CachedBundle {
+  bundle: ToolBundle;
+  embeddingArtifactPath: string | undefined;
+}
 
 /** Cache key: scenario + pool + retriever + seed. Seed is included because the
  *  pool is derived from it, so a different-seed run must never reuse a stale
- *  bundle. The embedding-artifact path is omitted on purpose — it only changes
- *  where embeddings come from, not the tool surface — so one process must use
- *  one artifact path. */
+ *  bundle. The embedding-artifact path is NOT in the key but is stored with the
+ *  bundle: the direct tools are a search top-K over the warmed embeddings, so a
+ *  later lookup with a different path (undefined vs path included) throws via
+ *  `assertSameArtifact` rather than silently reusing the first ranking. */
 function bundleKey(
   scenarioId: string,
   poolSize: number | null,
@@ -60,14 +67,18 @@ function bundleKey(
  * cell's embed would stall every other in-flight cell's `await`ed `generate()`,
  * inflating their `Date.now()`-based `wall_ms`. Doing it here, off the clock,
  * keeps `latency_p50_ms` honest — the timed loop then only pays the cheap
- * query-embed inside `search_tools`. Idempotent: re-prewarming a cached key is a
- * no-op, so it's safe to call once per campaign.
+ * query-embed inside `search_tools`. Idempotent: re-prewarming a cached key with
+ * the same embedding artifact path is a no-op; a different path throws.
  */
 export async function prewarm(inputs: PrewarmInput[]): Promise<void> {
   for (const input of inputs) {
     const retriever = input.retriever ?? "bm25";
     const key = bundleKey(input.scenario.id, input.poolSize, retriever, input.seed);
-    if (bundleCache.has(key)) continue;
+    const cached = bundleCache.get(key);
+    if (cached) {
+      assertSameArtifact(key, cached, input.embeddingArtifactPath);
+      continue;
+    }
     const { bundle } = await buildRatelFullBundle({
       scenario: input.scenario,
       pool: input.pool,
@@ -75,7 +86,7 @@ export async function prewarm(inputs: PrewarmInput[]): Promise<void> {
       retriever,
       embeddingArtifactPath: input.embeddingArtifactPath,
     });
-    bundleCache.set(key, bundle);
+    bundleCache.set(key, { bundle, embeddingArtifactPath: input.embeddingArtifactPath });
   }
 }
 
@@ -174,7 +185,23 @@ export const descriptor: AgentDescriptor = {
     // stayed off the clock); fall back to a cold build otherwise (unit tests /
     // any caller that skips prepare) — identical tool surface either way.
     const key = bundleKey(input.scenario.id, input.poolSize, input.retriever, input.seed);
-    const bundle = bundleCache.get(key) ?? (await buildRatelFullBundle(input)).bundle;
+    const cached = bundleCache.get(key);
+    if (cached) assertSameArtifact(key, cached, input.embeddingArtifactPath);
+    const bundle = cached?.bundle ?? (await buildRatelFullBundle(input)).bundle;
     return runMeteredLoop(ID, input, bundle);
   },
 };
+
+/** Throw when a cached cell is requested with a different embedding artifact
+ *  than the one its bundle was warmed from. */
+function assertSameArtifact(
+  key: string,
+  cached: CachedBundle,
+  embeddingArtifactPath: string | undefined,
+): void {
+  if (cached.embeddingArtifactPath === embeddingArtifactPath) return;
+  throw new Error(
+    `ratel-full embedding artifact mismatch for cell ${key}: cached bundle was warmed ` +
+      `from ${cached.embeddingArtifactPath ?? "<none>"}, got ${embeddingArtifactPath ?? "<none>"}`,
+  );
+}
