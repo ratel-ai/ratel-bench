@@ -155,6 +155,21 @@ candidate generators (SR skill bodies are omitted). SDKs without
 an `unsupported` message. Other errors exit 1. `loadEmbeddingArtifact(path)` in
 `src/embedding-artifact.ts` shares artifact bytes across loads in one process.
 
+Pass `--embedding-artifact <path>` to either candidate generator to reuse the
+artifact for semantic or hybrid retrieval:
+
+```bash
+pnpm -F @ratel-ai/benchmark bfcl-candidates --sdk-version 0.12.0 \
+  --retriever semantic --embedding-artifact cache/bfcl.rat1
+pnpm -F @ratel-ai/benchmark sragents-candidates --sdk-version 0.12.0 \
+  --retriever hybrid --embedding-artifact cache/sragents.rat1
+```
+
+Bytes are loaded once and shared across scenario/pool catalogs. Missing entries
+are embedded inline (`onMiss: "embed"`); invalid or incompatible artifacts fail
+the run. SDKs without artifact support log one warning and embed inline. BM25
+ignores the flag. Omitting the flag retains inline embedding.
+
 ## Output caps (`maxOutputTokens`)
 
 Every agent LLM call requests the model's output cap from `models.json`. Its ordered `run[]` is the default 16-model Bedrock campaign; `historical[]` keeps older direct, hosted and Bedrock routes available through explicit selection. Catalog entries and aliases use explicit serving providers, so `bedrock/claude-haiku-4-5` and `anthropic/claude-haiku-4-5` can share a cap while retaining distinct serving identities and prices. Bare names always mean Bedrock, including `gpt-*`; use `openai/gpt-5.4-mini` or `anthropic/claude-sonnet-4-6` for the historical direct routes. Hosted `<url>#<model>` and `ollama:<tag>` identities are preserved. A model without a catalog cap sends no cap, and the startup line says so. Judge calls send no cap unless `--judge-max-output-tokens` is set.
