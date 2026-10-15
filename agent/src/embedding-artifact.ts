@@ -5,7 +5,13 @@ import { loadSkillUniverse, toolCatalogMetadata } from "./catalog-shapes.js";
 import { loadScenarios } from "./corpus.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse } from "./pool.js";
-import { loadSdk, sdkVersion, supportsAsyncSearch } from "./sdk/resolve.js";
+import {
+  acceptsEmbeddingArtifact,
+  type EmbeddingSpec,
+  supportsEmbeddingArtifact,
+} from "./sdk/adapter.js";
+import { loadSdk, sdkVersion } from "./sdk/resolve.js";
+import type { RetrievalMethod } from "./types.js";
 
 interface BuildEmbeddingArtifactOptions {
   benchmark: "bfcl" | "sragents";
@@ -18,6 +24,14 @@ interface EmbeddingArtifactCapabilities {
   build: boolean;
   candidates: boolean;
   start: boolean;
+}
+
+interface EmbeddingArtifactOptionInput {
+  /** `--embedding-artifact`; empty/undefined means no artifact. */
+  path?: string;
+  method: RetrievalMethod;
+  /** `--embedding`; artifacts are always built with the SDK default model. */
+  embedding?: EmbeddingSpec;
 }
 
 type ArtifactBuilder = (options: {
@@ -65,15 +79,33 @@ export async function embeddingArtifactCapabilities(): Promise<EmbeddingArtifact
   const build =
     typeof (mod as unknown as { experimentalBuildEmbeddingArtifact?: unknown })
       .experimentalBuildEmbeddingArtifact === "function";
-  // The builder and catalog option ship together; constructor option types are
-  // erased at runtime. Match the adapter's structural check, including local SDKs.
-  const start = build && supportsAsyncSearch(mod);
+  // Same structural check the adapter applies before passing artifact bytes.
+  const start = supportsEmbeddingArtifact(mod);
   const skillPrototype = mod.SkillCatalog.prototype as unknown as Record<string, unknown>;
   return {
     build,
     candidates: start && typeof skillPrototype.searchAsync === "function",
     start,
   };
+}
+
+/**
+ * Catalog `embeddingArtifact` option for a CLI/prewarm caller. Checks SDK support
+ * before reading bytes, so legacy SDKs warn once and embed inline even when the
+ * path is missing; supporting SDKs still fail on a missing/invalid artifact.
+ */
+export async function embeddingArtifactOption(
+  input: EmbeddingArtifactOptionInput,
+): Promise<{ bytes: Uint8Array; onMiss: "embed" } | undefined> {
+  if (!input.path) return undefined;
+  if (input.embedding !== undefined) {
+    throw new Error(
+      "--embedding cannot be combined with --embedding-artifact: artifacts are built " +
+        "with the SDK default model. Drop one of the two flags.",
+    );
+  }
+  if (input.method === "bm25" || !acceptsEmbeddingArtifact(await loadSdk())) return undefined;
+  return { bytes: await loadEmbeddingArtifact(input.path), onMiss: "embed" };
 }
 
 /** Load once per resolved path, sharing bytes across all catalogs in this process. */
@@ -83,6 +115,9 @@ export function loadEmbeddingArtifact(path: string): Promise<Uint8Array> {
   if (!bytes) {
     bytes = readFile(resolved);
     artifactBytes.set(resolved, bytes);
+    // Don't memoize failures: a later call may find the file. The handler only
+    // evicts; callers still observe the rejection through `bytes`.
+    bytes.catch(() => artifactBytes.delete(resolved));
   }
   return bytes;
 }

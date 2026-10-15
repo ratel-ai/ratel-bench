@@ -26,7 +26,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { loadSkillUniverse, type SkillSpec } from "./catalog-shapes.js";
-import { loadEmbeddingArtifact } from "./embedding-artifact.js";
+import { embeddingArtifactOption } from "./embedding-artifact.js";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildSkillCatalog } from "./sdk/adapter.js";
@@ -55,11 +55,11 @@ async function main(): Promise<void> {
   // Select the SDK before anything loads it — see the note in bfcl-candidates.
   selectVersion(arg("--sdk-version", ""));
   const embedding = parseEmbedding(arg("--embedding", ""));
-  const artifactPath = arg("--embedding-artifact", "");
-  const embeddingArtifact =
-    artifactPath && method !== "bm25"
-      ? { bytes: await loadEmbeddingArtifact(artifactPath), onMiss: "embed" as const }
-      : undefined;
+  const embeddingArtifact = await embeddingArtifactOption({
+    path: arg("--embedding-artifact", ""),
+    method,
+    embedding,
+  });
   const topK = Number(arg("--top-k", "5"));
   // Pool sizes to emit. SR-Agents retrieval eval uses {50,100}; the LLM eval reads only
   // pool 100 from the same file (`--pool-size` kept as a single-value alias). Each pool

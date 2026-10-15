@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { candidateTool } from "./catalog-shapes.js";
 import { loadScenarios } from "./corpus.js";
-import { loadEmbeddingArtifact } from "./embedding-artifact.js";
+import { embeddingArtifactOption } from "./embedding-artifact.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import { sampleScenarios } from "./scenario-sample.js";
@@ -46,11 +46,11 @@ async function main(): Promise<void> {
   // touches the SDK layer.
   selectVersion(arg("--sdk-version", ""));
   const embedding = parseEmbedding(arg("--embedding", ""));
-  const artifactPath = arg("--embedding-artifact", "");
-  const embeddingArtifact =
-    artifactPath && method !== "bm25"
-      ? { bytes: await loadEmbeddingArtifact(artifactPath), onMiss: "embed" as const }
-      : undefined;
+  const embeddingArtifact = await embeddingArtifactOption({
+    path: arg("--embedding-artifact", ""),
+    method,
+    embedding,
+  });
   const poolSizes = parsePoolSizes(arg("--pool-sizes", arg("--pool-size", "30,100")));
   const seed = Number(arg("--seed", "42"));
   const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all

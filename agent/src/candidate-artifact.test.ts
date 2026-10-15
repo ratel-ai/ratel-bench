@@ -144,6 +144,40 @@ describe.each(["bfcl", "sragents"] as const)("%s candidate artifact CLI", (bench
     60_000,
   );
 
+  it("embeds inline without reading a missing artifact on legacy SDK 0.5.0", async () => {
+    const output = join(dir, `${benchmark}-legacy-candidates.jsonl`);
+    const { stderr } = await exec(
+      process.execPath,
+      [
+        ...candidateArgs(benchmark, "semantic", output, "0.5.0"),
+        "--embedding-artifact",
+        join(dir, "missing.rat1"),
+      ],
+      { cwd: agentDir },
+    );
+    expect(stderr).toContain("SDK 0.5.0 lacks experimentalEmbeddingArtifact; embedding inline");
+    expect(readRows(output)[0].retrieved[0].id).toBe("files.read");
+  }, 60_000);
+
+  it("rejects --embedding with --embedding-artifact before building catalogs", async () => {
+    await expect(
+      exec(
+        process.execPath,
+        [
+          ...candidateArgs(benchmark, "semantic", join(dir, "unused-combo.jsonl")),
+          "--embedding",
+          JSON.stringify({ huggingface: "Xenova/all-MiniLM-L6-v2" }),
+          "--embedding-artifact",
+          join(dir, `${benchmark}.rat1`),
+        ],
+        { cwd: agentDir },
+      ),
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("--embedding cannot be combined with --embedding-artifact"),
+    });
+  });
+
   it("embeds missing artifact entries and keeps the full candidate pool", async () => {
     const partial = join(dir, `${benchmark}-partial.jsonl`);
     const source = join(dir, benchmark === "bfcl" ? "bfcl.jsonl" : "skills.jsonl");
@@ -177,13 +211,18 @@ describe.each(["bfcl", "sragents"] as const)("%s candidate artifact CLI", (bench
   }, 60_000);
 });
 
-function candidateArgs(benchmark: Benchmark, method: string, output: string): string[] {
+function candidateArgs(
+  benchmark: Benchmark,
+  method: string,
+  output: string,
+  sdkVersion = "0.12.0",
+): string[] {
   return [
     "--import",
     "tsx",
     `src/${benchmark}-candidates.ts`,
     "--sdk-version",
-    "0.12.0",
+    sdkVersion,
     "--retriever",
     method,
     "--pool-sizes",

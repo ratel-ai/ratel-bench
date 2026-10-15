@@ -178,7 +178,7 @@ ignores the flag. Omitting the flag retains inline embedding.
 Check end-to-end artifact support before enabling it in campaign automation:
 
 ```bash
-pnpm -F @ratel-ai/benchmark embedding-artifact capabilities --sdk-version 0.12.0
+pnpm --silent -F @ratel-ai/benchmark embedding-artifact capabilities --sdk-version 0.12.0
 # {"build":true,"candidates":true,"start":true}
 ```
 

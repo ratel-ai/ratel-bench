@@ -12,7 +12,7 @@
 
 import type { ToolCatalog } from "@ratel-ai/sdk";
 import { toolCatalogMetadata } from "../../catalog-shapes.js";
-import { loadEmbeddingArtifact } from "../../embedding-artifact.js";
+import { embeddingArtifactOption } from "../../embedding-artifact.js";
 import { buildToolCatalog, gatewayTools } from "../../sdk/adapter.js";
 import type {
   AgentDescriptor,
@@ -39,9 +39,11 @@ const ID = "ratel-full";
 // See `prewarm` for why this must not happen inside the concurrent metered loop.
 const bundleCache = new Map<string, ToolBundle>();
 
-/** Cache key: a bundle is fully determined by scenario + pool + retriever. Seed
- *  is included because the pool is derived from it, so a different-seed run must
- *  never reuse a stale bundle. */
+/** Cache key: scenario + pool + retriever + seed. Seed is included because the
+ *  pool is derived from it, so a different-seed run must never reuse a stale
+ *  bundle. The embedding-artifact path is omitted on purpose — it only changes
+ *  where embeddings come from, not the tool surface — so one process must use
+ *  one artifact path. */
 function bundleKey(
   scenarioId: string,
   poolSize: number | null,
@@ -119,10 +121,10 @@ export async function buildRatelFullBundle(input: {
   //    branch there is a verbatim copy of what this function used to do, so the
   //    0.2.0 / 0.3.0-rc.1 / 0.4.0 layers are unaffected.
   const method: RetrievalMethod = input.retriever ?? "bm25";
-  const embeddingArtifact =
-    input.embeddingArtifactPath && method !== "bm25"
-      ? { bytes: await loadEmbeddingArtifact(input.embeddingArtifactPath), onMiss: "embed" as const }
-      : undefined;
+  const embeddingArtifact = await embeddingArtifactOption({
+    path: input.embeddingArtifactPath,
+    method,
+  });
   const { catalog, search } = await buildToolCatalog({
     method,
     embeddingArtifact,

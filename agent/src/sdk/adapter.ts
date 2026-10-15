@@ -137,6 +137,31 @@ export async function buildSkillCatalog(
   return { catalog, search: async (query, topK) => catalog.search(query, topK) };
 }
 
+/**
+ * Whether the SDK accepts `experimentalEmbeddingArtifact`. Logs the inline-embed
+ * fallback once per SDK module when it does not, so callers can check before
+ * reading artifact bytes without duplicating the warning.
+ */
+export function acceptsEmbeddingArtifact(mod: SdkModule): boolean {
+  if (supportsEmbeddingArtifact(mod)) return true;
+  if (!warnedArtifactModules.has(mod)) {
+    console.warn(`SDK ${sdkVersion()} lacks experimentalEmbeddingArtifact; embedding inline`);
+    warnedArtifactModules.add(mod);
+  }
+  return false;
+}
+
+/** Structural artifact-support check, with no side effects. */
+export function supportsEmbeddingArtifact(mod: SdkModule): boolean {
+  // The builder export and catalog option ship together; constructor option
+  // types are erased at runtime. Detect the API, including local/prerelease SDKs.
+  return (
+    supportsAsyncSearch(mod) &&
+    typeof (mod as unknown as { experimentalBuildEmbeddingArtifact?: unknown })
+      .experimentalBuildEmbeddingArtifact === "function"
+  );
+}
+
 /** The SDK's gateway tools (`search_tools`, `invoke_tool`) and their ids.
  *  0.5.0 keeps both under `compat`, unchanged in behaviour, so the gateway
  *  surface the model sees stays identical across every layer. */
@@ -159,18 +184,5 @@ function supportedEmbeddingArtifact(
   mod: SdkModule,
   artifact: BuildOptions["embeddingArtifact"],
 ): BuildOptions["embeddingArtifact"] {
-  if (artifact === undefined) return undefined;
-  // The builder export and catalog option ship together; constructor option
-  // types are erased at runtime. Detect the API, including local/prerelease SDKs.
-  if (
-    supportsAsyncSearch(mod) &&
-    typeof (mod as unknown as { experimentalBuildEmbeddingArtifact?: unknown })
-      .experimentalBuildEmbeddingArtifact === "function"
-  )
-    return artifact;
-  if (!warnedArtifactModules.has(mod)) {
-    console.warn(`SDK ${sdkVersion()} lacks experimentalEmbeddingArtifact; embedding inline`);
-    warnedArtifactModules.add(mod);
-  }
-  return undefined;
+  return artifact !== undefined && acceptsEmbeddingArtifact(mod) ? artifact : undefined;
 }

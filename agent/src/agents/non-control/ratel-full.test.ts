@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildEmbeddingArtifact } from "../../embedding-artifact.js";
 import { REPO_ROOT } from "../../paths.js";
 import { resetForTests, selectVersion } from "../../sdk/resolve.js";
@@ -271,6 +271,36 @@ describe("ratel-full embedding artifacts", () => {
       }),
     ).rejects.toThrow();
   });
+
+  it.each(["0.4.0", "0.5.0"])(
+    "embeds inline without reading a missing artifact on legacy SDK %s",
+    async (version) => {
+      resetForTests();
+      selectVersion(version);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cell: PrewarmInput = {
+          scenario: { id: `legacy-${version}`, prompt: "read a file from disk" } as Scenario,
+          pool,
+          poolSize: pool.length,
+          topK: 2,
+          retriever: "semantic",
+          seed: 42,
+          embeddingArtifactPath: "/missing/legacy-bfcl.rat1",
+        };
+        await prewarm([cell]);
+        expect(isPrewarmed(cell)).toBe(true);
+        const { bundle } = await buildRatelFullBundle(cell);
+        expect(bundle.activeToolIds).toContain("fs.read_file");
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          `SDK ${version} lacks experimentalEmbeddingArtifact; embedding inline`,
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    60_000,
+  );
 
   it("ignores the artifact for BM25", async () => {
     const { bundle } = await buildRatelFullBundle({
