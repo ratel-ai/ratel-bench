@@ -91,7 +91,10 @@ describe.each(["bfcl", "sragents"] as const)("%s candidate artifact CLI", (bench
         ],
         { cwd: agentDir },
       ),
-    ).rejects.toMatchObject({ code: 1 });
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringMatching(/embedding artifact invalid magic: expected RAT1/),
+    });
   });
 
   it.each(["semantic", "hybrid"] as const)(

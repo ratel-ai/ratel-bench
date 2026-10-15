@@ -174,9 +174,15 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.sdkVersion = v;
         break;
       }
-      case "--embedding-artifact":
-        args.embeddingArtifactPath = next();
+      case "--embedding-artifact": {
+        // Same guard as --ratel-version: a missing path must not swallow the next flag.
+        const v = next().trim();
+        if (!v || v.startsWith("-")) {
+          throw new Error(`--embedding-artifact needs a path, e.g. cache/bfcl.rat1 (got "${v}")`);
+        }
+        args.embeddingArtifactPath = v;
         break;
+      }
       case "--scenarios":
         args.scenarios = Number(next());
         break;
