@@ -189,6 +189,7 @@ async function runMain(): Promise<void> {
     runsPerCell: parsed.runs,
     topK: parsed.topK,
     retriever: parsed.retriever,
+    embeddingArtifactPath: parsed.embeddingArtifactPath,
     poolSizes: parsed.poolSizes,
     maxSteps: parsed.maxSteps,
     perRunTimeoutMs: parsed.timeoutMs,

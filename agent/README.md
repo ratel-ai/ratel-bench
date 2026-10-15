@@ -155,20 +155,38 @@ candidate generators (SR skill bodies are omitted). SDKs without
 an `unsupported` message. Other errors exit 1. `loadEmbeddingArtifact(path)` in
 `src/embedding-artifact.ts` shares artifact bytes across loads in one process.
 
-Pass `--embedding-artifact <path>` to either candidate generator to reuse the
-artifact for semantic or hybrid retrieval:
+Pass `--embedding-artifact <path>` to either candidate generator or to `start`
+with `ratel-full` to reuse the artifact for semantic or hybrid retrieval:
 
 ```bash
 pnpm -F @ratel-ai/benchmark bfcl-candidates --sdk-version 0.12.0 \
   --retriever semantic --embedding-artifact cache/bfcl.rat1
 pnpm -F @ratel-ai/benchmark sragents-candidates --sdk-version 0.12.0 \
   --retriever hybrid --embedding-artifact cache/sragents.rat1
+pnpm -F @ratel-ai/benchmark start --sdk-version 0.12.0 \
+  --corpus test-data/bfcl-all.jsonl --arms ratel-full \
+  --retriever semantic --embedding-artifact cache/bfcl.rat1
 ```
 
-Bytes are loaded once and shared across scenario/pool catalogs. Missing entries
-are embedded inline (`onMiss: "embed"`); invalid or incompatible artifacts fail
-the run. SDKs without artifact support log one warning and embed inline. BM25
+For `start`, ratel-full uses the artifact during the serial prewarm pass and
+any cold per-scenario build. Its scenario/pool/retriever/seed bundle cache keys
+are unchanged. Bytes are loaded once and shared across scenario/pool catalogs.
+Missing entries are embedded inline (`onMiss: "embed"`); invalid or incompatible
+artifacts fail the run. SDKs without artifact support log one warning and embed inline. BM25
 ignores the flag. Omitting the flag retains inline embedding.
+
+Check end-to-end artifact support before enabling it in campaign automation:
+
+```bash
+pnpm -F @ratel-ai/benchmark embedding-artifact capabilities --sdk-version 0.12.0
+# {"build":true,"candidates":true,"start":true}
+```
+
+The command prints one JSON object for the selected SDK, without reading a
+universe or building an artifact. All fields are false for 0.4.0 and 0.5.0.
+Enable campaign artifacts only when `build`, `candidates`, and `start` are all
+true. Unsupported SDKs return false capabilities with exit 0; an invalid or
+uninstalled SDK selection fails with exit 1.
 
 ## Output caps (`maxOutputTokens`)
 

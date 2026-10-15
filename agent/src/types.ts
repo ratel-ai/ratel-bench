@@ -118,6 +118,8 @@ export interface AgentRunInput {
   topK: number;
   /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). Defaults to bm25. */
   retriever: RetrievalMethod;
+  /** Shared embedding artifact for ratel-full; ignored by BM25. */
+  embeddingArtifactPath?: string;
   maxSteps: number;
   /** Active-time budget of the cell: retry sleeps don't count (see `llm-retry.ts`). */
   perRunTimeoutMs: number;
@@ -147,6 +149,8 @@ export interface PrewarmInput {
   poolSize: number | null;
   topK: number;
   retriever: RetrievalMethod;
+  /** Shared embedding artifact for ratel-full; ignored by BM25. */
+  embeddingArtifactPath?: string;
   /** Pool seed — part of the cache key so a different-seed pool never reuses a stale bundle. */
   seed: number;
 }

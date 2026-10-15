@@ -18,6 +18,28 @@ afterEach(() => {
 
 describe("embedding-artifact CLI", () => {
   it.each([
+    { version: "0.12.0", capabilities: { build: true, candidates: true, start: true } },
+    { version: "0.5.0", capabilities: { build: false, candidates: false, start: false } },
+    { version: "0.4.0", capabilities: { build: false, candidates: false, start: false } },
+    { version: undefined, capabilities: { build: false, candidates: false, start: false } },
+  ])("reports complete artifact capabilities for SDK $version", async ({ version, capabilities }) => {
+    const { stdout, stderr } = await exec(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/embedding-artifact-cli.ts",
+        "capabilities",
+        ...(version ? ["--sdk-version", version] : []),
+      ],
+      { cwd: new URL("..", import.meta.url) },
+    );
+    expect(JSON.parse(stdout)).toEqual(capabilities);
+    expect(stdout.trim().split("\n")).toHaveLength(1);
+    expect(stderr).toBe("");
+  });
+
+  it.each([
     "0.4.0",
     "0.5.0",
   ])("reports SDK %s as unsupported before reading the universe", async (version) => {

@@ -1,5 +1,9 @@
 import { parseArgs } from "node:util";
-import { buildEmbeddingArtifact, UnsupportedEmbeddingArtifactError } from "./embedding-artifact.js";
+import {
+  buildEmbeddingArtifact,
+  embeddingArtifactCapabilities,
+  UnsupportedEmbeddingArtifactError,
+} from "./embedding-artifact.js";
 import { selectVersion } from "./sdk/resolve.js";
 
 async function main(): Promise<void> {
@@ -13,16 +17,22 @@ async function main(): Promise<void> {
       skills: { type: "string" },
     },
   });
-  if (positionals.length !== 1 || positionals[0] !== "build") {
+  const command = positionals[0];
+  if (positionals.length !== 1 || (command !== "build" && command !== "capabilities")) {
     throw new Error(
-      "Usage: embedding-artifact build --benchmark bfcl|sragents --sdk-version X --output <file>",
+      "Usage: embedding-artifact build --benchmark bfcl|sragents --sdk-version X --output <file>\n" +
+        "       embedding-artifact capabilities --sdk-version X",
     );
+  }
+  selectVersion(values["sdk-version"]);
+  if (command === "capabilities") {
+    console.log(JSON.stringify(await embeddingArtifactCapabilities()));
+    return;
   }
   if (values.benchmark !== "bfcl" && values.benchmark !== "sragents") {
     throw new Error("--benchmark must be bfcl or sragents");
   }
   if (!values.output) throw new Error("--output is required");
-  selectVersion(values["sdk-version"]);
   await buildEmbeddingArtifact({
     benchmark: values.benchmark,
     output: values.output,

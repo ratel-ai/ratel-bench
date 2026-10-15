@@ -50,6 +50,8 @@ export interface ParsedArgs {
   ratelVersion?: string;
   /** Exact installed SDK alias for this campaign; omitted uses the historical default. */
   sdkVersion?: string;
+  /** Shared embedding artifact for ratel-full semantic/hybrid catalogs. */
+  embeddingArtifactPath?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
@@ -172,6 +174,9 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
         args.sdkVersion = v;
         break;
       }
+      case "--embedding-artifact":
+        args.embeddingArtifactPath = next();
+        break;
       case "--scenarios":
         args.scenarios = Number(next());
         break;
