@@ -63,7 +63,7 @@ export async function buildToolCatalog(
   const mod = await loadSdk();
   assertEmbeddingSupported(mod, opts.embedding);
   const method: RetrievalMethod = opts.method ?? "bm25";
-  const embeddingArtifact = supportedEmbeddingArtifact(mod, opts.embeddingArtifact);
+  const embeddingArtifact = supportedEmbeddingArtifact(mod, method, opts.embeddingArtifact);
 
   if (supportsAsyncSearch(mod)) {
     // 0.5.0+: options always passed (bm25 is its default anyway), batch register
@@ -106,7 +106,7 @@ export async function buildSkillCatalog(
   const mod = await loadSdk();
   assertEmbeddingSupported(mod, opts.embedding);
   const method: RetrievalMethod = opts.method ?? "bm25";
-  const embeddingArtifact = supportedEmbeddingArtifact(mod, opts.embeddingArtifact);
+  const embeddingArtifact = supportedEmbeddingArtifact(mod, method, opts.embeddingArtifact);
 
   if (supportsAsyncSearch(mod)) {
     const catalog = new mod.SkillCatalog({
@@ -180,9 +180,12 @@ function assertEmbeddingSupported(mod: SdkModule, embedding: EmbeddingSpec | und
   );
 }
 
+/** bm25 never embeds, yet SDK 0.12 still warms (and validates) a configured artifact. */
 function supportedEmbeddingArtifact(
   mod: SdkModule,
+  method: RetrievalMethod,
   artifact: BuildOptions["embeddingArtifact"],
 ): BuildOptions["embeddingArtifact"] {
-  return artifact !== undefined && acceptsEmbeddingArtifact(mod) ? artifact : undefined;
+  if (artifact === undefined || method === "bm25") return undefined;
+  return acceptsEmbeddingArtifact(mod) ? artifact : undefined;
 }

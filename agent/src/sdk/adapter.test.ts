@@ -40,6 +40,16 @@ describe("embedding artifact options", () => {
     },
   );
 
+  it("never hands an artifact to bm25 tool or skill catalogs", async () => {
+    selectVersion("0.12.0");
+    // SDK 0.12 validates a configured artifact for any method; bm25 must not see it.
+    const embeddingArtifact = { bytes: new Uint8Array([1, 2, 3]), onMiss: "error" as const };
+    const toolCatalog = await buildToolCatalog({ tools, method: "bm25", embeddingArtifact });
+    const skillCatalog = await buildSkillCatalog({ skills, method: "bm25", embeddingArtifact });
+    expect((await toolCatalog.search("read a file", 1))[0]?.toolId).toBe("fs__read_file");
+    expect((await skillCatalog.search("edit a file", 1))[0]?.skillId).toBe("edit-file");
+  });
+
   it.each(["0.4.0", "0.5.0"])(
     "embeds inline and warns once across tool and skill catalogs on SDK %s",
     async (version) => {

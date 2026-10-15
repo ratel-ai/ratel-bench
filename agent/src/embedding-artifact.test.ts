@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -84,6 +84,44 @@ describe("embedding-artifact CLI", () => {
     expect(result.code).toBe(3);
     expect(result.stderr).toContain(`unsupported: SDK ${version}`);
     expect(result.stderr).toContain("experimentalBuildEmbeddingArtifact");
+  });
+
+  it.each([
+    { benchmark: "bfcl", flag: "--corpus", label: "tools" },
+    { benchmark: "sragents", flag: "--skills", label: "skills" },
+  ])("refuses an empty $benchmark universe without writing an artifact", async ({
+    benchmark,
+    flag,
+    label,
+  }) => {
+    const dir = mkdtempSync(
+      fileURLToPath(new URL("../.embedding-artifact-test-", import.meta.url)),
+    );
+    dirs.push(dir);
+    const input = join(dir, "empty.jsonl");
+    const output = join(dir, "empty.rat1");
+    writeFileSync(input, "");
+    const result = await exec(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/embedding-artifact-cli.ts",
+        "build",
+        "--benchmark",
+        benchmark,
+        "--sdk-version",
+        "0.12.0",
+        flag,
+        input,
+        "--output",
+        output,
+      ],
+      { cwd: new URL("..", import.meta.url) },
+    ).catch((error) => error);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(`empty ${benchmark} universe: no ${label} in ${input}`);
+    expect(existsSync(output)).toBe(false);
   });
 });
 

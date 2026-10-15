@@ -56,18 +56,20 @@ export async function buildEmbeddingArtifact(
       `unsupported: SDK ${sdkVersion()} lacks experimentalBuildEmbeddingArtifact`,
     );
   }
+  const input = resolveRepoPath(
+    options.benchmark === "bfcl"
+      ? (options.corpus ?? "test-data/bfcl-all.jsonl")
+      : (options.skills ?? "test-data/sragents-skills.jsonl"),
+  );
   const universe =
     options.benchmark === "bfcl"
-      ? {
-          tools: buildToolUniverse(
-            loadScenarios(resolveRepoPath(options.corpus ?? "test-data/bfcl-all.jsonl")),
-          ).map(toolCatalogMetadata),
-        }
-      : {
-          skills: await loadSkillUniverse(
-            resolveRepoPath(options.skills ?? "test-data/sragents-skills.jsonl"),
-          ),
-        };
+      ? { tools: buildToolUniverse(loadScenarios(input)).map(toolCatalogMetadata) }
+      : { skills: await loadSkillUniverse(input) };
+  // An empty corpus still yields a valid header-only RAT1; never publish one.
+  const [label, items] = universe.tools ? ["tools", universe.tools] : ["skills", universe.skills];
+  if (!items?.length) {
+    throw new Error(`empty ${options.benchmark} universe: no ${label} in ${input}`);
+  }
   const output = resolveRepoPath(options.output);
   await mkdir(dirname(output), { recursive: true });
   await build({ output, ...universe });
