@@ -6,6 +6,7 @@ export type WorkflowDispatchInputs = {
   excludeModels: string;
   notifyToEmails: string;
   modelConcurrency: string;
+  llmConcurrency?: string;
   campaignBudgetUsd: string;
   runId: string;
 };
@@ -63,6 +64,7 @@ export function prepareWorkflowDispatch({
     excludeModels,
     notifyToEmails: normalized.notifyToEmails,
     modelConcurrency: normalized.modelConcurrency,
+    llmConcurrency: llmConcurrencyInput(rawInputs.llmConcurrency),
     campaignBudgetUsd: normalized.campaignBudgetUsd,
   };
   return {
@@ -126,6 +128,14 @@ function csv(value: string): string[] | undefined {
 
 function numberInput(value: string, name: string): number {
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) throw new Error(`${name} must be numeric`);
+  return Number(value);
+}
+
+function llmConcurrencyInput(value: string | undefined): number {
+  if (value === undefined || value === "") return 8;
+  if (!/^[1-9]\d*$/.test(value) || Number(value) > 16) {
+    throw new Error("llmConcurrency must be an integer between 1 and 16");
+  }
   return Number(value);
 }
 

@@ -66,6 +66,11 @@ accounting, checks the encoded attachment budget, and adds the public checksum.
 `fixtures/suite/` at the repository root contains JSON examples shared with
 the downstream importer. A smoke manifest is always non-publishable.
 
+The workflow dispatch helper reads `LLM_CONCURRENCY` (integer 1–16, default 8)
+into `.campaign/options.json` as `llmConcurrency`, the in-flight LLM call limit
+per model job. This dispatch option is validated separately from the strict
+version 1 suite request.
+
 Funded runners accept an injected `CampaignBudget` backed by an atomic,
 campaign-scoped `BudgetStore`. Construct it with pinned route prices and
 provider-enforced input/output (including reasoning) token bounds; preflight
