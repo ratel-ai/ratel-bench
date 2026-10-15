@@ -11,6 +11,8 @@
 // SDK's tool loop.
 
 import type { ToolCatalog } from "@ratel-ai/sdk";
+import { toolCatalogMetadata } from "../../catalog-shapes.js";
+import { loadEmbeddingArtifact } from "../../embedding-artifact.js";
 import { buildToolCatalog, gatewayTools } from "../../sdk/adapter.js";
 import type {
   AgentDescriptor,
@@ -69,6 +71,7 @@ export async function prewarm(inputs: PrewarmInput[]): Promise<void> {
       pool: input.pool,
       topK: input.topK,
       retriever,
+      embeddingArtifactPath: input.embeddingArtifactPath,
     });
     bundleCache.set(key, bundle);
   }
@@ -104,6 +107,7 @@ export async function buildRatelFullBundle(input: {
   topK: number;
   /** Retrieval method for both layers. Defaults to bm25 (model-free, no embeddings). */
   retriever?: RetrievalMethod;
+  embeddingArtifactPath?: string;
 }): Promise<{ bundle: ToolBundle; catalog: ToolCatalog }> {
   // 1. Catalog backs both layers: pre-discovery uses it for retrieval, and the
   //    gateway tools call back into the same instance to search/invoke at agent
@@ -115,14 +119,15 @@ export async function buildRatelFullBundle(input: {
   //    branch there is a verbatim copy of what this function used to do, so the
   //    0.2.0 / 0.3.0-rc.1 / 0.4.0 layers are unaffected.
   const method: RetrievalMethod = input.retriever ?? "bm25";
+  const embeddingArtifact =
+    input.embeddingArtifactPath && method !== "bm25"
+      ? { bytes: await loadEmbeddingArtifact(input.embeddingArtifactPath), onMiss: "embed" as const }
+      : undefined;
   const { catalog, search } = await buildToolCatalog({
     method,
+    embeddingArtifact,
     tools: input.pool.map((spec) => ({
-      id: spec.id,
-      name: spec.name,
-      description: spec.description,
-      inputSchema: spec.input_schema,
-      outputSchema: spec.output_schema ?? {},
+      ...toolCatalogMetadata(spec),
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
     })),
   });

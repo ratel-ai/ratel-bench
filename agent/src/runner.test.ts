@@ -130,6 +130,48 @@ function readRows(path: string): CellResult[] {
 }
 
 describe("runner", () => {
+  it.each([undefined, "cache/bfcl.rat1"])(
+    "passes artifact path %s to deduplicated prewarm and every live cell",
+    async (embeddingArtifactPath) => {
+      const corpus = join(tempDir, "corpus.jsonl");
+      writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+      const config: RunnerConfig = {
+        ...baseConfig(corpus, join(tempDir, "agent.jsonl")),
+        arms: ["ratel-full"],
+        poolSizes: [1],
+        runsPerCell: 2,
+        embeddingArtifactPath,
+      };
+      const cell = await makeFakeRunCell(0, [])({
+        scenario,
+        arm: "ratel-full",
+        model: config.models[0],
+        runIndex: 0,
+        pool: scenario.candidate_pool,
+        poolSize: 1,
+        config,
+      });
+      const prepare = vi.fn<NonNullable<AgentDescriptor["prepare"]>>(async () => {});
+      const runCell = vi.fn<AgentDescriptor["run"]>(async () => {
+        expect(prepare).toHaveBeenCalledOnce();
+        return { ...cell };
+      });
+      await run({
+        ...config,
+        arms: ["ratel-full"],
+        registry: new Map([
+          ["ratel-full", { id: "ratel-full", label: "ratel-full", prepare, run: runCell }],
+        ]),
+      });
+      expect(prepare).toHaveBeenCalledWith([
+        expect.objectContaining({ scenario, embeddingArtifactPath }),
+      ]);
+      expect(runCell).toHaveBeenCalledTimes(2);
+      for (const [input] of runCell.mock.calls) {
+        expect(input).toHaveProperty("embeddingArtifactPath", embeddingArtifactPath);
+      }
+    },
+  );
   it("stops BFCL coverage before an unaffordable physical request", async () => {
     const corpus = join(tempDir, "corpus.jsonl");
     const output = join(tempDir, "agent.jsonl");
