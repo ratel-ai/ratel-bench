@@ -26,6 +26,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { loadSkillUniverse, type SkillSpec } from "./catalog-shapes.js";
+import { loadEmbeddingArtifact } from "./embedding-artifact.js";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildSkillCatalog } from "./sdk/adapter.js";
@@ -46,77 +47,6 @@ interface RetrievedHit {
   score: number;
 }
 
-function arg(name: string, fallback: string): string {
-  const i = process.argv.indexOf(name);
-  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
-}
-
-/** Parse `--pool-sizes 50,100` (deduped, sorted, positive ints). */
-function parsePoolSizes(raw: string): number[] {
-  const out = [
-    ...new Set(
-      raw
-        .split(",")
-        .map((s) => Number(s.trim()))
-        .filter((n) => Number.isInteger(n) && n > 0),
-    ),
-  ].sort((a, b) => a - b);
-  if (!out.length) throw new Error(`--pool-sizes must list ≥1 positive integer (got "${raw}")`);
-  return out;
-}
-
-// ── Deterministic pool construction (mirrors pool.ts: mixSeed + mulberry32) ──
-function mixSeed(id: string, seed: number): number {
-  let h = seed >>> 0;
-  for (const b of Buffer.from(id)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
-  return h >>> 0;
-}
-function mulberry32(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) >>> 0;
-    let t = s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function shuffleInPlace<T>(arr: T[], seed: number): void {
-  const rng = mulberry32(seed);
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rng() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-}
-
-/** Standard retrieval metrics for one scenario's top-k ranking against the gold set. */
-function metrics(gold: string[], ranked: RetrievedHit[], k: number) {
-  const goldSet = new Set(gold);
-  const topK = ranked.slice(0, k);
-  const found = new Set(topK.filter((h) => goldSet.has(h.id)).map((h) => h.id)).size;
-  let rr = 0;
-  for (let i = 0; i < topK.length; i++)
-    if (goldSet.has(topK[i].id)) {
-      rr = 1 / (i + 1);
-      break;
-    }
-  let dcg = 0;
-  for (let i = 0; i < topK.length; i++) if (goldSet.has(topK[i].id)) dcg += 1 / Math.log2(i + 2);
-  let idcg = 0;
-  for (let i = 0; i < Math.min(gold.length, k); i++) idcg += 1 / Math.log2(i + 2);
-  const scored = topK.filter((h) => goldSet.has(h.id)).map((h) => h.score);
-  return {
-    gold_count: gold.length,
-    recall_at_k: gold.length ? found / gold.length : 0,
-    precision_at_k: k ? found / k : 0,
-    reciprocal_rank: rr,
-    hit_at_k: found > 0,
-    complete_at_k: found === gold.length,
-    ndcg_at_k: idcg ? dcg / idcg : 0,
-    gold_score: scored.length ? Math.max(...scored) : null,
-  };
-}
-
 async function main(): Promise<void> {
   const method = arg("--retriever", "bm25") as RetrievalMethod;
   if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
@@ -125,6 +55,11 @@ async function main(): Promise<void> {
   // Select the SDK before anything loads it — see the note in bfcl-candidates.
   selectVersion(arg("--sdk-version", ""));
   const embedding = parseEmbedding(arg("--embedding", ""));
+  const artifactPath = arg("--embedding-artifact", "");
+  const embeddingArtifact =
+    artifactPath && method !== "bm25"
+      ? { bytes: await loadEmbeddingArtifact(artifactPath), onMiss: "embed" as const }
+      : undefined;
   const topK = Number(arg("--top-k", "5"));
   // Pool sizes to emit. SR-Agents retrieval eval uses {50,100}; the LLM eval reads only
   // pool 100 from the same file (`--pool-size` kept as a single-value alias). Each pool
@@ -229,7 +164,12 @@ async function main(): Promise<void> {
       const poolIds = pool.map((s) => s.id);
       const kValues = [...new Set([1, 3, 5, topK, poolSize])].filter((k) => k <= poolSize);
 
-      const { search } = await buildSkillCatalog({ method, embedding, skills: pool });
+      const { search } = await buildSkillCatalog({
+        method,
+        embedding,
+        embeddingArtifact,
+        skills: pool,
+      });
       const hits = (await search(sc.prompt, poolSize)).map((h) => ({
         id: h.skillId,
         score: h.score,
@@ -266,6 +206,77 @@ async function main(): Promise<void> {
     `  wrote ${lines.length} rows (${scenarios.length} scenarios × ${poolSizes.length} pool(s) × ` +
       `k[1,3,5,pool]) in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
   );
+}
+
+function arg(name: string, fallback: string): string {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
+}
+
+/** Parse `--pool-sizes 50,100` (deduped, sorted, positive ints). */
+function parsePoolSizes(raw: string): number[] {
+  const out = [
+    ...new Set(
+      raw
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    ),
+  ].sort((a, b) => a - b);
+  if (!out.length) throw new Error(`--pool-sizes must list ≥1 positive integer (got "${raw}")`);
+  return out;
+}
+
+// ── Deterministic pool construction (mirrors pool.ts: mixSeed + mulberry32) ──
+function mixSeed(id: string, seed: number): number {
+  let h = seed >>> 0;
+  for (const b of Buffer.from(id)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
+  return h >>> 0;
+}
+function mulberry32(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function shuffleInPlace<T>(arr: T[], seed: number): void {
+  const rng = mulberry32(seed);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+/** Standard retrieval metrics for one scenario's top-k ranking against the gold set. */
+function metrics(gold: string[], ranked: RetrievedHit[], k: number) {
+  const goldSet = new Set(gold);
+  const topK = ranked.slice(0, k);
+  const found = new Set(topK.filter((h) => goldSet.has(h.id)).map((h) => h.id)).size;
+  let rr = 0;
+  for (let i = 0; i < topK.length; i++)
+    if (goldSet.has(topK[i].id)) {
+      rr = 1 / (i + 1);
+      break;
+    }
+  let dcg = 0;
+  for (let i = 0; i < topK.length; i++) if (goldSet.has(topK[i].id)) dcg += 1 / Math.log2(i + 2);
+  let idcg = 0;
+  for (let i = 0; i < Math.min(gold.length, k); i++) idcg += 1 / Math.log2(i + 2);
+  const scored = topK.filter((h) => goldSet.has(h.id)).map((h) => h.score);
+  return {
+    gold_count: gold.length,
+    recall_at_k: gold.length ? found / gold.length : 0,
+    precision_at_k: k ? found / k : 0,
+    reciprocal_rank: rr,
+    hit_at_k: found > 0,
+    complete_at_k: found === gold.length,
+    ndcg_at_k: idcg ? dcg / idcg : 0,
+    gold_score: scored.length ? Math.max(...scored) : null,
+  };
 }
 
 main().catch((err) => {
