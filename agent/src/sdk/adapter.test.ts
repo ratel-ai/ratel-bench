@@ -1,5 +1,5 @@
 import type { ExecutableTool, Skill } from "@ratel-ai/sdk";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildSkillCatalog, buildToolCatalog, gatewayTools } from "./adapter.js";
 import { resetForTests, sdkVersion, selectVersion } from "./resolve.js";
 
@@ -28,6 +28,43 @@ const skills: Skill[] = [
 ];
 
 afterEach(resetForTests);
+
+describe("embedding artifact options", () => {
+  it.each(["semantic", "hybrid"] as const)(
+    "surfaces invalid artifact bytes for %s tools and skills",
+    async (method) => {
+      selectVersion("0.12.0");
+      const embeddingArtifact = { bytes: new Uint8Array([1, 2, 3]), onMiss: "error" as const };
+      await expect(buildToolCatalog({ tools, method, embeddingArtifact })).rejects.toThrow();
+      await expect(buildSkillCatalog({ skills, method, embeddingArtifact })).rejects.toThrow();
+    },
+  );
+
+  it.each(["0.4.0", "0.5.0"])(
+    "embeds inline and warns once across tool and skill catalogs on SDK %s",
+    async (version) => {
+      selectVersion(version);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const embeddingArtifact = { bytes: new Uint8Array([1, 2, 3]), onMiss: "embed" as const };
+        for (const method of ["semantic", "hybrid"] as const) {
+          const toolCatalog = await buildToolCatalog({ tools, method, embeddingArtifact });
+          const skillCatalog = await buildSkillCatalog({ skills, method, embeddingArtifact });
+          expect((await toolCatalog.search("read a file from disk", 1))[0]?.toolId).toBe(
+            "fs__read_file",
+          );
+          expect((await skillCatalog.search("edit a local file", 1))[0]?.skillId).toBe("edit-file");
+        }
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          `SDK ${version} lacks experimentalEmbeddingArtifact; embedding inline`,
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    60_000,
+  );
+});
 
 describe.each(["0.2.0", "0.4.0", "0.5.0", "0.12.0"])("SDK %s offline contract", (version) => {
   it("registers and retrieves the intended tool and skill", async () => {
