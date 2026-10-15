@@ -23,9 +23,9 @@
 //     --retriever semantic --pool-size 100 --top-k 5 \
 //     --output results/raw/sragents/candidates-0.4.0-dense.jsonl [--scenarios N]
 
-import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { createInterface } from "node:readline";
+import { loadSkillUniverse, type SkillSpec } from "./catalog-shapes.js";
 import { readJsonl } from "./io.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildSkillCatalog } from "./sdk/adapter.js";
@@ -39,12 +39,6 @@ interface Scenario {
   dataset: string;
   prompt: string;
   gold_skill_ids: string[];
-}
-
-interface SkillSpec {
-  id: string;
-  name: string;
-  description: string;
 }
 
 interface RetrievedHit {
@@ -190,16 +184,8 @@ async function main(): Promise<void> {
   if (scenarioLimit > 0) scenarios = scenarios.slice(0, scenarioLimit);
 
   // Load the skill universe once (id/name/description only — drop the huge `body`).
-  const byId = new Map<string, SkillSpec>();
-  const universe: SkillSpec[] = [];
-  const rl = createInterface({ input: createReadStream(skillsPath), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    const s = JSON.parse(line) as SkillSpec;
-    const spec = { id: s.id, name: s.name, description: s.description };
-    byId.set(s.id, spec);
-    universe.push(spec);
-  }
+  const universe = await loadSkillUniverse(skillsPath);
+  const byId = new Map(universe.map((skill) => [skill.id, skill]));
   console.log(
     `sragents-candidates: method=${method} pools=[${poolSizes.join(",")}] top-k=${topK} ` +
       `over ${scenarios.length} scenarios (universe=${universe.length} skills) → ${outputPath}`,

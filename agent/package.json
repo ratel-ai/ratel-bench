@@ -12,6 +12,7 @@
     "provider-compatibility-fixture": "tsx src/provider-compatibility.ts",
     "start": "tsx src/cli.ts",
     "report": "tsx src/report-cli.ts",
+    "embedding-artifact": "tsx src/embedding-artifact-cli.ts",
     "bfcl-candidates": "tsx src/bfcl-candidates.ts",
     "bfcl-summarize": "tsx src/bfcl-summarize.ts",
     "bfcl-report": "tsx src/bfcl-report.ts",

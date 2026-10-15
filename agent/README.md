@@ -128,11 +128,32 @@ Resumable — re-runs skip cells already in `agent.jsonl` unless `--force`, exce
 
 `--timeout-ms N` (default 60000) sets the per-cell **active-time** deadline: retry backoff doesn't count (see "LLM retries and deadlines"), and on expiry the request is aborted. Cloud models rarely need more, but local Ollama models (especially CPU-bound or large 70B+) can comfortably exceed a minute on a 12-step trace — bump to `300000` (5 min) or higher when you see `run timed out after 60000ms` errors in the trace.
 
-`--sdk-version <exact-release>` selects an installed SDK alias for `start`, `bfcl-candidates`, and `sragents-candidates`. `0.12.0` is installed alongside historical `0.2.0`, `0.4.0`, and `0.5.0`; omitting the flag retains the historical `0.4.0` default. The selected package version is checked before inference and stamped on new BFCL rows. The package lock pins its npm integrity. SDK and Rust core versions are independent.
+`--sdk-version <exact-release>` selects an installed SDK alias for `start`, `bfcl-candidates`, `sragents-candidates`, and `embedding-artifact`. `0.12.0` is installed alongside historical `0.2.0`, `0.4.0`, and `0.5.0`; omitting the flag retains the historical `0.4.0` default. The selected package version is checked before inference and stamped on new BFCL rows. The package lock pins its npm integrity. SDK and Rust core versions are independent.
 
 `--retriever bm25|semantic|hybrid` (default `bm25`) picks the retrieval method the Ratel arms use — this is the **0.4.0** knob (sparse / dense / hybrid). Pre-0.4.0 versions don't accept it; their runs are unchanged. Since there is no Rust `ratel-ai-core` 0.4.0, generation runs SDK-side: select the 0.4.0 SDK, tag each method as its own report layer with `RATEL_VERSION_LABEL=0.4.0-sparse|dense|hybrid`, and set `--retriever`. `control-baseline`/`control-oracle` are retriever-independent and reused from the canonical 0.2.0 cache (see "Cached control runs") — run the *first* method with `--force` to purge any stale/pre-fix cells so a gold-incomplete 0.2.0 pool can't skew the numbers. See [`EXPERIMENTS.md`](../EXPERIMENTS.md) for the full per-method recipe. `bfcl-candidates` and `sragents-candidates` take the same flag; `sragents-select` does not (it reads pre-ranked candidates).
 
 `--pool-sizes` controls the per-scenario tool catalog (gold + distractors pulled from other scenarios). Accepts a comma-separated list (e.g. `--pool-sizes 30,100,180`) — each scenario is evaluated at every requested size, and the report breaks the headline / savings / failure tables down per pool. Pass a single value to skip the sweep. The legacy singular form `--pool-size 180` still works as an alias for one value but rejects commas. The default (180) sits at the MetaTool plugin universe ceiling; smaller values stress retrieval less, larger values are clamped at the universe size. Pool-size-agnostic arms (currently just `control-oracle`) ignore this flag and emit one cell per (scenario, model, run) regardless of how many sizes are listed.
+
+## Build embedding artifacts
+
+Build a RAT1 artifact from the full ingested BFCL tool or SR-Agents skill universe
+with the selected SDK's default embedder:
+
+```bash
+pnpm -F @ratel-ai/benchmark embedding-artifact build \
+  --benchmark bfcl --sdk-version 0.12.0 --output cache/bfcl.rat1
+pnpm -F @ratel-ai/benchmark embedding-artifact build \
+  --benchmark sragents --sdk-version 0.12.0 --output cache/sragents.rat1
+```
+
+Inputs default to `test-data/bfcl-all.jsonl` and
+`test-data/sragents-skills.jsonl`; override them with `--corpus` or `--skills`.
+Relative paths resolve from the repository root, including `--output`; missing
+output directories are created. Registration metadata is shared with the
+candidate generators (SR skill bodies are omitted). SDKs without
+`experimentalBuildEmbeddingArtifact`, including 0.4.0 and 0.5.0, exit **3** with
+an `unsupported` message. Other errors exit 1. `loadEmbeddingArtifact(path)` in
+`src/embedding-artifact.ts` shares artifact bytes across loads in one process.
 
 ## Output caps (`maxOutputTokens`)
 
