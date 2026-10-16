@@ -25,6 +25,14 @@ export interface BudgetSnapshot {
   discrepant: boolean;
 }
 
+/** One durable attempt as the store records it. */
+export interface BudgetAttempt {
+  attemptId: string;
+  amountTicks: number;
+  state: string;
+  costTicks?: number;
+}
+
 /** Every operation is atomic, durable, and idempotent by attempt ID at the store boundary. */
 export interface BudgetStore {
   readonly campaignId: string;
@@ -33,6 +41,8 @@ export interface BudgetStore {
   settle(id: string, costTicks: number | null): Promise<void>;
   release(id: string): Promise<void>;
   snapshot(): Promise<BudgetSnapshot>;
+  /** Every attempt of the campaign in one listing, when the store supports it. */
+  attempts?(): Promise<readonly BudgetAttempt[]>;
 }
 
 export class BudgetLimitedError extends Error {
@@ -51,17 +61,23 @@ export class BudgetContentionError extends Error {
 export interface CampaignBudget {
   readonly campaignId: string;
   preflight(requests: readonly BudgetRouteRequest[]): void;
+  /**
+   * Reserve the call's worst-case cost. `inputTokens` is a proven upper bound on the
+   * call's billable input; the route's `maxInputTokens` caps it and stands in when absent.
+   */
   reserve(
     id: string,
     model: string,
     requestedOutputTokens: number | undefined,
     price?: ModelPrice | null,
+    inputTokens?: number,
   ): Promise<void>;
   claim(id: string): Promise<void>;
   admit(id: string, model: string, requestedOutputTokens: number | undefined): Promise<void>;
   settle(id: string, costTicks: number | null): Promise<void>;
   release(id: string): Promise<void>;
   snapshot(): Promise<BudgetSnapshot>;
+  attempts?(): Promise<readonly BudgetAttempt[]>;
 }
 
 /** Validate every selected paid route before starting any model work. */
@@ -74,7 +90,17 @@ export function createCampaignBudget(
     maxWaitMs?: number;
   } = {},
 ): CampaignBudget {
-  const amounts = new Map<string, number>();
+  const amountOf = (route: BudgetRoute, inputTokens: number): bigint | null => {
+    if (!route.price) return null;
+    const inputRate = Math.max(
+      route.price.inputPer1M,
+      route.price.cachedInputPer1M,
+      route.price.cacheCreationPer1M,
+    );
+    const input = ratedTicks(inputTokens, inputRate);
+    const output = ratedTicks(route.maxOutputTokens, route.price.outputPer1M);
+    return input === null || output === null ? null : input + output;
+  };
   for (const [model, route] of Object.entries(routes)) {
     if (
       !route.price ||
@@ -85,17 +111,9 @@ export function createCampaignBudget(
       throw new Error(`campaign preflight: unsupported input bound for ${model}`);
     if (!positiveCount(route.maxOutputTokens))
       throw new Error(`campaign preflight: unsupported output/reasoning bound for ${model}`);
-    const inputRate = Math.max(
-      route.price.inputPer1M,
-      route.price.cachedInputPer1M,
-      route.price.cacheCreationPer1M,
-    );
-    const input = ratedTicks(route.maxInputTokens, inputRate);
-    const output = ratedTicks(route.maxOutputTokens, route.price.outputPer1M);
-    const amount = input === null || output === null ? null : input + output;
+    const amount = amountOf(route, route.maxInputTokens);
     if (amount === null || amount > BigInt(Number.MAX_SAFE_INTEGER))
       throw new Error(`campaign preflight: unsupported usage bound for ${model}`);
-    amounts.set(model, Number(amount));
   }
   const waitForChange =
     options.waitForChange ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 100)));
@@ -105,8 +123,7 @@ export function createCampaignBudget(
     preflight(requests) {
       for (const request of requests) {
         const route = routes[request.model];
-        if (!route || !amounts.has(request.model))
-          throw new Error(`campaign preflight: unpriced route ${request.model}`);
+        if (!route) throw new Error(`campaign preflight: unpriced route ${request.model}`);
         if (!samePrice(route.price, request.price))
           throw new Error(`campaign preflight: price snapshot mismatch for ${request.model}`);
         if (
@@ -116,11 +133,15 @@ export function createCampaignBudget(
           throw new Error(`campaign preflight: unsupported output bound for ${request.model}`);
       }
     },
-    async reserve(id, model, requestedOutputTokens, price) {
+    async reserve(id, model, requestedOutputTokens, price, inputTokens) {
       const route = routes[model];
-      const amount = amounts.get(model);
-      if (!route || amount === undefined)
-        throw new Error(`campaign preflight: unpriced route ${model}`);
+      if (!route) throw new Error(`campaign preflight: unpriced route ${model}`);
+      if (inputTokens !== undefined && !positiveCount(inputTokens))
+        throw new Error(`campaign: invalid input bound for ${model}`);
+      // Preflight proved the route bound's amount is a safe integer; a smaller input is too.
+      const amount = Number(
+        amountOf(route, Math.min(inputTokens ?? route.maxInputTokens, route.maxInputTokens)),
+      );
       if (price !== undefined && !samePrice(route.price, price))
         throw new Error(`campaign preflight: price snapshot mismatch for ${model}`);
       if (!positiveCount(requestedOutputTokens) || requestedOutputTokens > route.maxOutputTokens)
@@ -145,6 +166,7 @@ export function createCampaignBudget(
     settle: (id, costTicks) => store.settle(id, costTicks),
     release: (id) => store.release(id),
     snapshot: () => store.snapshot(),
+    ...(store.attempts ? { attempts: store.attempts.bind(store) } : {}),
   };
   return budget;
 }
@@ -237,6 +259,14 @@ export function createMemoryBudgetStore(
     },
     async snapshot() {
       return snapshot();
+    },
+    async attempts() {
+      return [...entries].map(([attemptId, entry]) => ({
+        attemptId,
+        amountTicks: entry.amount,
+        state: entry.state,
+        ...(entry.cost === undefined ? {} : { costTicks: entry.cost }),
+      }));
     },
   };
 }

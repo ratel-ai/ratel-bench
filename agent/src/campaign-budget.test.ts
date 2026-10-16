@@ -103,6 +103,32 @@ describe("campaign admission", () => {
     await expect(budget.admit("next", "bedrock/m", 50)).rejects.toThrow(/exceeded reserved bound/);
   });
 
+  it("sizes a reservation from the call's input bound, capped by the route bound", async () => {
+    const store = createMemoryBudgetStore(1);
+    const budget = createCampaignBudget(store, { "bedrock/m": route });
+    // Input at the highest input-side rate (cache writes, 3/M) plus the full output cap.
+    await budget.reserve("small", "bedrock/m", 50, price, 10);
+    expect(await store.snapshot()).toMatchObject({ reservedTicks: 1300000 });
+    await budget.reserve("capped", "bedrock/m", 50, price, 1000);
+    expect(await store.snapshot()).toMatchObject({ reservedTicks: 1300000 + 4000000 });
+    await expect(budget.reserve("bad", "bedrock/m", 50, price, -1)).rejects.toThrow(/input bound/);
+    await expect(budget.reserve("bad", "bedrock/m", 50, price, 1.5)).rejects.toThrow(/input bound/);
+  });
+
+  it("exposes the store's durable attempts when the store lists them", async () => {
+    const store = createMemoryBudgetStore(1);
+    const budget = createCampaignBudget(store, { "bedrock/m": route });
+    await budget.admit("one", "bedrock/m", 50);
+    await budget.settle("one", 7);
+    await budget.reserve("two", "bedrock/m", 50);
+    expect(await budget.attempts?.()).toEqual([
+      { attemptId: "one", amountTicks: 4000000, state: "settled", costTicks: 7 },
+      { attemptId: "two", amountTicks: 4000000, state: "reserved" },
+    ]);
+    const { attempts: _attempts, ...unlisted } = store;
+    expect(createCampaignBudget(unlisted, { "bedrock/m": route }).attempts).toBeUndefined();
+  });
+
   it("rejects missing prices, unsupported bounds, and output requests above the frozen cap", async () => {
     const store = createMemoryBudgetStore(1);
     expect(() => createCampaignBudget(store, { "bedrock/m": { ...route, price: null } })).toThrow(

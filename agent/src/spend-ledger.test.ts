@@ -5,7 +5,12 @@ import { APICallError } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCampaignBudget, createMemoryBudgetStore } from "./campaign-budget.js";
 import { newRetryStats, SpendJournalError, withRetry } from "./llm-retry.js";
-import { openSpendLedger, reconcileCampaignBudget, spendRecorder } from "./spend-ledger.js";
+import {
+  inputTokenBound,
+  openSpendLedger,
+  reconcileCampaignBudget,
+  spendRecorder,
+} from "./spend-ledger.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -57,8 +62,13 @@ describe("durable live spend", () => {
     }) as typeof model;
     await wrapped.doGenerate({ maxOutputTokens: 10 } as never);
     expect(calls).toBe(2);
-    expect(ledger.summary()).toMatchObject({ attempts: 2, unknown: 1 });
-    expect(await store.snapshot()).toMatchObject({ spentTicks: 90000, reservedTicks: 400000 });
+    // The 503 answered with an error before inference: free, and its reservation is returned.
+    expect(ledger.summary()).toMatchObject({ attempts: 2, unknown: 0, completeness: "complete" });
+    expect(await store.snapshot()).toMatchObject({
+      spentTicks: 90000,
+      reservedTicks: 0,
+      unresolved: 0,
+    });
   });
 
   it("replays a journaled response after budget settlement was unavailable", async () => {
@@ -514,5 +524,147 @@ describe("durable live spend", () => {
       usage: { inputTokens: 20, outputTokens: 3 },
     });
     expect(ledger.summary()).toMatchObject({ knownUsd: 0.000026, completeness: "complete" });
+  });
+
+  it("keeps a call that got no provider answer unknown and reserved", async () => {
+    const ledger = openSpendLedger(path());
+    const store = createMemoryBudgetStore(0.0001);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(store, {
+      "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 },
+    });
+    const attempt = spendRecorder(
+      ledger,
+      { kind: "bfcl", cellKey: "cell", model: "bedrock/m", price },
+      budget,
+    );
+    const timedOut = await attempt.start({ maxOutputTokens: 10 });
+    await attempt.finish(timedOut, undefined, new Error("socket hang up"), false);
+    const gatewayTimeout = await attempt.start({ maxOutputTokens: 10 });
+    const status504 = new APICallError({
+      message: "gateway timeout",
+      url: "https://example.test",
+      requestBodyValues: {},
+      statusCode: 504,
+    });
+    await attempt.finish(gatewayTimeout, undefined, status504, false);
+    expect(ledger.summary()).toMatchObject({ unknown: 2, completeness: "partial" });
+    expect(await store.snapshot()).toMatchObject({ reservedTicks: 800000, unresolved: 2 });
+  });
+
+  it("records a provider rejection as zero billable usage with its status", async () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const attempt = spendRecorder(ledger, {
+      kind: "sragents",
+      cellKey: "cell",
+      model: "bedrock/m",
+      price: { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 },
+    });
+    const id = await attempt.start({});
+    const throttled = new APICallError({
+      message: "throttled",
+      url: "https://example.test",
+      requestBodyValues: {},
+      statusCode: 429,
+    });
+    await attempt.finish(id, undefined, throttled, false);
+    const settle = readFileSync(file, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((event) => event.type === "settle");
+    expect(settle.value).toMatchObject({
+      status: "failed",
+      usage: { inputTokens: 0, outputTokens: 0 },
+      rejectedStatus: 429,
+    });
+  });
+
+  it("sizes a campaign reservation from the prompt instead of the route's input bound", async () => {
+    const ledger = openSpendLedger(path());
+    const store = createMemoryBudgetStore(100);
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const budget = createCampaignBudget(store, {
+      "bedrock/m": { price, maxInputTokens: 2_000_000, maxOutputTokens: 10 },
+    });
+    const options = {
+      maxOutputTokens: 10,
+      prompt: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    };
+    const bound = inputTokenBound(options);
+    expect(bound).toBeGreaterThan(JSON.stringify(options.prompt).length);
+    expect(bound).toBeLessThan(10_000);
+    const attempt = spendRecorder(
+      ledger,
+      { kind: "bfcl", cellKey: "cell", model: "bedrock/m", price },
+      budget,
+    );
+    await attempt.start(options);
+    expect((await store.snapshot()).reservedTicks).toBe((bound ?? 0) * 10_000 + 10 * 20_000);
+  });
+
+  it("bounds input only for text it can count", () => {
+    const text = { type: "text", text: "é".repeat(100) };
+    const textBound = inputTokenBound({ prompt: [{ role: "user", content: [text] }] }) ?? 0;
+    // UTF-8 bytes, not UTF-16 code units, bound byte-level tokens.
+    expect(textBound).toBeGreaterThan(200);
+    const withTools = inputTokenBound({
+      prompt: [{ role: "user", content: [text] }],
+      tools: [{ type: "function", name: "t", inputSchema: { description: "x".repeat(500) } }],
+    });
+    expect(withTools).toBeGreaterThan(textBound + 500);
+    expect(
+      inputTokenBound({
+        prompt: [{ role: "user", content: [{ type: "file", mediaType: "image/png", data: "u" }] }],
+      }),
+    ).toBeUndefined();
+    expect(
+      inputTokenBound({
+        prompt: [
+          {
+            role: "tool",
+            content: [{ type: "tool-result", output: { type: "content", value: [] } }],
+          },
+        ],
+      }),
+    ).toBeUndefined();
+    expect(inputTokenBound(undefined)).toBeUndefined();
+  });
+
+  it("reconciles a resumed journal with one ledger listing and settles only the drift", async () => {
+    const file = path();
+    const ledger = openSpendLedger(file);
+    const memory = createMemoryBudgetStore(0.001);
+    let settles = 0;
+    const store = {
+      ...memory,
+      settle: async (id: string, cost: number | null) => {
+        settles++;
+        await memory.settle(id, cost);
+      },
+    };
+    const price = { inputPer1M: 1, outputPer1M: 2, cachedInputPer1M: 1, cacheCreationPer1M: 1 };
+    const route = { "bedrock/m": { price, maxInputTokens: 20, maxOutputTokens: 10 } };
+    const budget = createCampaignBudget(store, route);
+    const context = { kind: "bfcl" as const, model: "bedrock/m", price };
+    for (const cellKey of ["a", "b"]) {
+      const attempt = spendRecorder(ledger, { ...context, cellKey }, budget);
+      const id = await attempt.start({ maxOutputTokens: 10 });
+      await attempt.finish(id, { usage: { inputTokens: 5, outputTokens: 2 } }, undefined, false);
+    }
+    const unsettled = spendRecorder(
+      ledger,
+      { ...context, cellKey: "c" },
+      createCampaignBudget({ ...store, settle: async () => {} }, route),
+    );
+    const id = await unsettled.start({ maxOutputTokens: 10 });
+    await unsettled.finish(id, { usage: { inputTokens: 5, outputTokens: 2 } }, undefined, false);
+    settles = 0;
+
+    await reconcileCampaignBudget(openSpendLedger(file), budget);
+
+    expect(settles).toBe(1);
+    expect(await memory.snapshot()).toMatchObject({ spentTicks: 270000, unresolved: 0 });
   });
 });
