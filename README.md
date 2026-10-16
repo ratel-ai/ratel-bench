@@ -99,7 +99,7 @@ requires repository access). The manual Action submits the same selection contra
 the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
 `modelConcurrency`, `llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent
 `runId`). Omitted selection uses the 16 Bedrock defaults; exclusions win, model concurrency
-defaults to one, in-flight LLM calls per model job default to 8 (1-16), the aggregate
+defaults to one, in-flight LLM calls per model job default to 16 (1-16), the aggregate
 model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
 SR-Agents and all three retrievers remain fixed parts of a full campaign. `llmConcurrency`
 only takes effect when the pinned `ratel-bench-aws` revision (`awsSha`) freezes it; older
