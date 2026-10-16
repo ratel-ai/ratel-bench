@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
+import { normalizeSuiteRequest } from "./suite-contract.js";
 import { prepareWorkflowDispatch, summarizeCampaignLaunch } from "./workflow-dispatch.js";
 
 const SHA_A = "a".repeat(40);
@@ -53,6 +54,7 @@ describe("prepareWorkflowDispatch", () => {
       excludeModels: [],
       notifyToEmails: ["dev@ratel.sh"],
       modelConcurrency: 1,
+      llmConcurrency: 8,
       campaignBudgetUsd: 1000,
     });
     expect(prepared.template).toMatchObject({
@@ -67,6 +69,76 @@ describe("prepareWorkflowDispatch", () => {
       },
     });
     expect(prepared.awsSha).toBe(SHA_B);
+  });
+
+  it.each([
+    ["", 8],
+    ["1", 1],
+    ["5", 5],
+    ["16", 16],
+  ])("serializes LLM concurrency %j as %i", (llmConcurrency, expected) => {
+    const prepared = prepareWorkflowDispatch({
+      rawInputs: {
+        runOnlyModels: "",
+        excludeModels: "",
+        notifyToEmails: "",
+        modelConcurrency: "",
+        llmConcurrency,
+        campaignBudgetUsd: "",
+        runId: "",
+      },
+      template,
+      releases,
+      benchmarkSha: SHA_A,
+      generatedRunId: "gh-123-1",
+    });
+
+    expect(JSON.parse(JSON.stringify(prepared.options)).llmConcurrency).toBe(expected);
+  });
+
+  it.each([
+    "0",
+    "17",
+    "-1",
+    "1.5",
+    "1.0",
+    "1e1",
+    "0x8",
+    "01",
+    "+1",
+    " 8 ",
+    "8\n",
+    "8\r\n",
+    " ",
+    "Infinity",
+    "NaN",
+    "eight",
+    "8; echo bad",
+    "99999999999999999999999999999999999999",
+  ])("rejects invalid LLM concurrency %j", (llmConcurrency) => {
+    expect(() =>
+      prepareWorkflowDispatch({
+        rawInputs: {
+          runOnlyModels: "",
+          excludeModels: "",
+          notifyToEmails: "",
+          modelConcurrency: "",
+          llmConcurrency,
+          campaignBudgetUsd: "",
+          runId: "",
+        },
+        template,
+        releases,
+        benchmarkSha: SHA_A,
+        generatedRunId: "gh-123-1",
+      }),
+    ).toThrow(/llmConcurrency/);
+  });
+
+  it("keeps LLM concurrency outside the strict version 1 suite request", () => {
+    expect(() => normalizeSuiteRequest({ schemaVersion: 1, llmConcurrency: 8 })).toThrow(
+      /Unrecognized key/,
+    );
   });
 
   it("serializes hostile values as data while exclusion wins and recipients deduplicate", () => {
@@ -91,6 +163,7 @@ describe("prepareWorkflowDispatch", () => {
       excludeModels: ["bedrock/openai.gpt-6-sol"],
       notifyToEmails: ["dev@ratel.sh", "ops@example.com"],
       modelConcurrency: 2,
+      llmConcurrency: 8,
       campaignBudgetUsd: 125.5,
     });
     expect(prepared.selectedModels).toEqual(["xai/model;touch-nope"]);
@@ -170,9 +243,13 @@ it("workflow is a scoped asynchronous dispatch and legacy deploy hook is retired
     "excludeModels:",
     "notifyToEmails:",
     "modelConcurrency:",
+    "llmConcurrency:",
     "campaignBudgetUsd:",
   ])
     expect(workflow).toContain(input);
+  expect(workflow).toMatch(
+    /- name: Validate and serialize request\n\s+id: prepare\n\s+env:\n(?:\s+[A-Z_]+: .*\n)*?\s+LLM_CONCURRENCY: \$\{\{ inputs\.llmConcurrency \}\}\n/,
+  );
   expect(workflow).toMatch(/permissions:\s+contents: read\s+id-token: write/);
   expect(workflow).toContain("role-to-assume: $" + "{{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}");
   expect(workflow).toContain("ref: $" + "{{ steps.prepare.outputs.aws_sha }}");

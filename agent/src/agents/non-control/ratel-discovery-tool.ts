@@ -9,6 +9,7 @@
 // where the headline savings actually come from.
 
 import type { ToolCatalog } from "@ratel-ai/sdk";
+import { toolCatalogMetadata } from "../../catalog-shapes.js";
 import { buildToolCatalog, gatewayTools } from "../../sdk/adapter.js";
 import type { AgentDescriptor, AgentRunInput, ToolSpec } from "../../types.js";
 import { emptyToolBundle, registerGateway, runMeteredLoop, type ToolBundle } from "../_shared.js";
@@ -27,11 +28,7 @@ export async function buildRatelDiscoveryToolBundle(input: { pool: ToolSpec[] })
   // through the adapter.
   const { catalog } = await buildToolCatalog({
     tools: input.pool.map((spec) => ({
-      id: spec.id,
-      name: spec.name,
-      description: spec.description,
-      inputSchema: spec.input_schema,
-      outputSchema: spec.output_schema ?? {},
+      ...toolCatalogMetadata(spec),
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
     })),
   });

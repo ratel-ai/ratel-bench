@@ -18,6 +18,21 @@ const KNOWN_ARMS = [
 const parse = (...argv: string[]) => parseArgs(argv, KNOWN_ARMS);
 
 describe("parseArgs", () => {
+  it("accepts an optional embedding artifact path for start", () => {
+    expect(parse().embeddingArtifactPath).toBeUndefined();
+    expect(parse("--embedding-artifact", "cache/bfcl.rat1").embeddingArtifactPath).toBe(
+      "cache/bfcl.rat1",
+    );
+    expect(() => parse("--embedding-artifact")).toThrow(/missing value/);
+  });
+  it("--embedding-artifact rejects an empty or flag-like value", () => {
+    // A missing path must not swallow the next flag, e.g. `--embedding-artifact --scenarios 5`.
+    for (const v of ["", "  ", "--scenarios"]) {
+      expect(() => parse("--embedding-artifact", v, "5")).toThrow(
+        /--embedding-artifact needs a path/,
+      );
+    }
+  });
   it("accepts an exact SDK release independently of the control-row label", () => {
     expect(parse("--sdk-version", "0.12.0").sdkVersion).toBe("0.12.0");
     expect(() => parse("--sdk-version", "")).toThrow(/--sdk-version/);

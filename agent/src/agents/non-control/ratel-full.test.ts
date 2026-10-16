@@ -1,5 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import type { PrewarmInput, Scenario, ToolSpec } from "../../types.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildEmbeddingArtifact } from "../../embedding-artifact.js";
+import { REPO_ROOT } from "../../paths.js";
+import { resetForTests, selectVersion } from "../../sdk/resolve.js";
+import type { AgentRunInput, PrewarmInput, Scenario, ToolSpec } from "../../types.js";
 import {
   buildRatelFullBundle,
   descriptor,
@@ -76,6 +81,22 @@ describe("prewarm bundle cache", () => {
     // the test on its own, so awaiting is the assertion.
     await prewarm([cell, cell]);
     expect(isPrewarmed(cell)).toBe(true);
+  });
+
+  it("rejects re-prewarming a cached cell with a different embedding artifact path", async () => {
+    await prewarm([{ ...cell, embeddingArtifactPath: "/a.rat1" }]);
+    await expect(prewarm([{ ...cell, embeddingArtifactPath: "/a.rat1" }])).resolves.toBeUndefined();
+    await expect(prewarm([{ ...cell, embeddingArtifactPath: "/b.rat1" }])).rejects.toThrow(
+      /embedding artifact mismatch/,
+    );
+    // undefined vs a path counts as different.
+    await expect(prewarm([cell])).rejects.toThrow(/embedding artifact mismatch/);
+  });
+
+  it("rejects run() for a cached cell with a different embedding artifact path", async () => {
+    await prewarm([cell]);
+    const input = { ...cell, embeddingArtifactPath: "/other.rat1" } as unknown as AgentRunInput;
+    await expect(descriptor.run(input)).rejects.toThrow(/embedding artifact mismatch/);
   });
 
   it("builds a bundle whose tool selection is identical to a cold build", async () => {
@@ -158,5 +179,155 @@ describe("buildRatelFullBundle", () => {
       inputSchema: { jsonSchema: { type?: string } };
     };
     expect(t.inputSchema.jsonSchema.type).toBe("object");
+  });
+});
+
+describe("ratel-full embedding artifacts", () => {
+  const dirs: string[] = [];
+
+  beforeEach(() => {
+    resetPrewarmCache();
+    resetForTests();
+    selectVersion("0.12.0");
+  });
+  afterEach(() => {
+    resetForTests();
+    resetPrewarmCache();
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each(["semantic", "hybrid"] as const)(
+    "uses the artifact in the serial %s prewarm pass",
+    async (retriever) => {
+      const cell: PrewarmInput = {
+        scenario: { id: "artifact-prewarm", prompt: "read a file from disk" } as Scenario,
+        pool,
+        poolSize: pool.length,
+        topK: 2,
+        retriever,
+        seed: 42,
+        embeddingArtifactPath: "/missing/prewarm-bfcl.rat1",
+      };
+      await expect(prewarm([cell])).rejects.toThrow(/ENOENT/);
+      expect(isPrewarmed(cell)).toBe(false);
+    },
+  );
+
+  it.each(["semantic", "hybrid"] as const)(
+    "uses the artifact for a cold %s catalog",
+    async (retriever) => {
+      await expect(
+        buildRatelFullBundle({
+          scenario: { prompt: "read a file from disk" },
+          pool,
+          topK: 2,
+          retriever,
+          embeddingArtifactPath: "/missing/bfcl.rat1",
+        }),
+      ).rejects.toThrow(/ENOENT/);
+    },
+  );
+
+  it.each(["semantic", "hybrid"] as const)(
+    "preserves %s tool selection, executors and cache keys with a real BFCL artifact",
+    async (retriever) => {
+      const dir = mkdtempSync(join(REPO_ROOT, "agent/.ratel-full-artifact-test-"));
+      dirs.push(dir);
+      const corpus = join(dir, "bfcl.jsonl");
+      const output = join(dir, "bfcl.rat1");
+      const scenario: Scenario = {
+        id: "artifact-parity",
+        prompt: "read a file from disk",
+        candidate_pool: pool,
+        gold_tools: ["fs.read_file"],
+      };
+      writeFileSync(corpus, `${JSON.stringify(scenario)}\n`);
+      await buildEmbeddingArtifact({ benchmark: "bfcl", corpus, output });
+      const cell: PrewarmInput = {
+        scenario,
+        pool,
+        poolSize: pool.length,
+        topK: 2,
+        retriever,
+        seed: 42,
+      };
+      const cold = await buildRatelFullBundle(cell);
+      const warmed = await buildRatelFullBundle({ ...cell, embeddingArtifactPath: output });
+      expect(warmed.bundle.activeToolIds).toEqual(cold.bundle.activeToolIds);
+      expect(warmed.bundle.activeToolIds).toContain("fs.read_file");
+      expect(warmed.bundle.tools.search_tools).toBeDefined();
+      expect(warmed.bundle.tools.invoke_tool).toBeDefined();
+      await expect(warmed.catalog.invoke("fs.read_file", { path: "/etc/hosts" })).resolves.toEqual({
+        _stub: "stubbed for benchmark",
+        toolId: "fs.read_file",
+      });
+
+      await prewarm([{ ...cell, embeddingArtifactPath: output }]);
+      expect(isPrewarmed(cell)).toBe(true);
+      // Same path re-prewarm stays a no-op; a different path must not silently
+      // reuse the ranking warmed from the first artifact.
+      await expect(prewarm([{ ...cell, embeddingArtifactPath: output }])).resolves.toBeUndefined();
+      await expect(
+        prewarm([{ ...cell, embeddingArtifactPath: "/missing/already-prewarmed.rat1" }]),
+      ).rejects.toThrow(/embedding artifact mismatch/);
+    },
+    60_000,
+  );
+
+  it("rejects corrupt artifact bytes instead of silently embedding inline", async () => {
+    const dir = mkdtempSync(join(REPO_ROOT, "agent/.ratel-full-artifact-test-"));
+    dirs.push(dir);
+    const path = join(dir, "corrupt.rat1");
+    writeFileSync(path, "not an embedding artifact");
+    await expect(
+      buildRatelFullBundle({
+        scenario: { prompt: "read a file from disk" },
+        pool,
+        topK: 2,
+        retriever: "semantic",
+        embeddingArtifactPath: path,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it.each(["0.4.0", "0.5.0"])(
+    "embeds inline without reading a missing artifact on legacy SDK %s",
+    async (version) => {
+      resetForTests();
+      selectVersion(version);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const cell: PrewarmInput = {
+          scenario: { id: `legacy-${version}`, prompt: "read a file from disk" } as Scenario,
+          pool,
+          poolSize: pool.length,
+          topK: 2,
+          retriever: "semantic",
+          seed: 42,
+          embeddingArtifactPath: "/missing/legacy-bfcl.rat1",
+        };
+        await prewarm([cell]);
+        expect(isPrewarmed(cell)).toBe(true);
+        const { bundle } = await buildRatelFullBundle(cell);
+        expect(bundle.activeToolIds).toContain("fs.read_file");
+        expect(warn).toHaveBeenCalledExactlyOnceWith(
+          `SDK ${version} lacks experimentalEmbeddingArtifact; embedding inline`,
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    },
+    60_000,
+  );
+
+  it("ignores the artifact for BM25", async () => {
+    const { bundle } = await buildRatelFullBundle({
+      scenario: { prompt: "read a file from disk" },
+      pool,
+      topK: 2,
+      retriever: "bm25",
+      embeddingArtifactPath: "/missing/ignored.rat1",
+    });
+    expect(bundle.activeToolIds).toContain("fs.read_file");
   });
 });
