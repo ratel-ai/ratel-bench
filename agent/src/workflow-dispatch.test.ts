@@ -1,10 +1,19 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { REPO_ROOT } from "./paths.js";
 import { normalizeSuiteRequest } from "./suite-contract.js";
 import { prepareWorkflowDispatch, summarizeCampaignLaunch } from "./workflow-dispatch.js";
 
+// Repo has no CI: local/Loop-run tripwire, not an IAM boundary.
+const PRIVILEGED_WORKFLOW_MARKERS = [
+  /id-token:\s*['"]?write/,
+  /permissions:\s*['"]?write-all/,
+  /role-to-assume/,
+  /states:StartExecution/,
+  /stepfunctions\s+start-execution/,
+  /bench-suite\.sh/,
+];
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const template = {
@@ -220,12 +229,12 @@ it("renders immediate workflow, execution and immutable result links", () => {
       "console: https://eu-central-1.console.aws.amazon.com/states/example",
       "s3://private-results/runs/run-123/result.json",
     ].join("\n"),
-    "ratel-ai/ratel-bench",
+    "ratel-ai/ratel-bench-aws",
     "456",
   );
   expect(summary).toContain("Run ID: `run-123`");
   expect(summary).toContain(
-    "[Workflow logs](https://github.com/ratel-ai/ratel-bench/actions/runs/456)",
+    "[Workflow logs](https://github.com/ratel-ai/ratel-bench-aws/actions/runs/456)",
   );
   expect(summary).toContain(
     "[Step Functions execution](https://eu-central-1.console.aws.amazon.com/states/example)",
@@ -235,33 +244,39 @@ it("renders immediate workflow, execution and immutable result links", () => {
   );
 });
 
-it("workflow is a scoped asynchronous dispatch and legacy deploy hook is retired", () => {
-  const workflow = readFileSync(resolve(REPO_ROOT, ".github/workflows/run-benchmark.yml"), "utf8");
-  expect(workflow).toContain("workflow_dispatch:");
-  for (const input of [
-    "runOnlyModels:",
-    "excludeModels:",
-    "notifyToEmails:",
-    "modelConcurrency:",
-    "llmConcurrency:",
-    "campaignBudgetUsd:",
-  ])
-    expect(workflow).toContain(input);
-  expect(workflow).toMatch(
-    /- name: Validate and serialize request\n\s+id: prepare\n\s+env:\n(?:\s+[A-Z_]+: .*\n)*?\s+LLM_CONCURRENCY: \$\{\{ inputs\.llmConcurrency \}\}\n/,
-  );
-  expect(workflow).toMatch(/permissions:\s+contents: read\s+id-token: write/);
-  expect(workflow).toContain("role-to-assume: $" + "{{ vars.BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN }}");
-  expect(workflow).toContain("ref: $" + "{{ steps.prepare.outputs.aws_sha }}");
-  // ratel-bench-aws is private: GITHUB_TOKEN cannot read it, so a read-only App token is required.
-  expect(workflow).toMatch(
-    /uses: actions\/create-github-app-token@[\s\S]*?client-id: \$\{\{ vars\.BENCHMARK_LAUNCHER_CLIENT_ID \}\}[\s\S]*?private-key: \$\{\{ secrets\.BENCHMARK_LAUNCHER_APP_PRIVATE_KEY \}\}[\s\S]*?repositories: ratel-bench-aws[\s\S]*?permission-contents: read/,
-  );
-  expect(workflow).toMatch(
-    /repository: ratel-ai\/ratel-bench-aws[\s\S]*?token: \$\{\{ steps\.launcher-token\.outputs\.token \}\}/,
-  );
-  expect(workflow).toContain("bench-suite.sh submit");
-  expect(workflow).not.toContain("bench-suite.sh watch");
-  expect(workflow).not.toMatch(/run:.*inputs\./);
-  expect(() => readFileSync(resolve(REPO_ROOT, ".github/workflows/website-rebuild.yml"))).toThrow();
+it("benchmark repository holds no privileged campaign launch workflow", () => {
+  const workflowsDir = resolve(REPO_ROOT, ".github/workflows");
+  expect(existsSync(join(workflowsDir, "run-benchmark.yml"))).toBe(false);
+  if (!existsSync(workflowsDir)) return;
+  const offenders = readdirSync(workflowsDir, { recursive: true, encoding: "utf8" })
+    .map((entry) => join(workflowsDir, entry))
+    .filter((path) => statSync(path).isFile())
+    .filter((path) => isPrivilegedWorkflow(readFileSync(path, "utf8")))
+    .map((path) => relative(REPO_ROOT, path));
+  expect(offenders).toEqual([]);
 });
+
+describe("isPrivilegedWorkflow", () => {
+  it.each([
+    ["quoted id-token", 'permissions:\n  id-token: "write"'],
+    ["padded id-token", "permissions:\n  id-token:   write"],
+    ["unspaced id-token", "permissions:\n  id-token:write"],
+    ["write-all", "permissions: write-all"],
+    ["role assumption", "with:\n  role-to-assume: arn:aws:iam::1:role/x"],
+    ["sfn IAM action", "Action: states:StartExecution"],
+    ["sfn CLI", "run: aws stepfunctions start-execution --state-machine-arn x"],
+    ["bench-suite", "run: ./scripts/bench-suite.sh"],
+  ])("flags %s", (_, content) => {
+    expect(isPrivilegedWorkflow(content)).toBe(true);
+  });
+
+  it("allows benign read-only workflow", () => {
+    expect(isPrivilegedWorkflow("permissions:\n  contents: read\nsteps:\n  - run: pnpm test")).toBe(
+      false,
+    );
+  });
+});
+
+function isPrivilegedWorkflow(content: string): boolean {
+  return PRIVILEGED_WORKFLOW_MARKERS.some((marker) => marker.test(content));
+}

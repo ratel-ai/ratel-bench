@@ -62,7 +62,7 @@ pnpm test:provider-compatibility
 It validates the shared synthetic fixture across `bedrock`, `anthropic`, `openai`, `gcp`
 (Gemini and Claude on Vertex), and direct `xai`; route-specific prices; provider-scoped
 cache keys; campaign admission; canonical work-unit coverage; provenance; and the sealed
-result checksum consumed by the website importer. It also pins the default to exactly 16
+result checksum consumed by the website importer. It also pins the default to exactly 15
 Bedrock routes spanning Converse, Responses, and Mantle chat APIs. No provider credentials,
 Google ADC, or network access are read by this gate.
 
@@ -94,32 +94,36 @@ commands remain deferred. Do not treat the synthetic result as measured benchmar
 
 ### Launch from GitHub Actions
 
-The manual **Run benchmark campaign** Action submits the same selection contract as the
-campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`, `modelConcurrency`,
-`llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted
-selection uses the 16 Bedrock defaults; exclusions win, model concurrency defaults to one,
-in-flight LLM calls per model job default to 8 (1-16), the aggregate model/API budget
-defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL, SR-Agents and all
-three retrievers remain fixed parts of a full campaign. `llmConcurrency` only takes effect
-when the pinned `ratel-bench-aws` revision (`awsSha`) freezes it; older launchers ignore it
-and keep their frozen-request default of 2.
+Launch campaigns from **ratel-bench-aws → Actions → Run benchmark campaign** (private;
+requires repository access). The manual Action submits the same selection contract as
+the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
+`modelConcurrency`, `llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent
+`runId`). Omitted selection uses the 16 Bedrock defaults; exclusions win, model concurrency
+defaults to one, in-flight LLM calls per model job default to 8 (1-16), the aggregate
+model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
+SR-Agents and all three retrievers remain fixed parts of a full campaign. `llmConcurrency`
+only takes effect when the pinned `ratel-bench-aws` revision (`awsSha`) freezes it; older
+launchers ignore it and keep their frozen-request default of 2.
 
-At submission the Action freezes its own commit, the deployed `ratel-bench-aws` commit from
-the request template, and the highest stable compatible SDK/core pair recorded in
-`.github/benchmark-release-metadata.json`. Inputs are validated and written as JSON rather
-than evaluated by a shell. The job assumes the repository-scoped OIDC launch role, calls
-`StartExecution`, prints the durable run ID plus workflow/execution/result links, and exits;
-it never waits for benchmark workers.
+The optional `benchRef` input selects a public `ratel-bench` branch, tag or commit (default
+`main`). At submission the Action resolves it to an exact 40-character benchmark SHA and
+freezes the deployed `ratel-bench-aws` commit from the request template, plus the highest
+stable compatible SDK/core pair recorded in `.github/benchmark-release-metadata.json` at
+the selected benchmark commit. Update release metadata only after the pair passes
+compatibility review. The selected commit's code runs in the launch job (install plus
+`prepare`/`summarize`, in the same job that later assumes the launch role) and is frozen
+as `benchmarkSha` for the benchmark workers, which run it with worker credentials and spend
+the campaign budget. The Action does not reject other refs: the commits API also resolves
+abbreviated SHAs and fork pull-request SHAs. Pass only refs reviewed on
+`ratel-ai/ratel-bench` `main` or tags.
 
-Repository variables must provide `BENCHMARK_CAMPAIGN_TEMPLATE_JSON` (the deployed,
-versioned request template), `BENCHMARK_CAMPAIGN_LAUNCH_ROLE_ARN`, `BENCHMARK_AWS_REGION`,
-`BENCHMARK_RESULTS_BUCKET`, `BENCHMARK_CAMPAIGN_STATE_MACHINE_ARN`,
-`BENCHMARK_CAMPAIGN_RUN_TABLE`, and the model/preparation/CodeBuild concurrency limits.
-`ratel-bench-aws` is private, so the launcher checkout uses a read-only token from the
-"Ratel Bench Launcher" GitHub App (Contents: read, installed only on `ratel-bench-aws`):
-set `BENCHMARK_LAUNCHER_CLIENT_ID` and the `BENCHMARK_LAUNCHER_APP_PRIVATE_KEY` secret.
-Update release metadata only after the pair passes compatibility review. A failed launch
-reports a configuration/coordinator error without starting a watcher.
+The Action uses this repository's `workflow-dispatch-cli.ts` (`prepare`, `summarize`) to
+validate inputs, write JSON and render the launch summary. Launch configuration
+lives in `ratel-bench-aws`; its job assumes the repository-scoped OIDC launch role, calls
+`StartExecution`, prints the durable run ID plus workflow/execution/result links, and exits
+without waiting for benchmark workers. When `BENCHMARK_MONITOR_URL` is configured there,
+the launch summary also links to the public, read-only run monitor. A failed launch reports
+a configuration/coordinator error without starting a watcher.
 
 Results are not deployed from this repository. After completion, use the separate manual
 website import flow to open and review a results PR; only merging that PR publishes data.
@@ -151,9 +155,9 @@ ANTHROPIC_API_KEY=...
 OPENAI_API_KEY=...
 ```
 
-For an explicit Vertex route such as `gcp/gemini-2.5-pro` or `gcp/claude-sonnet-4-5@20250929`, configure `GOOGLE_VERTEX_PROJECT` and `GOOGLE_VERTEX_LOCATION` in `agent/.env` (or the process environment) and supply Google Application Default Credentials in the runtime. Gemini uses the Vertex Gemini adapter; Claude uses the Vertex Anthropic adapter with Google credentials, without `ANTHROPIC_API_KEY`. The catalog can override the location and exact Vertex model ID. GCP models are outside the 16-model Bedrock default; selecting one without a project/location fails before inference. Live Vertex model availability and access have not been verified; adapter tests use injected credentials and transport only. Vertex prices are not pinned yet, so these routes are not ready for funded campaigns.
+For an explicit Vertex route such as `gcp/gemini-2.5-pro` or `gcp/claude-sonnet-4-5@20250929`, configure `GOOGLE_VERTEX_PROJECT` and `GOOGLE_VERTEX_LOCATION` in `agent/.env` (or the process environment) and supply Google Application Default Credentials in the runtime. Gemini uses the Vertex Gemini adapter; Claude uses the Vertex Anthropic adapter with Google credentials, without `ANTHROPIC_API_KEY`. The catalog can override the location and exact Vertex model ID. GCP models are outside the 15-model Bedrock default; selecting one without a project/location fails before inference. Live Vertex model availability and access have not been verified; adapter tests use injected credentials and transport only. Vertex prices are not pinned yet, so these routes are not ready for funded campaigns.
 
-For an explicit direct xAI route, set `XAI_API_KEY` in `agent/.env` (optional `XAI_BASE_URL` for a custom API endpoint). For example, an opt-in smoke command is `pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --runs 1 --no-judge --ephemeral`. This uses the native xAI Responses adapter with stateless encrypted reasoning turns; it does not use `OPENAI_API_KEY`. The default 16-model Bedrock list does not read xAI credentials or call xAI. xAI live access and the smoke command have **not** been run; only fake-key, injected-transport tests have run. xAI prices are not pinned for funded campaigns. Rows use provider cost ticks when returned; otherwise they label the cost estimate or unknown while retaining token and cache counts.
+For an explicit direct xAI route, set `XAI_API_KEY` in `agent/.env` (optional `XAI_BASE_URL` for a custom API endpoint). For example, an opt-in smoke command is `pnpm -F @ratel-ai/benchmark start --models xai/grok-4-fast --scenarios 1 --runs 1 --no-judge --ephemeral`. This uses the native xAI Responses adapter with stateless encrypted reasoning turns; it does not use `OPENAI_API_KEY`. The default 15-model Bedrock list does not read xAI credentials or call xAI. xAI live access and the smoke command have **not** been run; only fake-key, injected-transport tests have run. xAI prices are not pinned for funded campaigns. Rows use provider cost ticks when returned; otherwise they label the cost estimate or unknown while retaining token and cache counts.
 
 To benchmark a user-hosted (`<url>#<model>`) endpoint instead, no cloud key is needed; put the endpoint's bearer token in `agent/.env` (gitignored) as `AWS_BEDROCK_BEARER=...` — or pass `--model-api-key`. Unauthenticated endpoints need no token. See Scenario 3/4.
 
