@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalModelId } from "./model-identity.js";
 import { findModelCatalogEntry, loadModelCatalog, type ModelCatalogEntry } from "./output-limits.js";
+import { DEFAULT_JUDGE_MODEL } from "./model-defaults.js";
 import { loadModelPricing } from "./pricing.js";
 import { REPO_ROOT } from "./paths.js";
 
@@ -28,12 +29,12 @@ describe("models.json", () => {
   it("commits exactly the selected 15 Bedrock routes in campaign order", () => {
     expect(campaign.map((entry) => entry.id)).toEqual([
       "bedrock/openai.gpt-6-astra",
-      "bedrock/openai.gpt-6-sol",
+      "bedrock/openai.gpt-6.1-sol",
       "bedrock/openai.gpt-6-luna",
       "bedrock/anthropic.claude-fable-5-1",
       "bedrock/anthropic.claude-opus-5-5",
-      "bedrock/anthropic.claude-sonnet-5",
-      "bedrock/anthropic.claude-haiku-4-5",
+      "bedrock/anthropic.claude-sonnet-5-5",
+      "bedrock/anthropic.claude-haiku-5-5",
       "bedrock/moonshotai.kimi-k3",
       "bedrock/qwen.qwen3-coder-next",
       "bedrock/openai.gpt-oss-120b-1:0",
@@ -55,17 +56,12 @@ describe("models.json", () => {
       ]),
     ).toEqual([
       ["global.openai.gpt-6-astra", "eu-central-1", "bedrock-runtime", "responses"],
-      ["global.openai.gpt-6-sol", "eu-central-1", "bedrock-runtime", "responses"],
+      ["global.openai.gpt-6.1-sol", "eu-central-1", "bedrock-runtime", "responses"],
       ["global.openai.gpt-6-luna", "eu-central-1", "bedrock-runtime", "responses"],
       ["global.anthropic.claude-fable-5-1", "eu-central-1", "bedrock-runtime", "converse"],
       ["global.anthropic.claude-opus-5-5", "eu-central-1", "bedrock-runtime", "converse"],
-      ["global.anthropic.claude-sonnet-5", "eu-central-1", "bedrock-runtime", "converse"],
-      [
-        "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "eu-central-1",
-        "bedrock-runtime",
-        "converse",
-      ],
+      ["global.anthropic.claude-sonnet-5-5", "eu-central-1", "bedrock-runtime", "converse"],
+      ["global.anthropic.claude-haiku-5-5", "eu-central-1", "bedrock-runtime", "converse"],
       ["global.moonshotai.kimi-k3", "eu-central-1", "bedrock-runtime", "converse"],
       ["qwen.qwen3-coder-next", "us-east-1", "bedrock-runtime", "converse"],
       ["openai.gpt-oss-120b-1:0", "eu-central-1", "bedrock-runtime", "converse"],
@@ -111,12 +107,12 @@ describe("models.json", () => {
   it("routes each GPT-6 and Claude campaign model to its direct API at the Bedrock price", () => {
     const direct = {
       "bedrock/openai.gpt-6-astra": ["openai/gpt-6-astra", "openai"],
-      "bedrock/openai.gpt-6-sol": ["openai/gpt-6-sol", "openai"],
+      "bedrock/openai.gpt-6.1-sol": ["openai/gpt-6.1-sol", "openai"],
       "bedrock/openai.gpt-6-luna": ["openai/gpt-6-luna", "openai"],
       "bedrock/anthropic.claude-fable-5-1": ["anthropic/claude-fable-5-1", "anthropic"],
       "bedrock/anthropic.claude-opus-5-5": ["anthropic/claude-opus-5-5", "anthropic"],
-      "bedrock/anthropic.claude-sonnet-5": ["anthropic/claude-sonnet-5", "anthropic"],
-      "bedrock/anthropic.claude-haiku-4-5": ["anthropic/claude-haiku-4-5", "anthropic"],
+      "bedrock/anthropic.claude-sonnet-5-5": ["anthropic/claude-sonnet-5-5", "anthropic"],
+      "bedrock/anthropic.claude-haiku-5-5": ["anthropic/claude-haiku-5-5", "anthropic"],
     } as const;
     const pricing = loadModelPricing(resolve(REPO_ROOT, "models.json"));
     for (const [id, [alias, provider]] of Object.entries(direct)) {
@@ -128,6 +124,12 @@ describe("models.json", () => {
       expect(pricing[alias], alias).toEqual(pricing[id]);
       expect(findModelCatalogEntry(alias, catalog)?.id, alias).toBe(id);
     }
+  });
+
+  it("keeps the retired Sonnet 5 route priced for the unchanged judge", () => {
+    const pricing = loadModelPricing(resolve(REPO_ROOT, "models.json"));
+    expect(campaign.map((e) => e.id)).not.toContain(DEFAULT_JUDGE_MODEL);
+    expect(pricing[DEFAULT_JUDGE_MODEL]).toBeDefined();
   });
 
   it("keeps optional Vertex publishers and exact API IDs out of the Bedrock campaign", () => {
