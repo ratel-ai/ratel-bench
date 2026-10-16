@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { canonicalModelId } from "./model-identity.js";
-import { loadModelCatalog, type ModelCatalogEntry } from "./output-limits.js";
+import { findModelCatalogEntry, loadModelCatalog, type ModelCatalogEntry } from "./output-limits.js";
+import { loadModelPricing } from "./pricing.js";
 import { REPO_ROOT } from "./paths.js";
 
 const catalog = loadModelCatalog(resolve(REPO_ROOT, "models.json"));
@@ -105,6 +106,28 @@ describe("models.json", () => {
       "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#qwen3-4b": null,
       "https://hj1y208qba.execute-api.eu-central-1.amazonaws.com/prod/v1#mistral-7b-instruct": null,
     });
+  });
+
+  it("routes each GPT-6 and Claude campaign model to its direct API at the Bedrock price", () => {
+    const direct = {
+      "bedrock/openai.gpt-6-astra": ["openai/gpt-6-astra", "openai"],
+      "bedrock/openai.gpt-6-sol": ["openai/gpt-6-sol", "openai"],
+      "bedrock/openai.gpt-6-luna": ["openai/gpt-6-luna", "openai"],
+      "bedrock/anthropic.claude-fable-5-1": ["anthropic/claude-fable-5-1", "anthropic"],
+      "bedrock/anthropic.claude-opus-5-5": ["anthropic/claude-opus-5-5", "anthropic"],
+      "bedrock/anthropic.claude-sonnet-5": ["anthropic/claude-sonnet-5", "anthropic"],
+      "bedrock/anthropic.claude-haiku-4-5": ["anthropic/claude-haiku-4-5", "anthropic"],
+    } as const;
+    const pricing = loadModelPricing(resolve(REPO_ROOT, "models.json"));
+    for (const [id, [alias, provider]] of Object.entries(direct)) {
+      const entry = campaign.find((e) => e.id === id) as ModelCatalogEntry & {
+        pricing: Record<string, unknown>;
+      };
+      expect(entry.aliases, id).toContain(alias);
+      expect(entry.pricing[provider], id).toEqual(entry.pricing.bedrock);
+      expect(pricing[alias], alias).toEqual(pricing[id]);
+      expect(findModelCatalogEntry(alias, catalog)?.id, alias).toBe(id);
+    }
   });
 
   it("keeps optional Vertex publishers and exact API IDs out of the Bedrock campaign", () => {
