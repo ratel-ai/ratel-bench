@@ -157,7 +157,13 @@ describe("withRetry", () => {
     expect(result.text).toBe("ok");
     expect(model.doGenerateCalls).toHaveLength(4);
     expect(waits).toEqual([500, 1000, 2000]);
-    expect(stats).toEqual({ retries: 3, throttledRetries: 2, waitMs: 3500, fatal: false });
+    expect(stats).toEqual({
+      retries: 3,
+      throttledRetries: 2,
+      waitMs: 3500,
+      budgetMs: 0,
+      fatal: false,
+    });
   });
 
   it("preserves specificationVersion/provider/modelId for a V2 and a V3 model", async () => {
@@ -654,6 +660,28 @@ describe("cellRetry", () => {
       "[s1 · arm · m3 · #0] retry: mock-v3/m3 attempt 2/4 failed (500); " +
         "waiting 1000ms, 4000/60000ms of wait budget used",
     ]);
+  });
+
+  it("keeps the budget guard's work off the deadline and counts it apart", async () => {
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const r = cellRetry(failingV3([]), 50, {
+      ...DEFAULT_RETRY_SETTINGS,
+      policy: POLICY,
+      attempt: {
+        start: async () => {
+          await wait(80);
+          return "attempt";
+        },
+        finish: async () => {
+          await wait(30);
+        },
+      },
+    });
+
+    await r.run(() => generate(r.model, r.signal));
+
+    expect(r.signal.aborted).toBe(false);
+    expect(r.stats.budgetMs).toBeGreaterThanOrEqual(100);
   });
 
   it("logs nothing without a `log`", async () => {

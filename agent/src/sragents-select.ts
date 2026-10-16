@@ -48,6 +48,7 @@ import {
   createBreaker,
   DEFAULT_RETRY_SETTINGS,
   type RetrySettings,
+  type RetryStats,
   retrySettingsFromEnv,
   retrySettingsLine,
   SpendJournalError,
@@ -100,6 +101,7 @@ import {
   summarizeRunCoverage,
   tallyRow,
 } from "./rerun.js";
+import { sdkVersion } from "./sdk/resolve.js";
 import {
   openSpendLedger,
   reconcileCampaignBudget,
@@ -107,7 +109,6 @@ import {
   type SpendSummary,
   spendRecorder,
 } from "./spend-ledger.js";
-import { sdkVersion } from "./sdk/resolve.js";
 import type { SragentsArm, SragentsRetrievalRow, SragentsSelectCell } from "./sragents-types.js";
 import type { RunnerModel } from "./types.js";
 import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./versions.js";
@@ -433,7 +434,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       selected_skill_ids: object.selected_skill_ids.filter((id) => candidateIdSet.has(id)),
       ...usageFields(args.model.id, usage, providerMetadata),
       finish_reason: finishReason,
-      wall_ms: Date.now() - startedAt,
+      wall_ms: cellWallMs(startedAt, retry.stats),
     };
   } catch (err) {
     if (
@@ -455,7 +456,7 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
       ...retry.rowFields(),
       ...(noObject ? usageFields(args.model.id, noObject.usage) : {}),
       finish_reason: noObject?.finishReason ?? "error",
-      wall_ms: Date.now() - startedAt,
+      wall_ms: cellWallMs(startedAt, retry.stats),
       error: (err as Error).message ?? String(err),
       // Plan-pinned U1/U4 rule: a timeout in a cell that saw any retry is `transient`.
       // Retry sleeps are off the clock; only failed attempts' own time is the
@@ -473,6 +474,11 @@ export async function selectForCell(args: SelectArgs): Promise<SragentsSelectCel
 }
 
 /** Token and dollar fields of a cell from one call's usage. */
+/** The cell's wall time net of budget-guard work, which is the harness's, not the provider's. */
+function cellWallMs(startedAt: number, stats: RetryStats): number {
+  return Math.max(0, Date.now() - startedAt - Math.round(stats.budgetMs));
+}
+
 function usageFields(
   modelId: string,
   usage: LanguageModelUsage | undefined,

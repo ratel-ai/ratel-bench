@@ -17,8 +17,8 @@ afterEach(() => {
 });
 
 it.each([
-  [undefined, 8],
-  ["", 8],
+  [undefined, 16],
+  ["", 16],
   ["5", 5],
 ])("writes LLM_CONCURRENCY %j to options.json as %i", (value, expected) => {
   prepareEnv(value);

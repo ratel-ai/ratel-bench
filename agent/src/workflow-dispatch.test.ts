@@ -63,7 +63,7 @@ describe("prepareWorkflowDispatch", () => {
       excludeModels: [],
       notifyToEmails: ["dev@ratel.sh"],
       modelConcurrency: 1,
-      llmConcurrency: 8,
+      llmConcurrency: 16,
       campaignBudgetUsd: 1000,
     });
     expect(prepared.template).toMatchObject({
@@ -81,7 +81,7 @@ describe("prepareWorkflowDispatch", () => {
   });
 
   it.each([
-    ["", 8],
+    ["", 16],
     ["1", 1],
     ["5", 5],
     ["16", 16],
@@ -172,7 +172,7 @@ describe("prepareWorkflowDispatch", () => {
       excludeModels: ["bedrock/openai.gpt-6-sol"],
       notifyToEmails: ["dev@ratel.sh", "ops@example.com"],
       modelConcurrency: 2,
-      llmConcurrency: 8,
+      llmConcurrency: 16,
       campaignBudgetUsd: 125.5,
     });
     expect(prepared.selectedModels).toEqual(["xai/model;touch-nope"]);

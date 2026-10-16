@@ -132,7 +132,7 @@ function numberInput(value: string, name: string): number {
 }
 
 function llmConcurrencyInput(value: string | undefined): number {
-  if (value === undefined || value === "") return 8;
+  if (value === undefined || value === "") return 16;
   if (!/^[1-9]\d*$/.test(value) || Number(value) > 16) {
     throw new Error("llmConcurrency must be an integer between 1 and 16");
   }

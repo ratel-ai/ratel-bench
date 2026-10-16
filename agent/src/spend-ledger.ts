@@ -57,6 +57,8 @@ export interface SpendSettlement {
   rawUsage?: unknown;
   /** xAI billed amount, in 10^-10 USD ticks, when supplied by the provider. */
   providerCostTicks?: number;
+  /** HTTP status of a provider error answer that billed no inference; `usage` is then zero. */
+  rejectedStatus?: number;
 }
 
 export interface SpendSummary {
@@ -87,6 +89,17 @@ interface Totals {
   unknown: number;
   knownTicks: number;
 }
+
+/**
+ * Tokens a provider may add around the serialized request: chat-template markers,
+ * a tool-use preamble, per-message framing. Generous on purpose: an input bound
+ * below the billed input marks the campaign discrepant and stops admission.
+ */
+const PROVIDER_PROMPT_OVERHEAD_TOKENS = 4096;
+/** Prompt parts whose tokens the request's UTF-8 bytes bound (each token is ≥ 1 byte). */
+const COUNTABLE_PARTS = new Set(["text", "reasoning", "tool-call", "tool-result"]);
+/** Settled-attempt replays in flight at once during a resume. */
+const RECONCILE_CONCURRENCY = 16;
 
 type Event =
   | { type: "generation"; value: SpendGeneration }
@@ -273,15 +286,30 @@ function benchmarkMatchesScope(kind: SpendDispatch["kind"], scope: string): bool
 
 export type SpendLedger = ReturnType<typeof openSpendLedger>;
 
-/** Replay budget settlement after a crash between journal fsync and store acknowledgement. */
+/**
+ * Replay budget settlement after a crash between journal fsync and store acknowledgement.
+ * One store listing finds the attempts already settled; only the drift is written.
+ */
 export async function reconcileCampaignBudget(
   ledger: SpendLedger,
   budget: CampaignBudget,
 ): Promise<void> {
+  const listed = budget.attempts
+    ? new Map((await budget.attempts()).map((attempt) => [attempt.attemptId, attempt]))
+    : undefined;
+  const pending: Array<() => Promise<void>> = [];
   for (const { dispatch, settlement } of ledger.entries()) {
     if (dispatch.campaignId !== budget.campaignId || !settlement) continue;
-    await budget.settle(dispatch.id, costTicks(dispatch.model, dispatch.price, settlement));
+    const cost = costTicks(dispatch.model, dispatch.price, settlement);
+    const current = listed?.get(dispatch.id);
+    if (current?.state === "settled" && current.costTicks === cost) continue;
+    if (current?.state === "unknown" && cost === null) continue;
+    pending.push(() => budget.settle(dispatch.id, cost));
   }
+  const worker = async (): Promise<void> => {
+    for (let next = pending.shift(); next; next = pending.shift()) await next();
+  };
+  await Promise.all(Array.from({ length: RECONCILE_CONCURRENCY }, worker));
 }
 
 /** A distinct ID for each physical provider dispatch, including every retry. */
@@ -298,6 +326,7 @@ export function spendRecorder(
   let physicalOrdinal = 0;
   return {
     async start(options) {
+      const inputTokens = budget ? inputTokenBound(options) : undefined;
       let id: string;
       do {
         physicalOrdinal++;
@@ -313,6 +342,8 @@ export function spendRecorder(
                   context.model,
                   context.attemptOrdinal ?? 1,
                   physicalOrdinal,
+                  // A resumed call with a different prompt is a different reservation.
+                  ...(inputTokens === undefined ? [] : [inputTokens]),
                 ]),
               )
               .digest("hex")
@@ -322,7 +353,7 @@ export function spendRecorder(
         const maxOutputTokens = (options as { maxOutputTokens?: number } | undefined)
           ?.maxOutputTokens;
         try {
-          await budget.reserve(id, context.model, maxOutputTokens, context.price);
+          await budget.reserve(id, context.model, maxOutputTokens, context.price, inputTokens);
         } catch (error) {
           if (error instanceof BudgetLimitedError || error instanceof BudgetContentionError)
             throw error;
@@ -350,13 +381,19 @@ export function spendRecorder(
           response && typeof response === "object" ? (response as Record<string, unknown>) : {};
         const rawUsage =
           object.usage ?? (object.response as { usage?: unknown } | undefined)?.usage;
-        const usage = spendUsageOf(rawUsage);
+        const reported = spendUsageOf(rawUsage);
+        const rejectedStatus =
+          reported === null && error !== undefined && !aborted
+            ? rejectedStatusOf(error)
+            : undefined;
+        const usage = rejectedStatus === undefined ? reported : { inputTokens: 0, outputTokens: 0 };
         const billedTicks = xaiCostTicks(object.providerMetadata, object.usage);
         const settlement: SpendSettlement = {
           status: aborted ? "aborted" : error === undefined ? "completed" : "failed",
           usage,
           rawUsage,
           ...(billedTicks === undefined ? {} : { providerCostTicks: billedTicks }),
+          ...(rejectedStatus === undefined ? {} : { rejectedStatus }),
         };
         ledger.settle(id, settlement);
         if (budget) await budget.settle(id, costTicks(context.model, context.price, settlement));
@@ -365,6 +402,50 @@ export function spendRecorder(
       }
     },
   };
+}
+
+/**
+ * A proven upper bound on a call's billable input tokens: the UTF-8 bytes of what
+ * the request serializes, plus the provider overhead. Undefined when the prompt
+ * holds media (or anything else bytes do not bound): the route bound then applies.
+ */
+export function inputTokenBound(options: unknown): number | undefined {
+  if (!options || typeof options !== "object") return undefined;
+  const { prompt, tools, toolChoice, responseFormat, providerOptions } = options as Record<
+    string,
+    unknown
+  >;
+  if (!Array.isArray(prompt) || !prompt.every(countableMessage)) return undefined;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify({ prompt, tools, toolChoice, responseFormat, providerOptions });
+  } catch {
+    return undefined;
+  }
+  return Buffer.byteLength(serialized, "utf8") + PROVIDER_PROMPT_OVERHEAD_TOKENS;
+}
+
+function countableMessage(message: unknown): boolean {
+  const content = (message as { content?: unknown } | null)?.content;
+  if (typeof content === "string") return true;
+  return (
+    Array.isArray(content) &&
+    content.every((part: { type?: unknown; output?: { type?: unknown } } | null) => {
+      if (!part || !COUNTABLE_PARTS.has(part.type as string)) return false;
+      return part.type !== "tool-result" || part.output?.type !== "content";
+    })
+  );
+}
+
+/**
+ * The status of a provider error answer that billed no inference: any 4xx/5xx
+ * except the timeouts (408, 504), after which the provider may still have run
+ * the call. Without such an answer (network error, abort) the cost is unknown.
+ */
+function rejectedStatusOf(error: unknown): number | undefined {
+  const status = (error as { statusCode?: unknown } | null)?.statusCode;
+  if (typeof status !== "number" || status < 400 || status > 599) return undefined;
+  return status === 408 || status === 504 ? undefined : status;
 }
 
 function isSettledAttempt(ledger: SpendLedger, id: string): boolean {

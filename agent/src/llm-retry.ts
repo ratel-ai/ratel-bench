@@ -51,6 +51,11 @@ export interface RetryStats {
   throttledRetries: number;
   /** Total backoff slept, in ms (not charged to the cell's active-time deadline). */
   waitMs: number;
+  /**
+   * Time spent in the attempt recorder (campaign budget reserve/claim/settle), in ms.
+   * Off the deadline and out of `wall_ms`, so latency doesn't depend on the guard.
+   */
+  budgetMs: number;
   /** A fatal provider error (gated/missing model) ended a call. */
   fatal: boolean;
 }
@@ -256,7 +261,7 @@ export function cellRetry<M extends LanguageModel>(
 }
 
 export function newRetryStats(): RetryStats {
-  return { retries: 0, throttledRetries: 0, waitMs: 0, fatal: false };
+  return { retries: 0, throttledRetries: 0, waitMs: 0, budgetMs: 0, fatal: false };
 }
 
 /**
@@ -469,7 +474,8 @@ async function generateWithRetry<T>(
   for (let attempt = 1; ; attempt++) {
     // A journal failure must stop inference. A response-journal failure must
     // leave the dispatch unresolved, never trigger another hidden retry.
-    const attemptId = await opts.attempt?.start(options);
+    const recorder = opts.attempt;
+    const attemptId = recorder ? await offTheClock(opts, () => recorder.start(options)) : undefined;
     let result: T | undefined;
     let error: unknown;
     let failed = false;
@@ -479,12 +485,14 @@ async function generateWithRetry<T>(
       error = err;
       failed = true;
     }
-    if (attemptId !== undefined)
-      await opts.attempt?.finish(
-        attemptId,
-        result,
-        failed ? error : undefined,
-        failed && (signal?.aborted ?? false),
+    if (recorder && attemptId !== undefined)
+      await offTheClock(opts, () =>
+        recorder.finish(
+          attemptId,
+          result,
+          failed ? error : undefined,
+          failed && (signal?.aborted ?? false),
+        ),
       );
     if (!failed) return result as T;
     const err = error;
@@ -513,6 +521,18 @@ async function generateWithRetry<T>(
       deadline?.resume();
     }
     stats.waitMs += delay;
+  }
+}
+
+/** Run budget-guard work with the cell's deadline paused, adding its time to `budgetMs`. */
+async function offTheClock<T>(opts: WithRetryOptions, work: () => T | Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  opts.deadline?.pause();
+  try {
+    return await work();
+  } finally {
+    opts.deadline?.resume();
+    opts.stats.budgetMs += performance.now() - startedAt;
   }
 }
 
