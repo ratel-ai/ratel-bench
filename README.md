@@ -97,10 +97,13 @@ commands remain deferred. Do not treat the synthetic result as measured benchmar
 Launch campaigns from **ratel-bench-aws → Actions → Run benchmark campaign** (private;
 requires repository access). The manual Action submits the same selection contract as
 the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
-`modelConcurrency` and `campaignBudgetUsd` (plus an optional idempotent `runId`). Omitted
-selection uses the 15 Bedrock defaults; exclusions win, concurrency defaults to one, the
-aggregate model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
-SR-Agents and all three retrievers remain fixed parts of a full campaign.
+`modelConcurrency`, `llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent
+`runId`). Omitted selection uses the 16 Bedrock defaults; exclusions win, model concurrency
+defaults to one, in-flight LLM calls per model job default to 8 (1-16), the aggregate
+model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
+SR-Agents and all three retrievers remain fixed parts of a full campaign. `llmConcurrency`
+only takes effect when the pinned `ratel-bench-aws` revision (`awsSha`) freezes it; older
+launchers ignore it and keep their frozen-request default of 2.
 
 The optional `benchRef` input selects a public `ratel-bench` branch, tag or commit (default
 `main`). At submission the Action resolves it to an exact 40-character benchmark SHA and

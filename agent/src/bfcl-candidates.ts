@@ -19,7 +19,9 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { candidateTool } from "./catalog-shapes.js";
 import { loadScenarios } from "./corpus.js";
+import { embeddingArtifactOption } from "./embedding-artifact.js";
 import { resolveRepoPath } from "./paths.js";
 import { buildToolUniverse, expandPool } from "./pool.js";
 import { sampleScenarios } from "./scenario-sample.js";
@@ -32,6 +34,96 @@ import { RATEL_AI_CORE_RESOLVED_VERSION, RATEL_AI_CORE_VERSION } from "./version
 interface RetrievedHit {
   id: string;
   score: number;
+}
+
+async function main(): Promise<void> {
+  const method = arg("--retriever", "bm25") as RetrievalMethod;
+  if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
+    throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
+  }
+  // SDK selection must happen before the first catalog build — `select()` throws
+  // once a module is loaded, so this is deliberately the earliest statement that
+  // touches the SDK layer.
+  selectVersion(arg("--sdk-version", ""));
+  const embedding = parseEmbedding(arg("--embedding", ""));
+  const embeddingArtifact = await embeddingArtifactOption({
+    path: arg("--embedding-artifact", ""),
+    method,
+    embedding,
+  });
+  const poolSizes = parsePoolSizes(arg("--pool-sizes", arg("--pool-size", "30,100")));
+  const seed = Number(arg("--seed", "42"));
+  const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all
+  const corpusPath = resolveRepoPath(arg("--corpus", "test-data/bfcl-all.jsonl"));
+  const outputPath = resolveRepoPath(
+    arg("--output", `results/raw/bfcl/retrieval-${RATEL_AI_CORE_VERSION}.jsonl`),
+  );
+  const kSlices = [1, 3, 5]; // fixed retrieval-eval k (see EXPERIMENTS.md)
+
+  // Same seeded subset and full-corpus universe as the agent runner, so a capped
+  // retrieval run scores exactly the scenarios its LLM stage will run.
+  const allScenarios = loadScenarios(corpusPath);
+  const scenarios = sampleScenarios(
+    allScenarios,
+    scenarioLimit > 0 ? scenarioLimit : undefined,
+    seed,
+  );
+  const universe = buildToolUniverse(allScenarios);
+  console.log(
+    `bfcl-candidates: method=${method} pools=[${poolSizes.join(",")}] k=[${kSlices.join(",")}] ` +
+      `over ${scenarios.length} scenarios (universe=${universe.length} tools) → ${outputPath}`,
+  );
+
+  const runId = `sdk-bfcl-ret-${Date.now()}`;
+  const generatedAt = new Date().toISOString();
+  const lines: string[] = [];
+  const t0 = Date.now();
+  for (const sc of scenarios) {
+    const category = bfclCategory(sc);
+    for (const poolSize of poolSizes) {
+      const pool = expandPool(sc, universe, poolSize, seed);
+      const { search } = await buildToolCatalog({
+        method,
+        embedding,
+        embeddingArtifact,
+        tools: pool.map(candidateTool),
+      });
+      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
+        id: h.toolId,
+        score: h.score,
+      }));
+
+      for (const k of kSlices) {
+        if (k > poolSize) continue;
+        lines.push(
+          JSON.stringify({
+            run_type: "retrieval",
+            run_id: runId,
+            generated_at: generatedAt,
+            ratel_ai_core_version: RATEL_AI_CORE_VERSION,
+            ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
+            scenario_id: sc.id,
+            query: sc.prompt,
+            golden_answer: sc.gold_tools,
+            category,
+            target_pool_size: poolSize,
+            actual_pool_size: pool.length,
+            k,
+            pool_size: poolSize,
+            retrieved: hits.slice(0, k),
+            ...metrics(sc.gold_tools, hits, k),
+          }),
+        );
+      }
+    }
+  }
+
+  mkdirSync(dirname(outputPath), { recursive: true });
+  writeFileSync(outputPath, `${lines.join("\n")}\n`, "utf-8");
+  console.log(
+    `  wrote ${lines.length} rows (${scenarios.length} scenarios × ${poolSizes.length} pool(s) × ` +
+      `${kSlices.length} k) in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+  );
 }
 
 function arg(name: string, fallback: string): string {
@@ -85,93 +177,6 @@ function metrics(gold: string[], ranked: RetrievedHit[], k: number) {
     ndcg_at_k: idcg ? dcg / idcg : 0,
     gold_score: scored.length ? Math.max(...scored) : null,
   };
-}
-
-async function main(): Promise<void> {
-  const method = arg("--retriever", "bm25") as RetrievalMethod;
-  if (method !== "bm25" && method !== "semantic" && method !== "hybrid") {
-    throw new Error(`--retriever must be bm25, semantic, or hybrid (got "${method}")`);
-  }
-  // SDK selection must happen before the first catalog build — `select()` throws
-  // once a module is loaded, so this is deliberately the earliest statement that
-  // touches the SDK layer.
-  selectVersion(arg("--sdk-version", ""));
-  const embedding = parseEmbedding(arg("--embedding", ""));
-  const poolSizes = parsePoolSizes(arg("--pool-sizes", arg("--pool-size", "30,100")));
-  const seed = Number(arg("--seed", "42"));
-  const scenarioLimit = Number(arg("--scenarios", "0")); // 0 = all
-  const corpusPath = resolveRepoPath(arg("--corpus", "test-data/bfcl-all.jsonl"));
-  const outputPath = resolveRepoPath(
-    arg("--output", `results/raw/bfcl/retrieval-${RATEL_AI_CORE_VERSION}.jsonl`),
-  );
-  const kSlices = [1, 3, 5]; // fixed retrieval-eval k (see EXPERIMENTS.md)
-
-  // Same seeded subset and full-corpus universe as the agent runner, so a capped
-  // retrieval run scores exactly the scenarios its LLM stage will run.
-  const allScenarios = loadScenarios(corpusPath);
-  const scenarios = sampleScenarios(allScenarios, scenarioLimit > 0 ? scenarioLimit : undefined, seed);
-  const universe = buildToolUniverse(allScenarios);
-  console.log(
-    `bfcl-candidates: method=${method} pools=[${poolSizes.join(",")}] k=[${kSlices.join(",")}] ` +
-      `over ${scenarios.length} scenarios (universe=${universe.length} tools) → ${outputPath}`,
-  );
-
-  const runId = `sdk-bfcl-ret-${Date.now()}`;
-  const generatedAt = new Date().toISOString();
-  const lines: string[] = [];
-  const t0 = Date.now();
-  for (const sc of scenarios) {
-    const category = bfclCategory(sc);
-    for (const poolSize of poolSizes) {
-      const pool = expandPool(sc, universe, poolSize, seed);
-      const { search } = await buildToolCatalog({
-        method,
-        embedding,
-        tools: pool.map((t) => ({
-          id: t.id,
-          name: t.name,
-          description: t.description,
-          inputSchema: t.input_schema,
-          outputSchema: t.output_schema ?? {},
-          execute: async () => ({}),
-        })),
-      });
-      const hits = (await search(sc.prompt, poolSize)).map((h) => ({
-        id: h.toolId,
-        score: h.score,
-      }));
-
-      for (const k of kSlices) {
-        if (k > poolSize) continue;
-        lines.push(
-          JSON.stringify({
-            run_type: "retrieval",
-            run_id: runId,
-            generated_at: generatedAt,
-            ratel_ai_core_version: RATEL_AI_CORE_VERSION,
-            ratel_ai_core_resolved_version: RATEL_AI_CORE_RESOLVED_VERSION,
-            scenario_id: sc.id,
-            query: sc.prompt,
-            golden_answer: sc.gold_tools,
-            category,
-            target_pool_size: poolSize,
-            actual_pool_size: pool.length,
-            k,
-            pool_size: poolSize,
-            retrieved: hits.slice(0, k),
-            ...metrics(sc.gold_tools, hits, k),
-          }),
-        );
-      }
-    }
-  }
-
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, `${lines.join("\n")}\n`, "utf-8");
-  console.log(
-    `  wrote ${lines.length} rows (${scenarios.length} scenarios × ${poolSizes.length} pool(s) × ` +
-      `${kSlices.length} k) in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
-  );
 }
 
 main().catch((err) => {

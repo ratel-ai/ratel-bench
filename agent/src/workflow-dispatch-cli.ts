@@ -55,6 +55,7 @@ function workflowInputs(env: NodeJS.ProcessEnv): WorkflowDispatchInputs {
     excludeModels: env.EXCLUDE_MODELS ?? "",
     notifyToEmails: env.NOTIFY_TO_EMAILS ?? "",
     modelConcurrency: env.MODEL_CONCURRENCY ?? "",
+    llmConcurrency: env.LLM_CONCURRENCY ?? "",
     campaignBudgetUsd: env.CAMPAIGN_BUDGET_USD ?? "",
     runId: env.CAMPAIGN_RUN_ID ?? "",
   };

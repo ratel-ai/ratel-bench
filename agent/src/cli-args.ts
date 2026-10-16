@@ -50,6 +50,8 @@ export interface ParsedArgs {
   ratelVersion?: string;
   /** Exact installed SDK alias for this campaign; omitted uses the historical default. */
   sdkVersion?: string;
+  /** Shared embedding artifact for ratel-full semantic/hybrid catalogs. */
+  embeddingArtifactPath?: string;
   scenarios?: number;
   arms: Arm[];
   models: string[];
@@ -170,6 +172,15 @@ export function parseArgs(argv: string[], knownArms: readonly string[]): ParsedA
           throw new Error(`--sdk-version needs an exact release (got "${v}")`);
         }
         args.sdkVersion = v;
+        break;
+      }
+      case "--embedding-artifact": {
+        // Same guard as --ratel-version: a missing path must not swallow the next flag.
+        const v = next().trim();
+        if (!v || v.startsWith("-")) {
+          throw new Error(`--embedding-artifact needs a path, e.g. cache/bfcl.rat1 (got "${v}")`);
+        }
+        args.embeddingArtifactPath = v;
         break;
       }
       case "--scenarios":

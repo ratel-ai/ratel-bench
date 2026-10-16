@@ -9,6 +9,7 @@
 // real work for borderline retrievals.
 
 import type { ToolCatalog } from "@ratel-ai/sdk";
+import { toolCatalogMetadata } from "../../catalog-shapes.js";
 import { buildToolCatalog } from "../../sdk/adapter.js";
 import type { AgentDescriptor, AgentRunInput, Scenario, ToolSpec } from "../../types.js";
 import { emptyToolBundle, registerDirect, runMeteredLoop, type ToolBundle } from "../_shared.js";
@@ -29,11 +30,7 @@ export async function buildRatelPreDiscoveryBundle(input: {
   // method, bm25 included.
   const { catalog, search } = await buildToolCatalog({
     tools: input.pool.map((spec) => ({
-      id: spec.id,
-      name: spec.name,
-      description: spec.description,
-      inputSchema: spec.input_schema,
-      outputSchema: spec.output_schema ?? {},
+      ...toolCatalogMetadata(spec),
       execute: async () => ({ _stub: "stubbed for benchmark", toolId: spec.id }),
     })),
   });

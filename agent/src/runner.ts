@@ -114,6 +114,8 @@ export interface RunnerConfig {
   topK: number;
   /** Retrieval method for the Ratel arms (bm25 | semantic | hybrid). */
   retriever: RetrievalMethod;
+  /** Shared artifact path for ratel-full semantic/hybrid catalogs. */
+  embeddingArtifactPath?: string;
   /**
    * Pool sizes to sweep over for non-agnostic arms. Each scenario is evaluated
    * at every value (cells are duplicated across pool sizes), so a 50-scenario ×
@@ -527,6 +529,7 @@ export function makeRegistryRunCell(
       runIndex,
       topK: config.topK,
       retriever: config.retriever,
+      embeddingArtifactPath: config.embeddingArtifactPath,
       maxSteps: config.maxSteps,
       perRunTimeoutMs: config.perRunTimeoutMs,
       retry,
@@ -893,6 +896,7 @@ export async function run(config: RunnerConfig): Promise<RunnerSummary> {
           poolSize: task.poolSize,
           topK: config.topK,
           retriever: config.retriever,
+          embeddingArtifactPath: config.embeddingArtifactPath,
           seed: config.seed,
         });
       }

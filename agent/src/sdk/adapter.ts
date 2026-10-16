@@ -18,7 +18,7 @@
 
 import type { ExecutableTool, SearchHit, Skill, SkillHit, ToolCatalog } from "@ratel-ai/sdk";
 import type { RetrievalMethod } from "../types.js";
-import { loadSdk, type SdkModule, supportsAsyncSearch } from "./resolve.js";
+import { loadSdk, type SdkModule, sdkVersion, supportsAsyncSearch } from "./resolve.js";
 
 /**
  * Embedding-model selection, kept structural on purpose: the concrete
@@ -47,15 +47,11 @@ interface BuildOptions {
   method?: RetrievalMethod;
   /** 0.5.0+ only; rejected below that with the version that would be needed. */
   embedding?: EmbeddingSpec;
+  /** Shared artifact bytes; omitted for SDKs without the artifact API. */
+  embeddingArtifact?: { bytes: Uint8Array; onMiss: "error" | "embed" };
 }
 
-function assertEmbeddingSupported(mod: SdkModule, embedding: EmbeddingSpec | undefined): void {
-  if (embedding === undefined || supportsAsyncSearch(mod)) return;
-  throw new Error(
-    "--embedding requires @ratel-ai/sdk >= 0.5.0 (the installed SDK has no configurable " +
-      "embedding model). Select a 0.5.0+ SDK, or drop --embedding to use the built-in model.",
-  );
-}
+const warnedArtifactModules = new WeakSet<SdkModule>();
 
 /**
  * Build a tool catalog with `tools` registered and (for semantic/hybrid)
@@ -67,6 +63,7 @@ export async function buildToolCatalog(
   const mod = await loadSdk();
   assertEmbeddingSupported(mod, opts.embedding);
   const method: RetrievalMethod = opts.method ?? "bm25";
+  const embeddingArtifact = supportedEmbeddingArtifact(mod, method, opts.embeddingArtifact);
 
   if (supportsAsyncSearch(mod)) {
     // 0.5.0+: options always passed (bm25 is its default anyway), batch register
@@ -76,6 +73,9 @@ export async function buildToolCatalog(
     const catalog = new mod.ToolCatalog({
       method,
       ...(opts.embedding === undefined ? {} : { embedding: opts.embedding }),
+      ...(embeddingArtifact === undefined
+        ? {}
+        : { experimentalEmbeddingArtifact: embeddingArtifact }),
     } as ConstructorParameters<typeof mod.ToolCatalog>[0]);
     await (catalog.register as unknown as (t: readonly ExecutableTool[]) => Promise<void>).call(
       catalog,
@@ -106,11 +106,15 @@ export async function buildSkillCatalog(
   const mod = await loadSdk();
   assertEmbeddingSupported(mod, opts.embedding);
   const method: RetrievalMethod = opts.method ?? "bm25";
+  const embeddingArtifact = supportedEmbeddingArtifact(mod, method, opts.embeddingArtifact);
 
   if (supportsAsyncSearch(mod)) {
     const catalog = new mod.SkillCatalog({
       method,
       ...(opts.embedding === undefined ? {} : { embedding: opts.embedding }),
+      ...(embeddingArtifact === undefined
+        ? {}
+        : { experimentalEmbeddingArtifact: embeddingArtifact }),
     } as ConstructorParameters<typeof mod.SkillCatalog>[0]);
     await (catalog.register as unknown as (s: readonly Skill[]) => Promise<void>).call(catalog, [
       ...opts.skills,
@@ -133,6 +137,31 @@ export async function buildSkillCatalog(
   return { catalog, search: async (query, topK) => catalog.search(query, topK) };
 }
 
+/**
+ * Whether the SDK accepts `experimentalEmbeddingArtifact`. Logs the inline-embed
+ * fallback once per SDK module when it does not, so callers can check before
+ * reading artifact bytes without duplicating the warning.
+ */
+export function acceptsEmbeddingArtifact(mod: SdkModule): boolean {
+  if (supportsEmbeddingArtifact(mod)) return true;
+  if (!warnedArtifactModules.has(mod)) {
+    console.warn(`SDK ${sdkVersion()} lacks experimentalEmbeddingArtifact; embedding inline`);
+    warnedArtifactModules.add(mod);
+  }
+  return false;
+}
+
+/** Structural artifact-support check, with no side effects. */
+export function supportsEmbeddingArtifact(mod: SdkModule): boolean {
+  // The builder export and catalog option ship together; constructor option
+  // types are erased at runtime. Detect the API, including local/prerelease SDKs.
+  return (
+    supportsAsyncSearch(mod) &&
+    typeof (mod as unknown as { experimentalBuildEmbeddingArtifact?: unknown })
+      .experimentalBuildEmbeddingArtifact === "function"
+  );
+}
+
 /** The SDK's gateway tools (`search_tools`, `invoke_tool`) and their ids.
  *  0.5.0 keeps both under `compat`, unchanged in behaviour, so the gateway
  *  surface the model sees stays identical across every layer. */
@@ -141,4 +170,22 @@ export async function gatewayTools(): Promise<
 > {
   const mod = await loadSdk();
   return { searchToolsTool: mod.searchToolsTool, invokeToolTool: mod.invokeToolTool };
+}
+
+function assertEmbeddingSupported(mod: SdkModule, embedding: EmbeddingSpec | undefined): void {
+  if (embedding === undefined || supportsAsyncSearch(mod)) return;
+  throw new Error(
+    "--embedding requires @ratel-ai/sdk >= 0.5.0 (the installed SDK has no configurable " +
+      "embedding model). Select a 0.5.0+ SDK, or drop --embedding to use the built-in model.",
+  );
+}
+
+/** bm25 never embeds, yet SDK 0.12 still warms (and validates) a configured artifact. */
+function supportedEmbeddingArtifact(
+  mod: SdkModule,
+  method: RetrievalMethod,
+  artifact: BuildOptions["embeddingArtifact"],
+): BuildOptions["embeddingArtifact"] {
+  if (artifact === undefined || method === "bm25") return undefined;
+  return acceptsEmbeddingArtifact(mod) ? artifact : undefined;
 }
