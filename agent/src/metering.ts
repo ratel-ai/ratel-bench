@@ -132,7 +132,7 @@ export interface MeterContext {
    * `transient`. Retry sleeps are paused out of the deadline, so only failed
    * attempts' own active time is the provider's; even an instant 429 flips it.
    */
-  retryStats?: Pick<RetryStats, "retries">;
+  retryStats?: Pick<RetryStats, "retries"> & Partial<Pick<RetryStats, "budgetMs">>;
 }
 
 const GATEWAY_NAMES = new Set<string>([GATEWAY_SEARCH_ID, GATEWAY_INVOKE_ID]);
@@ -160,7 +160,8 @@ export async function meter(
     error = (err as Error).message ?? String(err);
     errorClass = classifyError(err, { retries: ctx.retryStats?.retries });
   }
-  const wallMs = Date.now() - startedAt;
+  // Budget-guard time is the harness's, not the provider's (see `RetryStats.budgetMs`).
+  const wallMs = Math.max(0, Date.now() - startedAt - Math.round(ctx.retryStats?.budgetMs ?? 0));
 
   // `trace` feeds the judges: empty when generate threw, so an errored cell never
   // scores on its partial trace. `usage` meters what the cell spent either way.

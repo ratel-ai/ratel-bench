@@ -157,6 +157,28 @@ describe("dollarCost", () => {
   });
 });
 
+it("leaves the budget guard's time out of the cell's wall time", async () => {
+  const retryStats = { retries: 0, budgetMs: 0 };
+  const { cell } = await meter(
+    {
+      scenarioId: "s",
+      arm: "control-baseline",
+      model: "bedrock/m",
+      runIndex: 0,
+      catalogSize: 0,
+      poolSize: 0,
+      seed: 0,
+      retryStats,
+    },
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      retryStats.budgetMs = 60;
+      return { steps: [] };
+    },
+  );
+  expect(cell.wall_ms).toBeLessThan(30);
+});
+
 it("does not price a completed step whose provider omitted token usage", async () => {
   const { cell } = await meter(
     {
