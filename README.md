@@ -80,7 +80,7 @@ not prove inference entitlement. Confirm model access and quota before running t
 
 ```bash
 # Bedrock (after pricing): one model from each selected API family (Converse, Responses, Mantle chat)
-pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-haiku-4-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
+pnpm -F @ratel-ai/benchmark start --models bedrock/anthropic.claude-haiku-5-5,bedrock/openai.gpt-6-astra,bedrock/google.gemma-4-31b --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral
 
 # Vertex: Gemini plus Claude, using GOOGLE_VERTEX_PROJECT/LOCATION and ADC
 pnpm -F @ratel-ai/benchmark start --models gcp/gemini-2.5-pro,gcp/claude-sonnet-4-5@20250929 --scenarios 1 --arms control-baseline --runs 1 --max-steps 1 --concurrency 1 --no-judge --ephemeral

@@ -13,16 +13,16 @@
       "pricing": { "bedrock": { "inputPer1M": 10, "outputPer1M": 50, "cachedInputPer1M": 1, "cacheCreationPer1M": 12.5 }, "openai": { "inputPer1M": 10, "outputPer1M": 50, "cachedInputPer1M": 1, "cacheCreationPer1M": 12.5 } }
     },
     {
-      "id": "bedrock/openai.gpt-6-sol",
-      "aliases": ["openai/gpt-6-sol"],
-      "displayName": "GPT-6 Sol",
+      "id": "bedrock/openai.gpt-6.1-sol",
+      "aliases": ["openai/gpt-6.1-sol"],
+      "displayName": "GPT-6.1 Sol",
       "publisher": "OpenAI",
       "maxOutputTokens": 16384,
-      "bedrockProfile": "global.openai.gpt-6-sol",
+      "bedrockProfile": "global.openai.gpt-6.1-sol",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
       "bedrockApi": "responses",
-      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 }, "openai": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 2.5 }, "openai": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 2.5 } }
     },
     {
       "id": "bedrock/openai.gpt-6-luna",
@@ -61,28 +61,28 @@
       "pricing": { "bedrock": { "inputPer1M": 4, "outputPer1M": 20, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 5 }, "anthropic": { "inputPer1M": 4, "outputPer1M": 20, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 5 } }
     },
     {
-      "id": "bedrock/anthropic.claude-sonnet-5",
-      "aliases": ["anthropic/claude-sonnet-5"],
-      "displayName": "Claude Sonnet 5",
+      "id": "bedrock/anthropic.claude-sonnet-5-5",
+      "aliases": ["anthropic/claude-sonnet-5-5"],
+      "displayName": "Claude Sonnet 5.5",
       "publisher": "Anthropic",
       "maxOutputTokens": 16384,
-      "bedrockProfile": "global.anthropic.claude-sonnet-5",
+      "bedrockProfile": "global.anthropic.claude-sonnet-5-5",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
       "bedrockApi": "converse",
-      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 }, "anthropic": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 2.5 }, "anthropic": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 2.5 } }
     },
     {
-      "id": "bedrock/anthropic.claude-haiku-4-5",
-      "aliases": ["anthropic/claude-haiku-4-5"],
-      "displayName": "Claude Haiku 4.5",
+      "id": "bedrock/anthropic.claude-haiku-5-5",
+      "aliases": ["anthropic/claude-haiku-5-5"],
+      "displayName": "Claude Haiku 5.5",
       "publisher": "Anthropic",
       "maxOutputTokens": 16384,
-      "bedrockProfile": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "bedrockProfile": "global.anthropic.claude-haiku-5-5",
       "bedrockRegion": "eu-central-1",
       "bedrockEndpoint": "bedrock-runtime",
       "bedrockApi": "converse",
-      "pricing": { "bedrock": { "inputPer1M": 1, "outputPer1M": 5, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 1.25 }, "anthropic": { "inputPer1M": 1, "outputPer1M": 5, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 1.25 } }
+      "pricing": { "bedrock": { "inputPer1M": 0.1, "outputPer1M": 0.5, "cachedInputPer1M": 0.01, "cacheCreationPer1M": 0.125 }, "anthropic": { "inputPer1M": 0.1, "outputPer1M": 0.5, "cachedInputPer1M": 0.01, "cacheCreationPer1M": 0.125 } }
     },
     {
       "id": "bedrock/moonshotai.kimi-k3",
@@ -174,6 +174,42 @@
     }
   ],
   "historical": [
+    {
+      "id": "bedrock/openai.gpt-6-sol",
+      "aliases": ["openai/gpt-6-sol"],
+      "displayName": "GPT-6 Sol",
+      "publisher": "OpenAI",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.openai.gpt-6-sol",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "responses",
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 }, "openai": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
+    },
+    {
+      "id": "bedrock/anthropic.claude-sonnet-5",
+      "aliases": ["anthropic/claude-sonnet-5"],
+      "displayName": "Claude Sonnet 5",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-sonnet-5",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 }, "anthropic": { "inputPer1M": 2, "outputPer1M": 10, "cachedInputPer1M": 0.2, "cacheCreationPer1M": 2.5 } }
+    },
+    {
+      "id": "bedrock/anthropic.claude-haiku-4-5",
+      "aliases": ["anthropic/claude-haiku-4-5"],
+      "displayName": "Claude Haiku 4.5",
+      "publisher": "Anthropic",
+      "maxOutputTokens": 16384,
+      "bedrockProfile": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "bedrockRegion": "eu-central-1",
+      "bedrockEndpoint": "bedrock-runtime",
+      "bedrockApi": "converse",
+      "pricing": { "bedrock": { "inputPer1M": 1, "outputPer1M": 5, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 1.25 }, "anthropic": { "inputPer1M": 1, "outputPer1M": 5, "cachedInputPer1M": 0.1, "cacheCreationPer1M": 1.25 } }
+    },
     {
       "id": "bedrock/meta.llama4-scout-17b-instruct-v1:0",
       "displayName": "Llama 4 Scout 17B Instruct",
