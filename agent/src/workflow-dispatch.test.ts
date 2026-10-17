@@ -170,7 +170,7 @@ describe("prepareWorkflowDispatch", () => {
       runId: "manual_run-1",
       runOnlyModels: ["bedrock/openai.gpt-6-sol", "xai/model;touch-nope"],
       excludeModels: ["bedrock/openai.gpt-6-sol"],
-      notifyToEmails: ["dev@ratel.sh", "ops@example.com"],
+      notifyToEmails: ["ops@example.com"],
       modelConcurrency: 2,
       llmConcurrency: 16,
       campaignBudgetUsd: 125.5,

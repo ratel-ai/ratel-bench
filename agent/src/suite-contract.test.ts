@@ -72,12 +72,12 @@ describe("suite request contract v1", () => {
       excludeModels: ["bedrock/openai.gpt-6-sol", "bedrock/no-such-model"],
       modelConcurrency: 2,
       campaignBudgetUsd: 25.5,
-      notifyToEmails: [" DEV@RATEL.SH ", "a@example.org", "a@example.org"],
+      notifyToEmails: [" A@example.org ", "a@example.org"],
     });
     expect(request.models).toEqual(["xai/grok-4"]);
     expect(request.excludedModels).toEqual(["bedrock/openai.gpt-6-sol"]);
     expect(request.unmatchedExclusions).toEqual(["bedrock/no-such-model"]);
-    expect(request.notifyToEmails).toEqual(["dev@ratel.sh", "a@example.org"]);
+    expect(request.notifyToEmails).toEqual(["a@example.org"]);
     expect(request.modelConcurrency).toBe(2);
     expect(request.campaignBudgetUsd).toBe(25.5);
     expect(

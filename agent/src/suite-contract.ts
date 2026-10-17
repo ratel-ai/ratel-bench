@@ -224,7 +224,7 @@ export function normalizeSuiteRequest(raw: unknown): NormalizedSuiteRequest {
   if (models.some((model) => Buffer.byteLength(model) > 256))
     throw new Error("model identifier exceeds 256 bytes");
   const selectedSet = new Set(selected);
-  const notifyToEmails = ["dev@ratel.sh"];
+  const notifyToEmails: string[] = [];
   for (const value of input.notifyToEmails ?? []) {
     const email = value.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
@@ -232,6 +232,8 @@ export function normalizeSuiteRequest(raw: unknown): NormalizedSuiteRequest {
     }
     if (!notifyToEmails.includes(email)) notifyToEmails.push(email);
   }
+  // Explicit recipients replace the default address.
+  if (notifyToEmails.length === 0) notifyToEmails.push("dev@ratel.sh");
   if (notifyToEmails.length > 32) throw new Error("too many notification recipients");
   return {
     schemaVersion: 1,
