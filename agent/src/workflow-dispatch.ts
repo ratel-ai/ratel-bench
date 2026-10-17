@@ -4,7 +4,6 @@ import { normalizeSuiteRequest, resolveStablePair } from "./suite-contract.js";
 export type WorkflowDispatchInputs = {
   runOnlyModels: string;
   excludeModels: string;
-  notifyToEmails: string;
   modelConcurrency: string;
   llmConcurrency?: string;
   campaignBudgetUsd: string;
@@ -39,15 +38,10 @@ export function prepareWorkflowDispatch({
   }
   const runOnlyModels = csv(rawInputs.runOnlyModels)?.map(canonicalModelId);
   const excludeModels = csv(rawInputs.excludeModels)?.map(canonicalModelId) ?? [];
-  const notifyToEmails = csv(rawInputs.notifyToEmails) ?? [];
-  if (notifyToEmails.length > 20) {
-    throw new Error("notifyToEmails must contain at most 20 email addresses");
-  }
   const normalized = normalizeSuiteRequest({
     schemaVersion: 1,
     ...(runOnlyModels === undefined ? {} : { runOnlyModels }),
     excludeModels,
-    notifyToEmails,
     ...(rawInputs.modelConcurrency === ""
       ? {}
       : { modelConcurrency: numberInput(rawInputs.modelConcurrency, "modelConcurrency") }),
@@ -62,7 +56,6 @@ export function prepareWorkflowDispatch({
     runId,
     ...(runOnlyModels === undefined ? {} : { runOnlyModels }),
     excludeModels,
-    notifyToEmails: normalized.notifyToEmails,
     modelConcurrency: normalized.modelConcurrency,
     llmConcurrency: llmConcurrencyInput(rawInputs.llmConcurrency),
     campaignBudgetUsd: normalized.campaignBudgetUsd,

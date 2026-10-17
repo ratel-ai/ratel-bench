@@ -62,7 +62,8 @@ describe("suite request contract v1", () => {
     expect(request.models[14]).toBe("bedrock/nvidia.nemotron-super-3-120b");
     expect(request.modelConcurrency).toBe(1);
     expect(request.campaignBudgetUsd).toBe(1000);
-    expect(request.notifyToEmails).toEqual(["dev@ratel.sh"]);
+    // Recipients belong to the launcher (ratel-bench-aws), not the benchmark request.
+    expect(request).not.toHaveProperty("notifyToEmails");
   });
 
   it("replaces, canonicalizes, deduplicates, then excludes; reports absent exclusions", () => {
@@ -72,12 +73,10 @@ describe("suite request contract v1", () => {
       excludeModels: ["bedrock/openai.gpt-6-sol", "bedrock/no-such-model"],
       modelConcurrency: 2,
       campaignBudgetUsd: 25.5,
-      notifyToEmails: [" A@example.org ", "a@example.org"],
     });
     expect(request.models).toEqual(["xai/grok-4"]);
     expect(request.excludedModels).toEqual(["bedrock/openai.gpt-6-sol"]);
     expect(request.unmatchedExclusions).toEqual(["bedrock/no-such-model"]);
-    expect(request.notifyToEmails).toEqual(["a@example.org"]);
     expect(request.modelConcurrency).toBe(2);
     expect(request.campaignBudgetUsd).toBe(25.5);
     expect(
@@ -105,7 +104,9 @@ describe("suite request contract v1", () => {
     for (const value of [0, 17, 1.5]) {
       expect(() => normalizeSuiteRequest({ schemaVersion: 1, modelConcurrency: value })).toThrow();
     }
-    expect(() => normalizeSuiteRequest({ schemaVersion: 1, notifyToEmails: ["nope"] })).toThrow();
+    expect(() =>
+      normalizeSuiteRequest({ schemaVersion: 1, notifyToEmails: ["a@example.org"] }),
+    ).toThrow();
   });
 
   it("accepts campaign ceilings from one tick through the maximum safe tick", () => {
