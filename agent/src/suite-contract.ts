@@ -39,7 +39,6 @@ export const suiteRequestV1Schema = z
     excludeModels: modelList.optional(),
     modelConcurrency: z.number().int().min(1).max(MAX_MODEL_CONCURRENCY).optional(),
     campaignBudgetUsd: campaignBudgetSchema.optional(),
-    notifyToEmails: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -188,7 +187,6 @@ export type NormalizedSuiteRequest = {
   unmatchedExclusions: string[];
   modelConcurrency: number;
   campaignBudgetUsd: number;
-  notifyToEmails: string[];
 };
 export type ReleaseMetadata = z.infer<typeof releaseMetadataSchema>;
 export type StablePair = {
@@ -224,15 +222,6 @@ export function normalizeSuiteRequest(raw: unknown): NormalizedSuiteRequest {
   if (models.some((model) => Buffer.byteLength(model) > 256))
     throw new Error("model identifier exceeds 256 bytes");
   const selectedSet = new Set(selected);
-  const notifyToEmails = ["dev@ratel.sh"];
-  for (const value of input.notifyToEmails ?? []) {
-    const email = value.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-      throw new Error(`invalid notification email: ${JSON.stringify(value)}`);
-    }
-    if (!notifyToEmails.includes(email)) notifyToEmails.push(email);
-  }
-  if (notifyToEmails.length > 32) throw new Error("too many notification recipients");
   return {
     schemaVersion: 1,
     models,
@@ -240,7 +229,6 @@ export function normalizeSuiteRequest(raw: unknown): NormalizedSuiteRequest {
     unmatchedExclusions: excludes.filter((model) => !selectedSet.has(model)),
     modelConcurrency: input.modelConcurrency ?? 1,
     campaignBudgetUsd: input.campaignBudgetUsd ?? 1000,
-    notifyToEmails,
   };
 }
 

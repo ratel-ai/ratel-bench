@@ -47,7 +47,6 @@ describe("prepareWorkflowDispatch", () => {
       rawInputs: {
         runOnlyModels: "",
         excludeModels: "",
-        notifyToEmails: "",
         modelConcurrency: "",
         campaignBudgetUsd: "",
         runId: "",
@@ -61,7 +60,6 @@ describe("prepareWorkflowDispatch", () => {
     expect(prepared.options).toEqual({
       runId: "gh-123-1",
       excludeModels: [],
-      notifyToEmails: ["dev@ratel.sh"],
       modelConcurrency: 1,
       llmConcurrency: 16,
       campaignBudgetUsd: 1000,
@@ -90,7 +88,6 @@ describe("prepareWorkflowDispatch", () => {
       rawInputs: {
         runOnlyModels: "",
         excludeModels: "",
-        notifyToEmails: "",
         modelConcurrency: "",
         llmConcurrency,
         campaignBudgetUsd: "",
@@ -130,7 +127,6 @@ describe("prepareWorkflowDispatch", () => {
         rawInputs: {
           runOnlyModels: "",
           excludeModels: "",
-          notifyToEmails: "",
           modelConcurrency: "",
           llmConcurrency,
           campaignBudgetUsd: "",
@@ -150,12 +146,11 @@ describe("prepareWorkflowDispatch", () => {
     );
   });
 
-  it("serializes hostile values as data while exclusion wins and recipients deduplicate", () => {
+  it("serializes hostile values as data while exclusion wins", () => {
     const prepared = prepareWorkflowDispatch({
       rawInputs: {
         runOnlyModels: "bedrock/openai.gpt-6-sol,xai/model;touch-nope",
         excludeModels: "bedrock/openai.gpt-6-sol",
-        notifyToEmails: " Ops@example.com,ops@example.com ",
         modelConcurrency: "2",
         campaignBudgetUsd: "125.5",
         runId: "manual_run-1",
@@ -170,7 +165,6 @@ describe("prepareWorkflowDispatch", () => {
       runId: "manual_run-1",
       runOnlyModels: ["bedrock/openai.gpt-6-sol", "xai/model;touch-nope"],
       excludeModels: ["bedrock/openai.gpt-6-sol"],
-      notifyToEmails: ["dev@ratel.sh", "ops@example.com"],
       modelConcurrency: 2,
       llmConcurrency: 16,
       campaignBudgetUsd: 125.5,
@@ -186,7 +180,6 @@ describe("prepareWorkflowDispatch", () => {
       rawInputs: {
         runOnlyModels: "bedrock/a",
         excludeModels: "bedrock/a",
-        notifyToEmails: "",
         modelConcurrency: "1",
         campaignBudgetUsd: "1000",
         runId: "run-1",
@@ -206,18 +199,6 @@ describe("prepareWorkflowDispatch", () => {
         rawInputs: { ...base.rawInputs, excludeModels: "", modelConcurrency: "1; echo bad" },
       }),
     ).toThrow(/modelConcurrency/);
-    expect(() =>
-      prepareWorkflowDispatch({
-        ...base,
-        rawInputs: {
-          ...base.rawInputs,
-          excludeModels: "",
-          notifyToEmails: Array.from({ length: 21 }, (_, index) => `a${index}@example.com`).join(
-            ",",
-          ),
-        },
-      }),
-    ).toThrow(/at most 20/);
   });
 });
 

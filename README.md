@@ -39,9 +39,9 @@ an explicit `runOnlyModels` list replaces them, and `excludeModels` applies
 afterward. Unqualified model IDs mean Bedrock. Model concurrency defaults to
 one (maximum 16). `campaignBudgetUsd` defaults to a $1,000 ceiling across all
 model/API attempts in the campaign; requested ceilings must fit from one 10^-10 USD
-tick through the maximum safe integer tick. Extra notification
-addresses are validated and deduplicated with the mandatory `dev@ratel.sh`
-recipient; recipients stay outside the public artifact.
+tick through the maximum safe integer tick. Notification
+recipients are not part of this request: the ratel-bench-aws launcher sets and
+validates them, so they never pass through this code or the public artifact.
 
 The frozen manifest includes one stable compatible SDK/core pair, all three
 retrievers (BM25, dense, hybrid), the fixed BFCL/SR scenario and arm design,
@@ -100,7 +100,7 @@ the campaign CLI: `runOnlyModels`, `excludeModels`, `notifyToEmails`,
 `modelConcurrency`, `llmConcurrency` and `campaignBudgetUsd` (plus an optional idempotent
 `runId`). Omitted selection uses the 16 Bedrock defaults; exclusions win, model concurrency
 defaults to one, in-flight LLM calls per model job default to 16 (1-16), the aggregate
-model/API budget defaults to $1,000, and `dev@ratel.sh` is always notified. BFCL,
+model/API budget defaults to $1,000. Notification recipients are set by the ratel-bench-aws launcher. BFCL,
 SR-Agents and all three retrievers remain fixed parts of a full campaign. `llmConcurrency`
 only takes effect when the pinned `ratel-bench-aws` revision (`awsSha`) freezes it; older
 launchers ignore it and keep their frozen-request default of 2.

@@ -50,7 +50,6 @@ function prepareEnv(llmConcurrency: string | undefined): void {
   for (const name of [
     "RUN_ONLY_MODELS",
     "EXCLUDE_MODELS",
-    "NOTIFY_TO_EMAILS",
     "MODEL_CONCURRENCY",
     "CAMPAIGN_BUDGET_USD",
     "CAMPAIGN_RUN_ID",
